@@ -1,32 +1,39 @@
-name: "[master] Release"
+name: Release
 
 on:
- push:
-  paths-ignore:
-   - "**/*.md"
-   - ".vscode/**"
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
 
 jobs:
- Build:
-  uses: ./.github/workflows/build.yml
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
- Release:
-  name: Release latest on GitHub
-  needs: Build
-  runs-on: ubuntu-latest
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
 
-  steps:
-   - name: Download All Artifacts
-     uses: actions/download-artifact@v4
-     with:
-      name: luna-artifacts
-      path: ./dist/
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
-   - name: Publish latest release on GitHub
-     uses: marvinpinto/action-automatic-releases@latest
-     with:
-      repo_token: ${{ secrets.GITHUB_TOKEN }}
-      automatic_release_tag: latest
-      prerelease: false
-      title: Latest Release
-      files: ./dist/**
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build plugins
+        run: pnpm run build
+
+      - name: Release to GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Release
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
