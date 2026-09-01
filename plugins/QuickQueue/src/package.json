@@ -1,0 +1,7 @@
+{
+  "name": "@visiuun/quick-queue",
+  "version": "1.0.0",
+  "description": "Add tracks to queue or play them next with a single click directly from track rows",
+  "author": "visiuun",
+  "main": "src/index.ts"
+}
