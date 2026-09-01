@@ -1,22 +1,26 @@
 {
-	"name": "@luna/template",
-	"description": "Template repo for making your own luna plugins",
-	"type": "module",
-	"scripts": {
-		"watch": "concurrently \"pnpm:build --watch\" pnpm:serve",
-		"build": "rimraf ./dist && tsx esbuild.config.ts",
-		"serve": "http-server ./dist -p 3000 -s --cors -c-1"
-	},
-	"devDependencies": {
-		"@types/node": "^25.0.9",
-		"@types/react": "^19.2.8",
-		"@types/react-dom": "^19.2.3",
-		"concurrently": "^9.2.1",
-		"http-server": "^14.1.1",
-		"luna": "github:Inrixia/TidaLuna",
-		"oby": "^15.1.2",
-		"rimraf": "^6.1.2",
-		"tsx": "^4.21.0",
-		"typescript": "^5.9.3"
-	}
+  "name": "Vis's Luna Plugins",
+  "description": "A collection of plugins for TidaLuna.",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "rimraf ./dist && tsx esbuild.config.ts",
+    "serve": "http-server ./dist -p 3000 -s --cors -c-1",
+    "watch": "concurrently \"pnpm:build --watch\" pnpm:serve"
+  },
+  "devDependencies": {
+    "@luna/core": "https://github.com/Inrixia/TidaLuna/releases/latest/download/core.tar.gz",
+    "@luna/lib": "https://github.com/Inrixia/TidaLuna/releases/latest/download/lib.tar.gz",
+    "@luna/ui": "https://github.com/Inrixia/TidaLuna/releases/latest/download/ui.tar.gz",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "concurrently": "^9.1.0",
+    "esbuild": "^0.24.0",
+    "http-server": "^14.1.1",
+    "luna": "https://github.com/Inrixia/TidaLuna/releases/latest/download/luna.tar.gz",
+    "react": "^18.3.1",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
 }
