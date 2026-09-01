@@ -1,2 +1,4 @@
 packages:
- - "plugins/*"
+  - "plugins/*"
+allowBuilds:
+  esbuild: false

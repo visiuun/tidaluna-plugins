@@ -1,0 +1,7 @@
+{
+  "name": "@visiuun/tidal-genres",
+  "version": "1.0.0",
+  "description": "Displays live music genres with styling in TIDAL's player bar",
+  "author": "visiuun",
+  "main": "src/index.ts"
+}

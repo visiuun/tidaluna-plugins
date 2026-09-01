@@ -1,0 +1,7 @@
+{
+  "name": "@myplugins/track-overlay",
+  "version": "1.0.0",
+  "description": "Displays a floating track info overlay test",
+  "author": "YourName",
+  "main": "src/index.ts"
+}
