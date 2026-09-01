@@ -1,6 +1,6 @@
 {
   "name": "Vis's Luna Plugins",
-  "description": "A collection of clean, studio-grade plugins for TidaLuna.",
+  "description": "A collection of plugins for TidaLuna.",
   "version": "1.0.0",
   "type": "module",
   "private": true,
