@@ -5,7 +5,7 @@
   "author": {
     "name": "visiuun",
     "url": "https://github.com/visiuun/tidaluna-plugins",
-    "avatarUrl": " http://hanabot.xyz/lookup?api=avatar&id=636585243846901802&size=512"
+    "avatarUrl": "http://hanabot.xyz/lookup?api=avatar&id=636585243846901802&size=512"
   },
   "main": "src/index.ts",
   "type": "module"
