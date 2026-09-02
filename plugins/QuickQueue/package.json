@@ -2,6 +2,11 @@
   "name": "@visiuun/quick-queue",
   "version": "1.1.0",
   "description": "Add tracks to queue or play them next with a single click directly from track rows",
-  "author": "visiuun",
-  "main": "src/index.ts"
+  "author": {
+    "name": "visiuun",
+    "url": "https://github.com/visiuun/tidaluna-plugins",
+    "avatarUrl": " http://hanabot.xyz/lookup?api=avatar&id=636585243846901802&size=512 "
+  },
+  "main": "src/index.ts",
+  "type": "module"
 }
