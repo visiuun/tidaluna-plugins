@@ -12,9 +12,9 @@ const STYLE_ID = "luna-quick-queue-styles";
 const BUTTON_CLASS = "luna-quick-queue-btn";
 
 const ICONS = {
-  queue: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h11M3 12h7M3 18h7"/><path d="M18 9v6M15 12h6"/></svg>`,
-  playNext: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h11M3 12h7M3 18h7"/><path d="M18 8l3 3-3 3M21 11h-5"/></svg>`,
-  success: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
+  queue: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="fill:none!important;"><path d="M3 6h11M3 12h7M3 18h7" style="fill:none!important;"/><path d="M18 9v6M15 12h6" style="fill:none!important;"/></svg>`,
+  playNext: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="fill:none!important;"><path d="M3 6h11M3 12h7M3 18h7" style="fill:none!important;"/><path d="M18 8l3 3-3 3M21 11h-5" style="fill:none!important;"/></svg>`,
+  success: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="fill:none!important;"><path d="M20 6L9 17L4 12" style="fill:none!important;stroke:currentColor!important;stroke-width:2.5!important;"/></svg>`,
 };
 
 function injectStyles(): void {
@@ -44,12 +44,12 @@ function injectStyles(): void {
       padding: 0;
       margin: 0;
       background: transparent;
-      border: none;
+      border: 1px solid transparent;
       border-radius: 50%;
       color: rgba(255, 255, 255, 0.65);
       cursor: pointer;
       opacity: 0;
-      transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+      transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
       flex-shrink: 0;
       user-select: none;
       align-self: center;
@@ -57,13 +57,21 @@ function injectStyles(): void {
       line-height: 1;
       vertical-align: middle;
       z-index: 10;
+      outline: none !important;
     }
 
-    .${BUTTON_CLASS} svg {
+    .${BUTTON_CLASS}:focus,
+    .${BUTTON_CLASS}:focus-visible {
+      outline: none !important;
+      box-shadow: none !important;
+    }
+
+    .${BUTTON_CLASS} svg,
+    .${BUTTON_CLASS} svg path,
+    .${BUTTON_CLASS} svg polyline {
       display: block;
-      width: 18px;
-      height: 18px;
       pointer-events: none;
+      fill: none !important;
     }
 
     div[role="row"]:hover .${BUTTON_CLASS},
@@ -90,9 +98,10 @@ function injectStyles(): void {
 
     .${BUTTON_CLASS}.success {
       opacity: 1 !important;
-      color: #00e6cc !important;
-      background: rgba(0, 230, 204, 0.18) !important;
-      transform: scale(1.12);
+      color: #33ffee !important;
+      background: rgba(51, 255, 238, 0.18) !important;
+      border: 1px solid rgba(51, 255, 238, 0.35) !important;
+      transform: scale(1.08);
     }
   `;
 

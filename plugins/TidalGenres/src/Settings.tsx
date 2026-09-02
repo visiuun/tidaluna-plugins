@@ -27,16 +27,22 @@ export const Settings = () => {
   const [position, setPosition] = React.useState(settings.position);
   const [showMultiple, setShowMultiple] = React.useState(settings.showMultiple);
 
+  const updateSetting = <K extends keyof PluginSettings>(key: K, val: PluginSettings[K]) => {
+    settings[key] = val;
+    window.dispatchEvent(new CustomEvent("luna:genres:updated"));
+  };
+
   return (
     <LunaSettings>
       <LunaSelectSetting
         title="Badge Position"
         desc="Where to display the genre badges inside the player bar"
         value={position}
+        selected={position}
         onChange={(e: any) => {
-          const val = e.target.value as GenrePosition;
-          setPosition((settings.position = val));
-          window.dispatchEvent(new CustomEvent("luna:genres:updated"));
+          const val = (e?.target?.value ?? e) as GenrePosition;
+          setPosition(val);
+          updateSetting("position", val);
         }}
       >
         <LunaSelectItem value="right">To the Right (Next to Favorite)</LunaSelectItem>
@@ -47,40 +53,48 @@ export const Settings = () => {
       <LunaSwitchSetting
         title="Background Pill"
         desc="Display genre tags inside a dark pill badge"
+        checked={showBackground}
         value={showBackground}
         onChange={(_, checked) => {
-          setShowBackground((settings.showBackground = checked));
-          window.dispatchEvent(new CustomEvent("luna:genres:updated"));
+          const val = checked ?? !showBackground;
+          setShowBackground(val);
+          updateSetting("showBackground", val);
         }}
       />
 
       <LunaSwitchSetting
         title="Show Border"
         desc="Add a subtle border outline around the genre badges"
+        checked={showBorder}
         value={showBorder}
         onChange={(_, checked) => {
-          setShowBorder((settings.showBorder = checked));
-          window.dispatchEvent(new CustomEvent("luna:genres:updated"));
+          const val = checked ?? !showBorder;
+          setShowBorder(val);
+          updateSetting("showBorder", val);
         }}
       />
 
       <LunaSwitchSetting
         title="Quality Matching Background"
         desc="Color-code the badge to match track quality"
+        checked={matchQualityColor}
         value={matchQualityColor}
         onChange={(_, checked) => {
-          setMatchQualityColor((settings.matchQualityColor = checked));
-          window.dispatchEvent(new CustomEvent("luna:genres:updated"));
+          const val = checked ?? !matchQualityColor;
+          setMatchQualityColor(val);
+          updateSetting("matchQualityColor", val);
         }}
       />
 
       <LunaSwitchSetting
         title="Show Multiple Genres"
-        desc="Display up to 3-4 genres when available instead of only the primary one"
+        desc="Display up to 3 genres when available instead of only the primary one"
+        checked={showMultiple}
         value={showMultiple}
         onChange={(_, checked) => {
-          setShowMultiple((settings.showMultiple = checked));
-          window.dispatchEvent(new CustomEvent("luna:genres:updated"));
+          const val = checked ?? !showMultiple;
+          setShowMultiple(val);
+          updateSetting("showMultiple", val);
         }}
       />
     </LunaSettings>
