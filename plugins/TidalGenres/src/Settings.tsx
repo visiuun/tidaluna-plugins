@@ -10,6 +10,7 @@ export type PluginSettings = {
   matchQualityColor: boolean;
   position: GenrePosition;
   showMultiple: boolean;
+  showInTracklist: boolean;
 };
 
 export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("TidalGenres", {
@@ -18,6 +19,7 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("Ti
   matchQualityColor: false,
   position: "right",
   showMultiple: true,
+  showInTracklist: true,
 });
 
 export const Settings = () => {
@@ -26,6 +28,7 @@ export const Settings = () => {
   const [matchQualityColor, setMatchQualityColor] = React.useState(settings.matchQualityColor);
   const [position, setPosition] = React.useState(settings.position);
   const [showMultiple, setShowMultiple] = React.useState(settings.showMultiple);
+  const [showInTracklist, setShowInTracklist] = React.useState(settings.showInTracklist);
 
   const updateSetting = <K extends keyof PluginSettings>(key: K, val: PluginSettings[K]) => {
     settings[key] = val;
@@ -49,6 +52,18 @@ export const Settings = () => {
         <LunaSelectItem value="under">Below Artist</LunaSelectItem>
         <LunaSelectItem value="over">Above Track Title</LunaSelectItem>
       </LunaSelectSetting>
+
+      <LunaSwitchSetting
+        title="Show in Tracklist"
+        desc="Display genre tags next to track titles in playlists and albums"
+        checked={showInTracklist}
+        value={showInTracklist}
+        onChange={(_, checked) => {
+          const val = checked ?? !showInTracklist;
+          setShowInTracklist(val);
+          updateSetting("showInTracklist", val);
+        }}
+      />
 
       <LunaSwitchSetting
         title="Background Pill"

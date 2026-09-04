@@ -1,7 +1,7 @@
 {
   "name": "@visiuun/tidal-genres",
-  "version": "1.1.0",
-  "description": "Displays live music genres with styling in TIDAL's player bar",
+  "version": "1.2.0",
+  "description": "Displays live music genres with styling in TIDAL's player bar and tracklists",
   "author": {
     "name": "visiuun",
     "url": "https://github.com/visiuun/tidaluna-plugins",

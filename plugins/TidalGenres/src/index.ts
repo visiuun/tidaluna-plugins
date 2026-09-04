@@ -229,49 +229,193 @@ unloads.add(() => {
   genreContainer.remove();
 });
 
-// 3. Fetch Genres from Last.fm + iTunes (Limited to 3 Genres)
+// 3. Persistent Cache & Rate-Limited Genre Fetching
 const genreCache = new Map<string, string[]>();
+const pendingRequests = new Map<string, Promise<string[]>>();
+const CACHE_STORAGE_KEY = "tidal_genres_cache_v1";
 
-async function fetchGenres(artist: string, track: string): Promise<string[]> {
-  const cacheKey = `${artist} - ${track}`.toLowerCase();
-  if (genreCache.has(cacheKey)) return genreCache.get(cacheKey)!;
+function loadPersistentCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      for (const [k, v] of Object.entries(parsed)) {
+        if (Array.isArray(v)) {
+          genreCache.set(k, v);
+        }
+      }
+    }
+  } catch {}
+}
+loadPersistentCache();
 
+function saveToPersistentCache(key: string, genres: string[]) {
+  try {
+    const raw = localStorage.getItem(CACHE_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    parsed[key] = genres;
+    const keys = Object.keys(parsed);
+    if (keys.length > 1500) {
+      delete parsed[keys[0]];
+    }
+    localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(parsed));
+  } catch {}
+}
+
+interface QueueTask {
+  artist: string;
+  track: string;
+  key: string;
+  badge?: HTMLElement | null;
+  isPlayer?: boolean;
+  resolve: (res: string[]) => void;
+  reject: (err: any) => void;
+}
+
+const fetchQueue: QueueTask[] = [];
+let isQueueRunning = false;
+
+let itunesCooldownUntil = 0;
+let lastFmCooldownUntil = 0;
+
+function isElementVisible(el: HTMLElement | null): boolean {
+  if (!el || !el.isConnected) return false;
+  const rect = el.getBoundingClientRect();
+  const windowHeight = window.innerHeight || document.documentElement.clientHeight;
+  return rect.top < windowHeight + 150 && rect.bottom > -150;
+}
+
+async function executeNetworkFetch(artist: string, track: string): Promise<string[]> {
   let genres: string[] = [];
   const artistParts = artist.toLowerCase().split(/,|&|feat\.|ft\./g).map((s) => s.trim());
 
-  try {
-    const lfmUrl = `https://ws.audioscrobbler.com/2.0/?method=track.gettoptags&artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}&api_key=b25b959554ed76058ac220b7b2e0a026&format=json`;
-    const res = await fetch(lfmUrl);
-    const data = await res.json();
-    if (data?.toptags?.tag && Array.isArray(data.toptags.tag)) {
-      genres = data.toptags.tag
-        .map((t: { name: string }) => t.name)
-        .filter((name: string) => {
-          const lower = name.toLowerCase();
-          return (
-            !/^\d{4}$/.test(lower) &&
-            !/seen live|favorites|favourite|tracks i own|loved/i.test(lower) &&
-            !artistParts.some((part) => part.length > 2 && lower.includes(part))
-          );
-        })
-        .slice(0, 3);
-    }
-  } catch (e) {}
-
-  if (genres.length === 0) {
+  // 1. Try Last.fm
+  if (Date.now() >= lastFmCooldownUntil) {
     try {
-      const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(artist + " " + track)}&entity=song&limit=1`;
-      const res = await fetch(itunesUrl);
-      const data = await res.json();
-      if (data?.results?.[0]?.primaryGenreName) {
-        genres.push(data.results[0].primaryGenreName);
+      const lfmUrl = `https://ws.audioscrobbler.com/2.0/?method=track.gettoptags&artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}&api_key=b25b959554ed76058ac220b7b2e0a026&format=json`;
+      const res = await fetch(lfmUrl);
+      if (res.status === 429) {
+        lastFmCooldownUntil = Date.now() + 30000;
+      } else if (res.ok) {
+        const data = await res.json();
+        if (data?.toptags?.tag && Array.isArray(data.toptags.tag)) {
+          genres = data.toptags.tag
+            .map((t: { name: string }) => t.name)
+            .filter((name: string) => {
+              const lower = name.toLowerCase();
+              return (
+                !/^\d{4}$/.test(lower) &&
+                !/seen live|favorites|favourite|tracks i own|loved/i.test(lower) &&
+                !artistParts.some((part) => part.length > 2 && lower.includes(part))
+              );
+            })
+            .slice(0, 3);
+        }
       }
     } catch (e) {}
   }
 
-  genres = genres.map((g) => g.charAt(0).toUpperCase() + g.slice(1));
-  genreCache.set(cacheKey, genres);
-  return genres;
+  // 2. Fallback to iTunes only if Last.fm found nothing and iTunes is not in cooldown
+  if (genres.length === 0 && Date.now() >= itunesCooldownUntil) {
+    try {
+      const cleanArtist = artistParts[0] || artist;
+      const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(cleanArtist + " " + track)}&entity=song&limit=1`;
+      const res = await fetch(itunesUrl);
+      if (res.status === 403 || res.status === 429) {
+        itunesCooldownUntil = Date.now() + 60000;
+      } else if (res.ok) {
+        const data = await res.json();
+        if (data?.results?.[0]?.primaryGenreName) {
+          genres.push(data.results[0].primaryGenreName);
+        }
+      }
+    } catch (e) {}
+  }
+
+  return genres.map((g) => g.charAt(0).toUpperCase() + g.slice(1));
+}
+
+async function runQueue() {
+  if (isQueueRunning) return;
+  isQueueRunning = true;
+
+  while (fetchQueue.length > 0) {
+    const task = fetchQueue.shift();
+    if (!task) break;
+
+    // Skip fetching if the row has already scrolled off-screen
+    if (!task.isPlayer && task.badge && !isElementVisible(task.badge)) {
+      pendingRequests.delete(task.key);
+      task.resolve([]);
+      continue;
+    }
+
+    if (genreCache.has(task.key)) {
+      task.resolve(genreCache.get(task.key)!);
+      continue;
+    }
+
+    try {
+      const genres = await executeNetworkFetch(task.artist, task.track);
+      genreCache.set(task.key, genres);
+      saveToPersistentCache(task.key, genres);
+      task.resolve(genres);
+    } catch (e) {
+      task.resolve([]);
+    }
+
+    // Paced interval (850ms) to stay within safe API limits
+    await new Promise((r) => setTimeout(r, 850));
+  }
+
+  isQueueRunning = false;
+}
+
+function queueFetch(
+  artist: string,
+  track: string,
+  key: string,
+  highPriority = false,
+  badge?: HTMLElement | null
+): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const task: QueueTask = {
+      artist,
+      track,
+      key,
+      badge,
+      isPlayer: highPriority,
+      resolve,
+      reject,
+    };
+    if (highPriority) {
+      fetchQueue.unshift(task);
+    } else {
+      fetchQueue.push(task);
+    }
+    runQueue();
+  });
+}
+
+async function fetchGenres(
+  artist: string,
+  track: string,
+  highPriority = false,
+  badge?: HTMLElement | null
+): Promise<string[]> {
+  const cacheKey = `${artist} - ${track}`.toLowerCase();
+  if (genreCache.has(cacheKey)) return genreCache.get(cacheKey)!;
+
+  if (pendingRequests.has(cacheKey)) {
+    return pendingRequests.get(cacheKey)!;
+  }
+
+  const promise = queueFetch(artist, track, cacheKey, highPriority, badge).finally(() => {
+    pendingRequests.delete(cacheKey);
+  });
+
+  pendingRequests.set(cacheKey, promise);
+  return promise;
 }
 
 // 4. Dynamic Quality Color Extraction
@@ -541,18 +685,188 @@ function mountBadge() {
   }
 }
 
-const mountObserver = new MutationObserver(mountBadge);
+// 7. Tracklist Badges Implementation
+function getArtistNameFromRow(row: HTMLElement): string {
+  const artistLinks = row.querySelectorAll(
+    'div[data-test="track-row-artist"] a, div[class*="_artistColumn_"] a, div[class*="_artistsInTrackCell_"] a'
+  );
+  if (artistLinks.length > 0) {
+    return Array.from(artistLinks)
+      .map((a) => a.textContent?.trim() || "")
+      .filter(Boolean)
+      .join(", ");
+  }
+  const artistCol = row.querySelector(
+    'div[data-test="track-row-artist"], div[class*="_artistColumn_"], div[class*="_artistsInTrackCell_"]'
+  );
+  return artistCol?.textContent?.trim() || "";
+}
+
+function getTrackTitleFromRow(row: HTMLElement): string {
+  const titleEl = row.querySelector('span[data-test="table-cell-title"], span[class*="_titleText_"]');
+  return titleEl?.getAttribute("title") || titleEl?.textContent?.trim() || "";
+}
+
+function renderTracklistBadge(container: HTMLElement, genres: string[]) {
+  container.innerHTML = "";
+  if (!genres || genres.length === 0) {
+    container.style.display = "none";
+    return;
+  }
+  container.style.setProperty("display", "inline-flex", "important");
+
+  const displayList = settings.showMultiple ? genres.slice(0, 2) : genres.slice(0, 1);
+
+  displayList.forEach((genre) => {
+    const tag = document.createElement("span");
+    tag.textContent = genre;
+
+    const hasBg = settings.showBackground;
+    const showBorder = settings.showBorder;
+
+    tag.style.setProperty("display", "inline-flex", "important");
+    tag.style.setProperty("align-items", "center", "important");
+    tag.style.setProperty("justify-content", "center", "important");
+    tag.style.setProperty("height", "18px", "important");
+    tag.style.setProperty("box-sizing", "border-box", "important");
+    tag.style.setProperty("color", "#c3c3c8", "important");
+    tag.style.setProperty("background-color", hasBg ? "rgba(255, 255, 255, 0.08)" : "transparent", "important");
+    tag.style.setProperty("border", showBorder ? "1px solid rgba(255, 255, 255, 0.14)" : "none", "important");
+    tag.style.setProperty("padding", hasBg ? "0 5px" : "0 2px", "important");
+    tag.style.setProperty("border-radius", "3px", "important");
+    tag.style.setProperty("font-family", "monospace, system-ui, sans-serif", "important");
+    tag.style.setProperty("font-size", "9.5px", "important");
+    tag.style.setProperty("letter-spacing", "0.2px", "important");
+    tag.style.setProperty("white-space", "nowrap", "important");
+    tag.style.setProperty("line-height", "1", "important");
+    tag.style.setProperty("max-width", "max-content", "important");
+    tag.style.setProperty("flex-shrink", "0", "important");
+    tag.style.setProperty("pointer-events", "none", "important");
+    tag.style.setProperty("user-select", "none", "important");
+
+    container.appendChild(tag);
+  });
+}
+
+function loadGenreForRow(row: HTMLElement) {
+  if (!settings.showInTracklist) return;
+
+  const titleCell =
+    row.querySelector<HTMLElement>('div[class*="_titleCell_"]') ||
+    row.querySelector<HTMLElement>('div[data-test="table-row-title"] > div');
+  const titleSpan = row.querySelector<HTMLElement>('span[data-test="table-cell-title"], span[class*="_titleText_"]');
+  if (!titleCell || !titleSpan) return;
+
+  const track = getTrackTitleFromRow(row);
+  const artist = getArtistNameFromRow(row);
+  if (!track || !artist) return;
+
+  const trackId = row.getAttribute("data-track-id") || titleSpan.getAttribute("data-id") || "";
+  const trackKey = `${artist} - ${track}`.toLowerCase();
+
+  let badge = titleCell.querySelector<HTMLElement>(".tidal-genres-tracklist-badge");
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = "tidal-genres-tracklist-badge";
+    badge.style.setProperty("display", "inline-flex", "important");
+    badge.style.setProperty("align-items", "center", "important");
+    badge.style.setProperty("gap", "4px", "important");
+    badge.style.setProperty("margin-left", "6px", "important");
+    badge.style.setProperty("flex-shrink", "0", "important");
+    badge.style.setProperty("vertical-align", "middle", "important");
+    titleSpan.after(badge);
+  }
+
+  if (badge.dataset.trackId === trackId && badge.dataset.trackKey === trackKey && badge.dataset.loaded === "true") {
+    return;
+  }
+
+  badge.dataset.trackId = trackId;
+  badge.dataset.trackKey = trackKey;
+
+  const cached = genreCache.get(trackKey);
+  if (cached) {
+    badge.dataset.loaded = "true";
+    renderTracklistBadge(badge, cached);
+    return;
+  }
+
+  fetchGenres(artist, track, false, badge).then((genres) => {
+    if (!badge || !badge.isConnected) return;
+    if (badge.dataset.trackKey !== trackKey) return;
+    badge.dataset.loaded = "true";
+    renderTracklistBadge(badge, genres);
+  });
+}
+
+// Lazy Loading with IntersectionObserver
+let rowIntersectionObserver: IntersectionObserver | null = new IntersectionObserver(
+  (entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        const row = entry.target as HTMLElement;
+        loadGenreForRow(row);
+      }
+    });
+  },
+  {
+    root: null,
+    rootMargin: "60px 0px 60px 0px",
+    threshold: 0.01,
+  }
+);
+
+unloads.add(() => {
+  rowIntersectionObserver?.disconnect();
+  rowIntersectionObserver = null;
+});
+
+function processTracklistRows() {
+  if (!settings.showInTracklist) {
+    document.querySelectorAll(".tidal-genres-tracklist-badge").forEach((el) => el.remove());
+    return;
+  }
+
+  const rows = document.querySelectorAll<HTMLElement>('div[data-test="tracklist-row"]');
+  rows.forEach((row) => {
+    if (rowIntersectionObserver) {
+      rowIntersectionObserver.observe(row);
+    }
+  });
+}
+
+let tracklistThrottle: any = null;
+function scheduleTracklistUpdate() {
+  if (tracklistThrottle) return;
+  tracklistThrottle = setTimeout(() => {
+    tracklistThrottle = null;
+    processTracklistRows();
+  }, 120);
+}
+
+unloads.add(() => {
+  if (tracklistThrottle) clearTimeout(tracklistThrottle);
+  document.querySelectorAll(".tidal-genres-tracklist-badge").forEach((el) => el.remove());
+});
+
+// 8. Observers & Listeners
+const mountObserver = new MutationObserver(() => {
+  mountBadge();
+  scheduleTracklistUpdate();
+});
 mountObserver.observe(document.body, { childList: true, subtree: true });
 mountBadge();
+scheduleTracklistUpdate();
 
 unloads.add(() => {
   mountObserver.disconnect();
 });
 
-// 7. Live Settings Listener
+// 9. Live Settings Listener
 const onSettingsChanged = () => {
   mountBadge();
   renderBadges();
+  processTracklistRows();
 };
 window.addEventListener("luna:genres:updated", onSettingsChanged);
 
@@ -560,7 +874,7 @@ unloads.add(() => {
   window.removeEventListener("luna:genres:updated", onSettingsChanged);
 });
 
-// 8. Track Watcher
+// 10. Track Watcher (Player Bar)
 let lastSong = "";
 async function updateForCurrentSong() {
   const titleEl =
@@ -580,7 +894,7 @@ async function updateForCurrentSong() {
   lastSong = currentKey;
 
   mountBadge();
-  lastGenres = await fetchGenres(artist, title);
+  lastGenres = await fetchGenres(artist, title, true);
   renderBadges();
 }
 
