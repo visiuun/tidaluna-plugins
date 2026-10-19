@@ -12,7 +12,21 @@ A collection of plugins for **[TidaLuna](https://github.com/Inrixia/TidaLuna)**.
    ```text
    https://github.com/visiuun/tidaluna-plugins/releases/download/latest/store.json
    ```
-4. Press Enter to load **Vis's Luna Plugins**, then click **Install** on `@visiuun/tidal-genres`.
+4. Press Enter to load **Vis's Luna Plugins**, then click **Install** on the plugins you want (e.g. `@visiuun/3d-cover`, `@visiuun/tidal-genres`, `@visiuun/quick-queue`).
+
+---
+
+## Plugins
+
+### 3D Cover (`@visiuun/3d-cover`)
+
+Turns the now playing cover into a 2.5D parallax scene that moves with TIDAL's cover tilt when you hover it.
+
+- Depth is generated **locally** with Depth-Anything-V2 (WebGPU when available, CPU otherwise). The model downloads once (~27MB for Small) and is kept on disk.
+- Generation starts 1.5s after a track begins playing (skipped tracks are never processed), and the next track is prepared ahead of time. Hovering a cover that isn't ready yet generates it immediately.
+- Every generated depth map is saved on disk (~7KB each), so a cover is only ever processed once.
+- Rendering is a single WebGL shader that ray-marches the depth map, so foreground correctly covers background and the gaps behind edges are filled from the background.
+- Settings: model (Small/Base), depth shift, focal plane, edge anti-smear, fallback mouse smoothing, invert direction, clear depth cache, clear downloaded model.
 
 ---
 
