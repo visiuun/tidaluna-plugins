@@ -24,7 +24,7 @@ jobs:
           node-version: 22
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --no-frozen-lockfile --update-checksums
 
       - name: Build plugins
         run: pnpm run build
