@@ -1,8 +1,8 @@
 import React from "react";
 import { settings, type PluginSettings } from "./config";
-import { flush, markDirty, resetAll, state } from "./db";
+import { exportData, flush, importData, markDirty, resetAll, state } from "./db";
 import { getStatus, onStatus, runDiscovery } from "./engine";
-import { clearProfile, getDataDir } from "./store.native";
+import { clearProfile, getDataDir, openBackup, saveBackup } from "./store.native";
 
 export { settings };
 
@@ -75,6 +75,7 @@ export const Settings = () => {
   const { LunaButtonSetting, LunaNumberSetting, LunaSettings, LunaSwitchSetting } = window.luna.ui!;
   const [running, setRunning] = React.useState(getStatus().running);
   const [busy, setBusy] = React.useState(false);
+  const [backup, setBackup] = React.useState<{ busy?: "export" | "import"; message?: string }>({});
   const [dir, setDir] = React.useState("");
   const [switches, setSwitches] = React.useState({ ...settings });
 
@@ -164,6 +165,51 @@ export const Settings = () => {
         }}
       >
         Reset
+      </LunaButtonSetting>
+
+      <LunaButtonSetting
+        title="Export all"
+        desc={backup.busy !== "import" && backup.message ? backup.message : "Save everything TrueTaste has learned (listens, 👍/👎, taste history, trained ranker, settings) to a JSON file"}
+        loading={backup.busy === "export"}
+        disabled={!!backup.busy}
+        onClick={async () => {
+          setBackup({ busy: "export" });
+          try {
+            await flush();
+            const date = new Date().toISOString().slice(0, 10);
+            const file = await saveBackup(exportData({ ...settings }), `truetaste-backup-${date}.json`);
+            setBackup({ message: file ? `Exported to ${file}` : undefined });
+          } catch (err) {
+            setBackup({ message: `Export failed: ${(err as Error).message}` });
+          }
+        }}
+      >
+        Export
+      </LunaButtonSetting>
+
+      <LunaButtonSetting
+        title="Import all"
+        desc="Replace all TrueTaste data and settings with a backup file. Your TIDAL library is untouched"
+        loading={backup.busy === "import"}
+        disabled={!!backup.busy || running}
+        onClick={async () => {
+          setBackup({ busy: "import" });
+          try {
+            const json = await openBackup();
+            if (!json) return setBackup({});
+            const imported = importData(json);
+            for (const key of Object.keys(settings) as (keyof PluginSettings)[]) {
+              if (key in imported && typeof imported[key] === typeof settings[key]) (settings as any)[key] = imported[key];
+            }
+            setSwitches({ ...settings });
+            await flush();
+            setBackup({ message: `Imported: ${state.events.length} listens, ${Object.keys(state.feedback ?? {}).length} 👍/👎, ${state.trainedExamples} trained reactions` });
+          } catch (err) {
+            setBackup({ message: `Import failed: ${(err as Error).message}` });
+          }
+        }}
+      >
+        Import
       </LunaButtonSetting>
 
     </LunaSettings>

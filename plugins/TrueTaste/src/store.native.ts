@@ -72,3 +72,36 @@ export const removeLegacyModels = () => rm(path.join(dataDir(), "models"), { rec
 export const clearProfile = async () => {
   for (const name of ["state", "tracks", "artists", "embeddings"]) await removeDoc(name);
 };
+
+// ------------------ BACKUP FILES ------------------
+// Native dialogs: browser-style downloads aren't reliable inside TIDAL
+const jsonFilter = [{ name: "TrueTaste backup", extensions: ["json"] }];
+// TIDAL provides Electron at runtime; this repo has no Electron types, so only what's used is typed here
+type DialogResult = { canceled: boolean; filePath?: string; filePaths: string[] };
+const electron = () =>
+  require("electron") as {
+  BrowserWindow: { getFocusedWindow(): object | null };
+  dialog: {
+    showSaveDialog(...args: unknown[]): Promise<DialogResult>;
+    showOpenDialog(...args: unknown[]): Promise<DialogResult>;
+  };
+};
+
+export const saveBackup = async (json: string, fileName: string): Promise<string | null> => {
+  const { BrowserWindow, dialog } = electron();
+  const win = BrowserWindow.getFocusedWindow();
+  const opts = { title: "Export TrueTaste data", defaultPath: path.join(homedir(), "Downloads", fileName), filters: jsonFilter };
+  const res = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts);
+  if (res.canceled || !res.filePath) return null;
+  await writeFile(res.filePath, json, "utf8");
+  return res.filePath;
+};
+
+export const openBackup = async (): Promise<string | null> => {
+  const { BrowserWindow, dialog } = electron();
+  const win = BrowserWindow.getFocusedWindow();
+  const opts = { title: "Import TrueTaste data", properties: ["openFile" as const], filters: jsonFilter };
+  const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+  if (res.canceled || !res.filePaths[0]) return null;
+  return readFile(res.filePaths[0], "utf8");
+};

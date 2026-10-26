@@ -32,7 +32,7 @@ A collection of plugins for **[TidaLuna](https://github.com/Inrixia/TidaLuna)**.
 - **Gets better every day:** a small ranking model is trained on how you react to its picks.
 - **Flows:** one track per artist, diversity-aware selection, ordered by sound, tempo and harmonic key (Camelot wheel). AI-generated tracks, karaoke/tribute versions and artists you always skip are left out. Sped-up/slowed, live and remix versions only appear if you listen to those.
 - Runs in the background once a day (default 6:00, or the next time TIDAL opens) with paced requests, into an unlisted playlist called **Your Daily Discovery**.
-- Settings: generate now, refresh hour, length, adventurousness, explicit, AI filter, Last.fm, reset learned taste. Everything is stored locally in `~/.cache/visiuun-true-taste` (`C:\Users\<you>\.cache\visiuun-true-taste` on Windows), including a readable `log.txt`.
+- Settings: generate now, refresh hour, length, adventurousness, explicit, AI filter, Last.fm, reset learned taste, and **Export all / Import all** to back up or move everything TrueTaste has learned as one JSON file. Everything is stored locally in `~/.cache/visiuun-true-taste` (`C:\Users\<you>\.cache\visiuun-true-taste` on Windows), including a readable `log.txt`.
 
 ### 3D Cover (`@visiuun/3d-cover`)
 

@@ -28,6 +28,24 @@ export const loadAll = async () => {
   artists = parse(a, {});
 };
 
+// ------------------ BACKUP ------------------
+// Everything TrueTaste has learned in one file: listens, 👍/👎, history, the trained ranker, caches
+const BACKUP_FORMAT = "truetaste-backup";
+
+export const exportData = (settings: object) =>
+  JSON.stringify({ format: BACKUP_FORMAT, version: 1, exportedAt: new Date().toISOString(), settings, state, tracks, artists });
+
+/** Replaces all data with a backup's. Returns the backup's settings so the caller can apply them */
+export const importData = (json: string) => {
+  const data = JSON.parse(json);
+  if (data?.format !== BACKUP_FORMAT || typeof data.state !== "object" || data.state === null) throw new Error("This isn't a TrueTaste backup file");
+  state = { ...emptyState(), ...data.state };
+  tracks = data.tracks ?? {};
+  artists = data.artists ?? {};
+  markDirty("state", "tracks", "artists");
+  return (data.settings ?? {}) as Record<string, unknown>;
+};
+
 export const resetAll = () => {
   state = emptyState();
   tracks = {};
