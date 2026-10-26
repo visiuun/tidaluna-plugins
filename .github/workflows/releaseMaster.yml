@@ -29,11 +29,21 @@ jobs:
       - name: Build plugins
         run: pnpm run build
 
+      # Recreate the release on every push so its date (and the "latest" tag) match the build.
+      # Runs only after a successful build, so a failed build never removes the store.
+      - name: Remove previous release
+        run: gh release delete latest --cleanup-tag --yes || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Release to GitHub
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
+          target_commitish: ${{ github.sha }}
           name: Latest Release
+          body: "Built from ${{ github.sha }}: ${{ github.event.head_commit.message }}"
+          make_latest: true
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
