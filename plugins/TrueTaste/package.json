@@ -1,6 +1,6 @@
 {
   "name": "@visiuun/true-taste",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "TrueTaste: a daily discovery playlist that actually knows your taste. Local AI, learns from how long you listen, adapts as your taste changes",
   "author": {
     "name": "visiuun",

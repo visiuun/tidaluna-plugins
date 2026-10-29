@@ -13,7 +13,7 @@ export type PluginSettings = {
 
 export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("TrueTaste", {
   enabled: true,
-  size: 30,
+  size: 15,
   refreshHour: 6,
   exploration: 45,
   allowExplicit: true,
