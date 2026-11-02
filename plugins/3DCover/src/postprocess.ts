@@ -110,17 +110,24 @@ export const windowMinMax = (src: Uint8Array, size: number, r: number) => {
 // slopes, so it stretches edge pixels into streaks. Snap every ramp that spans a big depth range to
 // whichever side it's closer to, turning it into a cliff the renderer fills from the background.
 // Smooth surfaces never cover EDGE_RANGE inside the window, so they're left alone.
+// The snapped map (data) is what the CPU works with. The GPU gets the smooth depth plus the two sides
+// of each edge (edges: RGBA = smooth, lo, hi) and snaps per sample: thresholding the bilinearly
+// filtered depth gives smooth silhouettes instead of 384px stair steps.
 const EDGE_RADIUS = 3;
-const EDGE_RANGE = 24;
-const FOREGROUND_BIAS = 0.45; // slightly below the midpoint so the subject keeps its whole outline
-export const sharpenEdges = (src: Uint8Array, size: number): Uint8Array => {
+export const EDGE_RANGE = 24;
+export const FOREGROUND_BIAS = 0.45; // slightly below the midpoint so the subject keeps its whole outline
+export const sharpenEdges = (src: Uint8Array, size: number) => {
   const { lo, hi } = windowMinMax(src, size, EDGE_RADIUS);
-  const out = new Uint8Array(src);
-  for (let i = 0; i < out.length; i++) {
+  const data = new Uint8Array(src);
+  const edges = new Uint8Array(src.length * 4);
+  for (let i = 0; i < data.length; i++) {
     const range = hi[i] - lo[i];
-    if (range >= EDGE_RANGE) out[i] = src[i] - lo[i] > range * FOREGROUND_BIAS ? hi[i] : lo[i];
+    if (range >= EDGE_RANGE) data[i] = src[i] - lo[i] > range * FOREGROUND_BIAS ? hi[i] : lo[i];
+    edges[i * 4] = src[i];
+    edges[i * 4 + 1] = lo[i];
+    edges[i * 4 + 2] = hi[i];
   }
-  return out;
+  return { data, edges };
 };
 
 // Model output → stored map (before edge sharpening)

@@ -206,7 +206,33 @@ const repaintRim = (rgba: Uint8ClampedArray | Uint8Array, depth: Uint8Array, rim
       break;
     }
   }
-  return out;
+  // Foreground texels touching the rim carry the repainted colour too (still a = 0): the texture is
+  // filtered, and the repaint applies right up to the edge, where it would otherwise blend in the
+  // foreground's own colour and leave a faint outline
+  const size2 = size * size;
+  const edge = new Uint8Array(out);
+  for (let i = 0; i < size2; i++) {
+    if (rim[i]) continue;
+    const x = i % size;
+    const y = (i - x) / size;
+    let w = 0, r = 0, g = 0, b = 0;
+    for (let k = 0; k < 16; k += 2) {
+      const nx = x + N8[k];
+      const ny = y + N8[k + 1];
+      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+      const j = ny * size + nx;
+      if (!rim[j] || depth[j] >= depth[i]) continue;
+      w++;
+      r += out[j * 4];
+      g += out[j * 4 + 1];
+      b += out[j * 4 + 2];
+    }
+    if (w === 0) continue;
+    edge[i * 4] = r / w;
+    edge[i * 4 + 1] = g / w;
+    edge[i * 4 + 2] = b / w;
+  }
+  return edge;
 };
 
 // ------------------ CACHE ------------------

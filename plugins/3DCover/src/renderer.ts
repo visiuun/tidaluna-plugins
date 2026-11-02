@@ -1,5 +1,6 @@
 import { backgroundFor, reachFor } from "./background";
 import type { DepthMap } from "./depth";
+import { DEPTH_SIZE, EDGE_RANGE, FOREGROUND_BIAS } from "./postprocess";
 
 export type ParallaxParams = {
   nx: number; // normalized mouse [-1, 1]
@@ -27,7 +28,7 @@ precision highp float;
 in vec2 vUv;
 out vec4 outColor;
 uniform sampler2D uImage;
-uniform sampler2D uDepth;
+uniform sampler2D uDepth; // r = smooth depth, g/b = far/near side of the edge it's on
 uniform sampler2D uBg;    // rgb = background colour, a = background depth
 uniform sampler2D uRim;   // rgb = background pixels tinted by the foreground's anti-aliased edge, repainted; a = rim
 uniform vec2 uMouse;
@@ -35,8 +36,18 @@ uniform float uIntensity;
 uniform float uFocal;
 uniform float uSuppress;
 uniform vec2 uCover;  // object-fit: cover scale
+uniform float uPixel; // one output pixel in image uv
 
 const int STEPS = 40;
+
+// Snap to the near or far side of a depth edge on the filtered value, so the edge follows a smooth
+// sub-texel curve (same rule as sharpenEdges on the CPU, faded in over the edge-range threshold)
+float depthAt(vec2 uv) {
+  vec3 s = texture(uDepth, uv).rgb;
+  float range = s.b - s.g;
+  float snapped = s.r - s.g > range * ${FOREGROUND_BIAS.toFixed(3)} ? s.b : s.g;
+  return mix(s.r, snapped, smoothstep(${((EDGE_RANGE * 0.75) / 255).toFixed(4)}, ${(EDGE_RANGE / 255).toFixed(4)}, range));
+}
 
 void main() {
   vec2 dir = uMouse * uIntensity;
@@ -50,50 +61,62 @@ void main() {
   float stepT = 1.0 / float(STEPS);
   float t = 1.0;
   vec2 uv = p - dir * (t - uFocal);
-  float d = texture(uDepth, uv).r;
+  float d = depthAt(uv);
   float prevT = t;
-  vec2 prevUv = uv;
   float prevD = d;
   for (int i = 0; i < STEPS && d < t; i++) {
-    prevT = t; prevUv = uv; prevD = d;
+    prevT = t; prevD = d;
     t -= stepT;
     uv = p - dir * (t - uFocal);
-    d = texture(uDepth, uv).r;
+    d = depthAt(uv);
   }
 
-  // Refine the hit between the last two samples
-  float a = max(prevT - prevD, 0.0);
-  float b = max(d - t, 0.0);
-  float hitT = mix(prevT, t, a / (a + b + 1e-5));
-  vec2 hitUv = p - dir * (hitT - uFocal);
+  // A step can span a couple of screen pixels on a large cover, so binary-search the crossing inside it:
+  // silhouettes land within a fraction of a pixel instead of snapping to steps (jagged combs).
+  // A = last point above the surface, B = first point on or under it.
+  float tA = prevT, dA = prevD, tB = t, dB = d;
+  for (int i = 0; i < 5; i++) {
+    float tm = 0.5 * (tA + tB);
+    float dm = depthAt(p - dir * (tm - uFocal));
+    if (dm >= tm) { tB = tm; dB = dm; } else { tA = tm; dA = dm; }
+  }
+  vec2 hitUv = p - dir * (tB - uFocal);
   vec3 col = texture(uImage, hitUv).rgb;
 
   // Once the foreground has moved off it, its anti-aliased rim left on the background would show as
   // a ghost outline, so once tilted, show those pixels repainted from their own surface
   vec4 rim = texture(uRim, hitUv);
-  col = mix(col, rim.rgb, rim.a * smoothstep(0.0, 0.004, length(dir)));
+  // Doubled, since the filtered mask only reaches half strength on the edge itself, and limited to hits
+  // on the far side of the edge so the foreground's own outline is never painted over
+  vec3 sides = texture(uDepth, hitUv).rgb;
+  float farSide = step(dB, mix(sides.g, sides.b, 0.5));
+  col = mix(col, rim.rgb, min(rim.a * 2.0, 1.0) * farSide * smoothstep(0.0, 0.004, length(dir)));
 
   // Hit the wall of a depth cliff → disocclusion: show where the ray meets the background layer.
-  // Consecutive samples are under a texel apart, so on a real surface their depths barely differ;
-  // a big jump means the ray went through a cliff wall (wherever on the filtered edge it landed).
-  float hole = smoothstep(uSuppress * 0.3, uSuppress * 0.6, d - prevD);
+  // A and B are a hair apart, so a big depth jump between them means the ray crossed a cliff wall.
+  // How far under the top of the wall it went grows by uPixel / |dir| per screen pixel away from the
+  // silhouette, so fading in over that gives the silhouette a one-pixel anti-aliased edge.
+  float wall = smoothstep(uSuppress * 0.3, uSuppress * 0.6, dB - dA);
+  float hole = wall * smoothstep(0.0, uPixel / max(length(dir), 1e-5), dB - tB);
   if (hole > 0.0) {
     // Where the layer behind the wall lands. If the cover really shows that layer there, use the
     // sharp original; only where it's hidden take the grown-in background (which may hold a layer
     // even further back, e.g. the floor under a dog's back when the hole is behind its head).
     // The layer is whichever is farther: the one the ray just passed over, or the nearest one the
-    // background layer has behind this wall (the ray's last sample can sit partway up the edge).
-    float bd = min(prevD, texture(uBg, hitUv).a);
+    // background layer has behind this wall. That one is read with taps across the wall, farthest
+    // wins: along a stair-stepped edge each texel row can have grown from a different layer, which
+    // would shift the sample row by row into a ladder.
+    vec2 across = normalize(vec2(-dir.y, dir.x)) * ${(2 / DEPTH_SIZE).toFixed(5)};
+    float grownD = min(texture(uBg, hitUv).a, min(texture(uBg, hitUv + across).a, texture(uBg, hitUv - across).a));
+    float bd = min(dA, grownD);
     vec2 bgUv = p - dir * (bd - uFocal);
-    float hidden = smoothstep(0.03, 0.06, abs(texture(uDepth, bgUv).r - bd));
+    float hidden = smoothstep(0.03, 0.06, abs(depthAt(bgUv) - bd));
     vec4 bgRim = texture(uRim, bgUv);
-    vec3 shown = mix(texture(uImage, bgUv).rgb, bgRim.rgb, bgRim.a);
-    // The grown-in background can hold a different layer than this one (wide gaps between stacked
-    // layers): then continue the layer's colour from just before the wall rather than show the wrong one
-    vec4 grown = texture(uBg, bgUv);
-    vec4 edgeRim = texture(uRim, prevUv);
-    vec3 edge = mix(texture(uImage, prevUv).rgb, edgeRim.rgb, edgeRim.a);
-    vec3 behind = mix(grown.rgb, edge, smoothstep(0.03, 0.06, abs(grown.a - bd)));
+    vec3 shown = mix(texture(uImage, bgUv).rgb, bgRim.rgb, min(bgRim.a * 2.0, 1.0));
+    // Averaged across the tilt: neighbouring texel rows can have grown from different sources, which
+    // would show as bars along the tilt direction
+    vec3 behind = (texture(uBg, bgUv - 2.0 * across) + texture(uBg, bgUv - across) + texture(uBg, bgUv)
+                 + texture(uBg, bgUv + across) + texture(uBg, bgUv + 2.0 * across)).rgb * 0.2;
     col = mix(col, mix(shown, behind, hidden), hole);
   }
   outColor = vec4(col, 1.0);
@@ -147,7 +170,7 @@ export class ParallaxRenderer {
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
-    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uBg", "uRim"]) {
+    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uPixel", "uBg", "uRim"]) {
       this.uniforms[name] = gl.getUniformLocation(program, name);
     }
     gl.uniform1i(this.uniforms.uImage, 0);
@@ -196,8 +219,8 @@ export class ParallaxRenderer {
     if (depth !== this.currentDepth) {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, this.depthTex);
-      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, depth.size, depth.size, 0, gl.RED, gl.UNSIGNED_BYTE, depth.data);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, depth.size, depth.size, 0, gl.RGBA, gl.UNSIGNED_BYTE, depth.edges);
       this.currentDepth = depth;
     }
   }
@@ -241,6 +264,7 @@ export class ParallaxRenderer {
     const boxAspect = w / h;
     const cover = this.imageAspect > boxAspect ? [boxAspect / this.imageAspect, 1] : [1, this.imageAspect / boxAspect];
     gl.uniform2f(this.uniforms.uCover, cover[0], cover[1]);
+    gl.uniform1f(this.uniforms.uPixel, cover[0] / w);
     gl.uniform2f(this.uniforms.uMouse, p.nx, p.ny);
     gl.uniform1f(this.uniforms.uIntensity, p.intensity / 500);
     gl.uniform1f(this.uniforms.uFocal, p.focal);

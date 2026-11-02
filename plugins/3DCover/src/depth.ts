@@ -1,7 +1,8 @@
 import { clearDepthFiles, clearFileCache, depthCacheStats, fetchCached, fetchImageBytes, readDepth, writeDepth } from "./fetch.native";
 import { DEPTH_SIZE, postProcess, sharpenEdges } from "./postprocess";
 
-export type DepthMap = { size: number; data: Uint8Array };
+// data: snapped depth (CPU), edges: smooth depth + edge sides for the GPU (see sharpenEdges)
+export type DepthMap = { size: number; data: Uint8Array; edges: Uint8Array };
 
 export { DEPTH_SIZE };
 
@@ -302,7 +303,7 @@ export const getDepth = (coverId: string, model: ModelKey, bitmap: () => Promise
   job.promise = (async () => {
     const stored = await readDepth(key).catch(() => null);
     if (stored?.length === DEPTH_SIZE * DEPTH_SIZE) {
-      const map = { size: DEPTH_SIZE, data: sharpenEdges(stored, DEPTH_SIZE) };
+      const map = { size: DEPTH_SIZE, ...sharpenEdges(stored, DEPTH_SIZE) };
       memSet(key, map);
       return map;
     }
@@ -313,7 +314,7 @@ export const getDepth = (coverId: string, model: ModelKey, bitmap: () => Promise
     });
     // Stored before edge sharpening, so tuning it later doesn't need fresh inference
     const smooth = postProcess(raw.data, raw.width, raw.height);
-    const map = { size: DEPTH_SIZE, data: sharpenEdges(smooth, DEPTH_SIZE) };
+    const map = { size: DEPTH_SIZE, ...sharpenEdges(smooth, DEPTH_SIZE) };
     onInferred?.(raw.backend, raw.ms);
     memSet(key, map);
     writeDepth(key, smooth).catch(() => {});
