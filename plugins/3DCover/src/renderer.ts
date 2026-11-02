@@ -1,3 +1,4 @@
+import { backgroundFor, reachFor } from "./background";
 import type { DepthMap } from "./depth";
 
 export type ParallaxParams = {
@@ -19,20 +20,21 @@ void main() {
 // GPU version of PerfectParallaxApp._render_parallax, upgraded to a depth ray-march.
 // Each output pixel marches from the near plane to the far plane along the parallax direction and
 // takes the first surface it hits, so foreground correctly covers background (no ghost copies).
-// Where the ray hits the side of a depth cliff (a disocclusion hole) it fills from the background
-// side instead of stretching the foreground, which replaces the Python cv2.inpaint pass.
+// Where the ray hits the side of a depth cliff (a disocclusion hole) it shows the background layer,
+// which has the background grown in behind every foreground edge, instead of stretching the foreground.
 const FRAG = `#version 300 es
 precision highp float;
 in vec2 vUv;
 out vec4 outColor;
 uniform sampler2D uImage;
 uniform sampler2D uDepth;
+uniform sampler2D uBg;    // rgb = background colour, a = background depth
+uniform sampler2D uRim;   // rgb = background pixels tinted by the foreground's anti-aliased edge, repainted; a = rim
 uniform vec2 uMouse;
 uniform float uIntensity;
 uniform float uFocal;
 uniform float uSuppress;
 uniform vec2 uCover;  // object-fit: cover scale
-uniform vec2 uTexel;  // one output pixel in image uv
 
 const int STEPS = 40;
 
@@ -66,21 +68,33 @@ void main() {
   vec2 hitUv = p - dir * (hitT - uFocal);
   vec3 col = texture(uImage, hitUv).rgb;
 
-  // Hit the wall of a depth cliff → disocclusion. Fill from the background side, mirrored so the
-  // hole gets real texture instead of a one-pixel streak, with a small perpendicular blur.
-  // A ray landing on a surface ends at most one step below it; anything deeper went into a wall.
-  // (Measured at the march sample, not at hitUv: the filtered depth there flips between the two
-  // sides of the cliff from pixel to pixel, which left a jagged comb along edges.)
-  float cliff = max(d - t - stepT, 0.0);
-  float hole = smoothstep(uSuppress, uSuppress * 2.5, cliff);
-  if (hole > 0.0 && dot(dir, dir) > 0.0) {
-    vec2 n = normalize(dir);
-    vec2 perp = vec2(-n.y, n.x) * uTexel * 1.5;
-    vec2 bgUv = prevUv - n * (cliff * length(dir) + 2.0 * length(uTexel));
-    vec3 bg = texture(uImage, bgUv).rgb * 0.5
-            + texture(uImage, bgUv + perp).rgb * 0.25
-            + texture(uImage, bgUv - perp).rgb * 0.25;
-    col = mix(col, bg, hole);
+  // Once the foreground has moved off it, its anti-aliased rim left on the background would show as
+  // a ghost outline, so once tilted, show those pixels repainted from their own surface
+  vec4 rim = texture(uRim, hitUv);
+  col = mix(col, rim.rgb, rim.a * smoothstep(0.0, 0.004, length(dir)));
+
+  // Hit the wall of a depth cliff → disocclusion: show where the ray meets the background layer.
+  // Consecutive samples are under a texel apart, so on a real surface their depths barely differ;
+  // a big jump means the ray went through a cliff wall (wherever on the filtered edge it landed).
+  float hole = smoothstep(uSuppress * 0.3, uSuppress * 0.6, d - prevD);
+  if (hole > 0.0) {
+    // Where the layer behind the wall lands. If the cover really shows that layer there, use the
+    // sharp original; only where it's hidden take the grown-in background (which may hold a layer
+    // even further back, e.g. the floor under a dog's back when the hole is behind its head).
+    // The layer is whichever is farther: the one the ray just passed over, or the nearest one the
+    // background layer has behind this wall (the ray's last sample can sit partway up the edge).
+    float bd = min(prevD, texture(uBg, hitUv).a);
+    vec2 bgUv = p - dir * (bd - uFocal);
+    float hidden = smoothstep(0.03, 0.06, abs(texture(uDepth, bgUv).r - bd));
+    vec4 bgRim = texture(uRim, bgUv);
+    vec3 shown = mix(texture(uImage, bgUv).rgb, bgRim.rgb, bgRim.a);
+    // The grown-in background can hold a different layer than this one (wide gaps between stacked
+    // layers): then continue the layer's colour from just before the wall rather than show the wrong one
+    vec4 grown = texture(uBg, bgUv);
+    vec4 edgeRim = texture(uRim, prevUv);
+    vec3 edge = mix(texture(uImage, prevUv).rgb, edgeRim.rgb, edgeRim.a);
+    vec3 behind = mix(grown.rgb, edge, smoothstep(0.03, 0.06, abs(grown.a - bd)));
+    col = mix(col, mix(shown, behind, hidden), hole);
   }
   outColor = vec4(col, 1.0);
 }`;
@@ -92,10 +106,13 @@ export class ParallaxRenderer {
   private program: WebGLProgram | null = null;
   private imageTex: WebGLTexture | null = null;
   private depthTex: WebGLTexture | null = null;
+  private bgTex: WebGLTexture | null = null;
+  private rimTex: WebGLTexture | null = null;
   private uniforms: Record<string, WebGLUniformLocation | null> = {};
   private imageAspect = 1;
   private currentImage?: ImageBitmap;
   private currentDepth?: DepthMap;
+  private bgReach = 0;
 
   constructor() {
     this.canvas.addEventListener("webglcontextlost", (e) => {
@@ -130,11 +147,13 @@ export class ParallaxRenderer {
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
-    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uTexel"]) {
+    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uBg", "uRim"]) {
       this.uniforms[name] = gl.getUniformLocation(program, name);
     }
     gl.uniform1i(this.uniforms.uImage, 0);
     gl.uniform1i(this.uniforms.uDepth, 1);
+    gl.uniform1i(this.uniforms.uBg, 2);
+    gl.uniform1i(this.uniforms.uRim, 3);
 
     const makeTex = () => {
       const tex = gl.createTexture()!;
@@ -147,6 +166,8 @@ export class ParallaxRenderer {
     };
     this.imageTex = makeTex();
     this.depthTex = makeTex();
+    this.bgTex = makeTex();
+    this.rimTex = makeTex();
 
     this.gl = gl;
     this.program = program;
@@ -160,6 +181,7 @@ export class ParallaxRenderer {
 
   setSource(image: ImageBitmap, depth: DepthMap) {
     const gl = this.init();
+    if (image !== this.currentImage || depth !== this.currentDepth) this.bgReach = 0;
     if (image !== this.currentImage) {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.imageTex);
@@ -180,6 +202,24 @@ export class ParallaxRenderer {
     }
   }
 
+  // Background layer wide enough for this Depth Shift (usually prebuilt, so just an upload)
+  private syncBackground(gl: WebGL2RenderingContext, intensity: number) {
+    const image = this.currentImage!;
+    const depth = this.currentDepth!;
+    const reach = reachFor(intensity, depth.size);
+    if (this.bgReach >= reach) return;
+    const bg = backgroundFor(image, depth, reach);
+    const { size } = depth;
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.bgTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, bg.layer);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.rimTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, bg.rim);
+    this.bgReach = bg.reach;
+  }
+
   resize(cssW: number, cssH: number) {
     // Match the screen (capped at the 1280px source) so it's as sharp as TIDAL's own <img>
     const scale = Math.min(window.devicePixelRatio || 1, 1280 / Math.max(cssW, cssH, 1));
@@ -194,13 +234,13 @@ export class ParallaxRenderer {
   draw(p: ParallaxParams) {
     const gl = this.init();
     if (!this.currentImage || !this.currentDepth) return;
+    this.syncBackground(gl, p.intensity);
     const { width: w, height: h } = this.canvas;
     gl.viewport(0, 0, w, h);
 
     const boxAspect = w / h;
     const cover = this.imageAspect > boxAspect ? [boxAspect / this.imageAspect, 1] : [1, this.imageAspect / boxAspect];
     gl.uniform2f(this.uniforms.uCover, cover[0], cover[1]);
-    gl.uniform2f(this.uniforms.uTexel, cover[0] / w, cover[1] / h);
     gl.uniform2f(this.uniforms.uMouse, p.nx, p.ny);
     gl.uniform1f(this.uniforms.uIntensity, p.intensity / 500);
     gl.uniform1f(this.uniforms.uFocal, p.focal);

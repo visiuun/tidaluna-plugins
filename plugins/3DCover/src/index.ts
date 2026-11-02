@@ -1,6 +1,7 @@
 import { LunaUnload, Tracer } from "@luna/core";
 import type { MediaItem } from "@luna/lib";
-import { closeDepthCache, disposeDepthWorker, getCachedDepth, getDepth, isAbort, loadCoverBitmap, setInferenceLogger, setInfoLogger } from "./depth";
+import { type DepthMap, closeDepthCache, disposeDepthWorker, getCachedDepth, getDepth, isAbort, loadCoverBitmap, setInferenceLogger, setInfoLogger } from "./depth";
+import { backgroundFor, clearBackgrounds, reachFor } from "./background";
 import { ParallaxRenderer } from "./renderer";
 import { settings } from "./Settings";
 
@@ -125,10 +126,25 @@ let trackSeq = 0;
 
 const generateLater = (cover: Cover, signal: AbortSignal, context: string) => {
   const timer = setTimeout(() => {
-    buildDepth(cover, signal).catch((err) => isAbort(err) || trace.err.withContext(context)(err));
+    buildDepth(cover, signal)
+      .then((depth) => prebuildBackground(cover, depth, signal))
+      .catch((err) => isAbort(err) || trace.err.withContext(context)(err));
   }, GENERATE_DELAY_MS);
   signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
 };
+
+// The background layer takes a few ms of main-thread work: do it while idle so hovering only uploads it
+const prebuildBackground = (cover: Cover, depth: DepthMap, signal: AbortSignal) =>
+  new Promise<void>((resolve, reject) =>
+    requestIdleCallback(async () => {
+      try {
+        if (!signal.aborted) backgroundFor(await getBitmap(cover), depth, reachFor(settings.intensity, depth.size));
+        resolve();
+      } catch (err) {
+        reject(err);
+      }
+    }, { timeout: 2000 }),
+  );
 
 const onTrack = async (item?: MediaItem) => {
   trackAbort.abort();
@@ -406,6 +422,7 @@ unloads.add(() => {
   window.removeEventListener("blur", leave);
   teardown();
   bitmaps.clear();
+  clearBackgrounds();
   disposeDepthWorker();
   closeDepthCache();
 });
