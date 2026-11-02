@@ -306,6 +306,44 @@ const bilateral = (src: Float32Array, size: number) => {
   return out;
 };
 
+// Separable min/max over a (2r+1)² window
+const extremum = (src: Uint8Array, size: number, r: number, pick: (a: number, b: number) => number) => {
+  const tmp = new Uint8Array(size * size);
+  const out = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let v = src[y * size + x];
+      for (let dx = -r; dx <= r; dx++) v = pick(v, src[y * size + Math.min(size - 1, Math.max(0, x + dx))]);
+      tmp[y * size + x] = v;
+    }
+  }
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let v = tmp[y * size + x];
+      for (let dy = -r; dy <= r; dy++) v = pick(v, tmp[Math.min(size - 1, Math.max(0, y + dy)) * size + x]);
+      out[y * size + x] = v;
+    }
+  }
+  return out;
+};
+
+// The model blurs object boundaries into soft ramps, which the renderer can't tell apart from real
+// slopes, so it stretches edge pixels into streaks. Snap every ramp that spans a big depth range to
+// whichever side it's closer to, turning it into a cliff the renderer fills from the background.
+// Smooth surfaces never cover EDGE_RANGE inside the window, so they're left alone.
+const EDGE_RADIUS = 3;
+const EDGE_RANGE = 24;
+const FOREGROUND_BIAS = 0.45; // slightly below the midpoint so the subject keeps its whole outline
+const sharpenEdges = (src: Uint8Array, size: number): Uint8Array => {
+  const lo = extremum(src, size, EDGE_RADIUS, Math.min);
+  const hi = extremum(src, size, EDGE_RADIUS, Math.max);
+  const out = new Uint8Array(src);
+  for (let i = 0; i < out.length; i++) {
+    const range = hi[i] - lo[i];
+    if (range >= EDGE_RANGE) out[i] = src[i] - lo[i] > range * FOREGROUND_BIAS ? hi[i] : lo[i];
+  }
+  return out;
+};
 
 // ------------------ CACHE (memory + disk) ------------------
 // Depth maps are stored on disk by the main process, so they survive restarts and Luna's cache wipes.
@@ -371,7 +409,7 @@ export const getDepth = (coverId: string, model: ModelKey, bitmap: () => Promise
   job.promise = (async () => {
     const stored = await readDepth(key).catch(() => null);
     if (stored?.length === DEPTH_SIZE * DEPTH_SIZE) {
-      const map = { size: DEPTH_SIZE, data: stored };
+      const map = { size: DEPTH_SIZE, data: sharpenEdges(stored, DEPTH_SIZE) };
       memSet(key, map);
       return map;
     }
@@ -380,10 +418,12 @@ export const getDepth = (coverId: string, model: ModelKey, bitmap: () => Promise
       if (signal?.aborted && !job.keep) throw new DOMException("Track skipped before its turn", "AbortError");
       return inferDepth(bitmap, model);
     });
-    const map = { size: DEPTH_SIZE, data: bilateral(median3(resample(raw.data, raw.width, raw.height, DEPTH_SIZE), DEPTH_SIZE), DEPTH_SIZE) };
+    // Stored before edge sharpening, so tuning it later doesn't need fresh inference
+    const smooth = bilateral(median3(resample(raw.data, raw.width, raw.height, DEPTH_SIZE), DEPTH_SIZE), DEPTH_SIZE);
+    const map = { size: DEPTH_SIZE, data: sharpenEdges(smooth, DEPTH_SIZE) };
     onInferred?.(raw.backend, raw.ms);
     memSet(key, map);
-    writeDepth(key, map.data).catch(() => {});
+    writeDepth(key, smooth).catch(() => {});
     return map;
   })().finally(() => inflight.delete(key));
 

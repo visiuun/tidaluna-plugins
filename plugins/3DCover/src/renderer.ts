@@ -68,7 +68,10 @@ void main() {
 
   // Hit the wall of a depth cliff → disocclusion. Fill from the background side, mirrored so the
   // hole gets real texture instead of a one-pixel streak, with a small perpendicular blur.
-  float cliff = texture(uDepth, hitUv).r - hitT;
+  // A ray landing on a surface ends at most one step below it; anything deeper went into a wall.
+  // (Measured at the march sample, not at hitUv: the filtered depth there flips between the two
+  // sides of the cliff from pixel to pixel, which left a jagged comb along edges.)
+  float cliff = max(d - t - stepT, 0.0);
   float hole = smoothstep(uSuppress, uSuppress * 2.5, cliff);
   if (hole > 0.0 && dot(dir, dir) > 0.0) {
     vec2 n = normalize(dir);
