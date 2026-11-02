@@ -99,24 +99,26 @@ void main() {
   float wall = smoothstep(uSuppress * 0.3, uSuppress * 0.6, dB - dA);
   float hole = wall * smoothstep(0.0, uPixel / max(length(dir), 1e-5), dB - tB);
   if (hole > 0.0) {
-    // Where the layer behind the wall lands. If the cover really shows that layer there, use the
-    // sharp original; only where it's hidden take the grown-in background (which may hold a layer
-    // even further back, e.g. the floor under a dog's back when the hole is behind its head).
-    // The layer is whichever is farther: the one the ray just passed over, or the nearest one the
-    // background layer has behind this wall. That one is read with taps across the wall, farthest
-    // wins: along a stair-stepped edge each texel row can have grown from a different layer, which
-    // would shift the sample row by row into a ladder.
-    vec2 across = normalize(vec2(-dir.y, dir.x)) * ${(2 / DEPTH_SIZE).toFixed(5)};
-    float grownD = min(texture(uBg, hitUv).a, min(texture(uBg, hitUv + across).a, texture(uBg, hitUv - across).a));
-    float bd = min(dA, grownD);
+    // The layer behind the wall is the one the ray just passed over (edges are snapped per sample, so
+    // that depth is clean). Where the cover really shows that layer, use the sharp original; where it's
+    // hidden, take the grown-in background.
+    float bd = dA;
     vec2 bgUv = p - dir * (bd - uFocal);
     float hidden = smoothstep(0.03, 0.06, abs(depthAt(bgUv) - bd));
     vec4 bgRim = texture(uRim, bgUv);
     vec3 shown = mix(texture(uImage, bgUv).rgb, bgRim.rgb, min(bgRim.a * 2.0, 1.0));
     // Averaged across the tilt: neighbouring texel rows can have grown from different sources, which
     // would show as bars along the tilt direction
-    vec3 behind = (texture(uBg, bgUv - 2.0 * across) + texture(uBg, bgUv - across) + texture(uBg, bgUv)
-                 + texture(uBg, bgUv + across) + texture(uBg, bgUv + 2.0 * across)).rgb * 0.2;
+    vec2 across = normalize(vec2(-dir.y, dir.x)) * ${(2 / DEPTH_SIZE).toFixed(5)};
+    vec4 grown = (texture(uBg, bgUv - 2.0 * across) + texture(uBg, bgUv - across) + texture(uBg, bgUv)
+                + texture(uBg, bgUv + across) + texture(uBg, bgUv + 2.0 * across)) * 0.2;
+    // The background layer holds one layer per spot: where three stack (antler, head, sky) and the
+    // middle one is thin, the far one grows over it. Then continue the layer's own colour from just
+    // before the wall rather than open a hole through it.
+    vec2 aboveUv = p - dir * (tA - uFocal);
+    vec4 aboveRim = texture(uRim, aboveUv);
+    vec3 above = mix(texture(uImage, aboveUv).rgb, aboveRim.rgb, min(aboveRim.a * 2.0, 1.0));
+    vec3 behind = mix(grown.rgb, above, smoothstep(0.05, 0.1, bd - grown.a));
     col = mix(col, mix(shown, behind, hidden), hole);
   }
   outColor = vec4(col, 1.0);
