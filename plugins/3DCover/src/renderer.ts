@@ -30,6 +30,8 @@ out vec4 outColor;
 uniform sampler2D uImage;
 uniform sampler2D uDepth; // r = smooth depth, g/b = far/near side of the edge it's on
 uniform sampler2D uBg;    // rgb = background colour, a = background depth
+uniform sampler2D uNear;  // per edge: near side's colour × trust, a = trust (colour matte, see edgeSides)
+uniform sampler2D uFar;   // far side's colour × trust
 uniform sampler2D uRim;   // rgb = background pixels tinted by the foreground's anti-aliased edge, repainted; a = rim
 uniform vec2 uMouse;
 uniform float uIntensity;
@@ -39,13 +41,26 @@ uniform vec2 uCover;  // object-fit: cover scale
 uniform float uPixel; // one output pixel in image uv
 
 const int STEPS = 40;
+vec2 gx, gy; // screen-space uv derivatives, for mip selection
+
 
 // Snap to the near or far side of a depth edge on the filtered value, so the edge follows a smooth
-// sub-texel curve (same rule as sharpenEdges on the CPU, faded in over the edge-range threshold)
+// sub-texel curve (same rule as sharpenEdges on the CPU, faded in over the edge-range threshold).
+// Where the edge's two sides have clearly different colours, decide by the cover's own pixel
+// instead, at full resolution: the silhouette then follows the artwork's outline exactly.
 float depthAt(vec2 uv) {
   vec3 s = texture(uDepth, uv).rgb;
   float range = s.b - s.g;
-  float snapped = s.r - s.g > range * ${FOREGROUND_BIAS.toFixed(3)} ? s.b : s.g;
+  float a = (s.r - s.g) / max(range, 1e-4);
+  vec4 near = texture(uNear, uv);
+  if (near.a > 0.004) {
+    vec3 nearCol = near.rgb / near.a;
+    vec3 farCol = texture(uFar, uv).rgb / near.a;
+    vec3 e = nearCol - farCol;
+    float byColour = clamp(dot(textureGrad(uImage, uv, gx, gy).rgb - farCol, e) / max(dot(e, e), 1e-4), 0.0, 1.0);
+    a = clamp(mix(a, byColour, near.a), a - 0.6, a + 0.6);
+  }
+  float snapped = a > ${FOREGROUND_BIAS.toFixed(3)} ? s.b : s.g;
   return mix(s.r, snapped, smoothstep(${((EDGE_RANGE * 0.75) / 255).toFixed(4)}, ${(EDGE_RANGE / 255).toFixed(4)}, range));
 }
 
@@ -59,7 +74,8 @@ void main() {
   // Mip level from the screen, not from where the rays land: neighbouring rays can land far apart
   // (one hits the foreground, the next the background behind it), which would pick a blurry mip that
   // mixes the foreground's colour into the background and draws faint lines along the tilt
-  vec2 gx = dFdx(p), gy = dFdy(p);
+  gx = dFdx(p);
+  gy = dFdy(p);
 
   // March t from near (1) to far (0); the ray position is where depth t would come from
   float stepT = 1.0 / float(STEPS);
@@ -116,13 +132,14 @@ void main() {
     vec2 across = normalize(vec2(-dir.y, dir.x)) * ${(2 / DEPTH_SIZE).toFixed(5)};
     vec4 grown = (texture(uBg, bgUv - 2.0 * across) + texture(uBg, bgUv - across) + texture(uBg, bgUv)
                 + texture(uBg, bgUv + across) + texture(uBg, bgUv + 2.0 * across)) * 0.2;
-    // The background layer holds one layer per spot: where three stack (antler, head, sky) and the
-    // middle one is thin, the far one grows over it. Then continue the layer's own colour from just
-    // before the wall rather than open a hole through it.
+    // The background layer holds one layer per spot, which isn't always the one the ray passed over:
+    // where three stack (antler, head, sky) and the middle one is thin, the far one grows over it;
+    // behind a letter whose parts sit at slightly different depths, its own lower part grows in
+    // instead of the sky. Either way, continue the passed layer's colour from just before the wall.
     vec2 aboveUv = p - dir * (tA - uFocal);
     vec4 aboveRim = texture(uRim, aboveUv);
     vec3 above = mix(textureGrad(uImage, aboveUv, gx, gy).rgb, aboveRim.rgb, min(aboveRim.a * 2.0, 1.0));
-    vec3 behind = mix(grown.rgb, above, smoothstep(0.05, 0.1, bd - grown.a));
+    vec3 behind = mix(grown.rgb, above, smoothstep(0.05, 0.1, abs(bd - grown.a)));
     col = mix(col, mix(shown, behind, hidden), hole);
   }
   outColor = vec4(col, 1.0);
@@ -137,6 +154,8 @@ export class ParallaxRenderer {
   private depthTex: WebGLTexture | null = null;
   private bgTex: WebGLTexture | null = null;
   private rimTex: WebGLTexture | null = null;
+  private nearTex: WebGLTexture | null = null;
+  private farTex: WebGLTexture | null = null;
   private uniforms: Record<string, WebGLUniformLocation | null> = {};
   private imageAspect = 1;
   private currentImage?: ImageBitmap;
@@ -176,13 +195,15 @@ export class ParallaxRenderer {
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
-    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uPixel", "uBg", "uRim"]) {
+    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uPixel", "uBg", "uRim", "uNear", "uFar"]) {
       this.uniforms[name] = gl.getUniformLocation(program, name);
     }
     gl.uniform1i(this.uniforms.uImage, 0);
     gl.uniform1i(this.uniforms.uDepth, 1);
     gl.uniform1i(this.uniforms.uBg, 2);
     gl.uniform1i(this.uniforms.uRim, 3);
+    gl.uniform1i(this.uniforms.uNear, 4);
+    gl.uniform1i(this.uniforms.uFar, 5);
 
     const makeTex = () => {
       const tex = gl.createTexture()!;
@@ -197,6 +218,8 @@ export class ParallaxRenderer {
     this.depthTex = makeTex();
     this.bgTex = makeTex();
     this.rimTex = makeTex();
+    this.nearTex = makeTex();
+    this.farTex = makeTex();
 
     this.gl = gl;
     this.program = program;
@@ -246,6 +269,12 @@ export class ParallaxRenderer {
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.rimTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, bg.rim);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this.nearTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, bg.near);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, this.farTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, bg.far);
     this.bgReach = bg.reach;
   }
 

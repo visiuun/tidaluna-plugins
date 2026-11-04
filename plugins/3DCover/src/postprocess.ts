@@ -139,9 +139,22 @@ export const sharpenEdges = (src: Uint8Array, size: number, rgba?: Uint8ClampedA
 // are cleanly separable (flat colours far apart, like lettering): on textured or blurry edges (hair,
 // leather highlights) colour would misplace pixels, so the depth ramp stays. Colour can't overrule
 // clear depth either way.
+// With sides, also writes each edge pixel's two colours for the renderer, which repeats the matte on
+// the full-resolution cover so silhouettes are as crisp as the artwork: near = (near colour, 255) and
+// far = (far colour, 255), both scaled by trust, so filtering between edge and non-edge texels can
+// be undone by dividing by alpha.
 const MATTE_CONTRAST = [16, 48]; // colour distance (0-441) between the sides: depth only → colour only
 const MATTE_SEPARATION = [2, 4]; // that distance over the sides' own colour spread: same ramp
-const followColourEdges = (ramp: Uint8Array, src: Uint8Array, lo: Uint8Array, hi: Uint8Array, size: number, rgba: Uint8ClampedArray | Uint8Array) => {
+export type Sides = { near: Uint8Array; far: Uint8Array };
+const followColourEdges = (
+  ramp: Uint8Array,
+  src: Uint8Array,
+  lo: Uint8Array,
+  hi: Uint8Array,
+  size: number,
+  rgba: Uint8ClampedArray | Uint8Array,
+  sides?: Sides,
+) => {
   const r = EDGE_RADIUS;
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
@@ -185,10 +198,34 @@ const followColourEdges = (ramp: Uint8Array, src: Uint8Array, lo: Uint8Array, hi
         Math.min(1, (contrast - MATTE_CONTRAST[0]) / (MATTE_CONTRAST[1] - MATTE_CONTRAST[0])) *
         Math.min(1, Math.max(0, (separation - MATTE_SEPARATION[0]) / (MATTE_SEPARATION[1] - MATTE_SEPARATION[0])));
       if (trust <= 0) continue;
+      if (sides) {
+        sides.near[i * 4] = (nr / nn) * trust;
+        sides.near[i * 4 + 1] = (ng / nn) * trust;
+        sides.near[i * 4 + 2] = (nb / nn) * trust;
+        sides.near[i * 4 + 3] = 255 * trust;
+        sides.far[i * 4] = (fr / fn) * trust;
+        sides.far[i * 4 + 1] = (fg / fn) * trust;
+        sides.far[i * 4 + 2] = (fb / fn) * trust;
+        sides.far[i * 4 + 3] = 255 * trust;
+      }
       const a = Math.min(byDepth + 0.6, Math.max(byDepth - 0.6, byDepth + (byColour - byDepth) * trust));
       ramp[i] = Math.round(lo[i] + a * range);
     }
   }
+};
+
+/** Near/far colours of each edge (see followColourEdges), from the edges texture and the cover at its size */
+export const edgeSides = (edges: Uint8Array, size: number, rgba: Uint8ClampedArray | Uint8Array): Sides => {
+  const n = size * size;
+  const src = new Uint8Array(n), lo = new Uint8Array(n), hi = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    src[i] = edges[i * 4];
+    lo[i] = edges[i * 4 + 1];
+    hi[i] = edges[i * 4 + 2];
+  }
+  const sides = { near: new Uint8Array(n * 4), far: new Uint8Array(n * 4) };
+  followColourEdges(new Uint8Array(src), src, lo, hi, size, rgba, sides);
+  return sides;
 };
 
 // Model output → stored map (before edge sharpening)

@@ -3,7 +3,7 @@
 // Built once per cover on the CPU in a few ms; the shader only samples it inside those gaps.
 
 import type { DepthMap } from "./depth";
-import { windowMinMax } from "./postprocess";
+import { edgeSides, type Sides, windowMinMax } from "./postprocess";
 
 // Depth step (0-255) between neighbours that counts as one surface in front of another
 const CLIFF = 12;
@@ -23,7 +23,7 @@ const N8 = [-1, -1, 0, -1, 1, -1, -1, 0, 1, 0, -1, 1, 0, 1, 1, 1];
  * @returns layer: size² RGBA, rgb = background colour, a = background depth
  *          rim: size² RGBA, rgb = rim pixels repainted from their own surface, a = 255 on the rim
  */
-export const buildBackground = (rgba: Uint8ClampedArray | Uint8Array, depth: Uint8Array, size: number, reach: number) => {
+export const buildBackground = (rgba: Uint8ClampedArray | Uint8Array, depth: Uint8Array, size: number, reach: number, sides?: Sides) => {
   const n = size * size;
   const d = Float32Array.from(depth);
   const col = new Float32Array(n * 3);
@@ -37,11 +37,14 @@ export const buildBackground = (rgba: Uint8ClampedArray | Uint8Array, depth: Uin
 
   // rim: background within RIM px of a nearer surface. Pixels with a much farther neighbour can grow first.
   const { lo, hi } = windowMinMax(depth, size, RIM);
+  // Tinted pixels can sit as far out as the edge band reaches
+  const nearby = sides ? windowMinMax(depth, size, 3).hi : hi;
   const rim = new Uint8Array(n);
   let candidates = new Int32Array(n);
   let count = 0;
   for (let i = 0; i < n; i++) {
     if (hi[i] - depth[i] > CLIFF) rim[i] = 1;
+    else if (sides && nearby[i] - depth[i] > CLIFF && tinted(rgba, sides, i)) rim[i] = 1;
     if (depth[i] - lo[i] > CLIFF) candidates[count++] = i;
   }
 
@@ -168,6 +171,22 @@ export const buildBackground = (rgba: Uint8ClampedArray | Uint8Array, depth: Uin
   return { layer: out, rim: repaintRim(rgba, depth, rim, size) };
 };
 
+// A background pixel next to a clearly coloured edge that still carries some of the near side's
+// colour (anti-aliasing reaching past the cut): never grown from, so it doesn't smear into the gaps
+const TINT = 0.12;
+const tinted = (rgba: Uint8ClampedArray | Uint8Array, sides: Sides, i: number) => {
+  const trust = sides.near[i * 4 + 3];
+  if (trust < 64) return false;
+  let t = 0, e2 = 0;
+  for (let c = 0; c < 3; c++) {
+    const far = sides.far[i * 4 + c] / trust;
+    const e = sides.near[i * 4 + c] / trust - far;
+    t += (rgba[i * 4 + c] / 255 - far) * e;
+    e2 += e * e;
+  }
+  return t > TINT * e2;
+};
+
 // The cover's own colours with each rim pixel replaced by clean pixels on its surface, or (for slivers
 // too thin to have any) by clean pixels further back. Independent of the grown-in background, which
 // may hold a layer further back than the rim's own surface.
@@ -238,8 +257,8 @@ const repaintRim = (rgba: Uint8ClampedArray | Uint8Array, depth: Uint8Array, rim
 };
 
 // ------------------ CACHE ------------------
-// A few covers' worth (~1.2 MB each): the playing one, the preloaded next one, and the previous one
-type Background = ReturnType<typeof buildBackground> & { image: ImageBitmap; reach: number };
+// A few covers' worth (~2.4 MB each): the playing one, the preloaded next one, and the previous one
+type Background = ReturnType<typeof buildBackground> & ReturnType<typeof edgeSides> & { image: ImageBitmap; reach: number };
 const cache = new Map<DepthMap, Background>();
 const MAX_CACHED = 3;
 
@@ -257,7 +276,9 @@ export const backgroundFor = (image: ImageBitmap, depth: DepthMap, reach: number
   const { size } = depth;
   const ctx = new OffscreenCanvas(size, size).getContext("2d", { willReadFrequently: true })!;
   ctx.drawImage(image, 0, 0, size, size);
-  const bg = { ...buildBackground(ctx.getImageData(0, 0, size, size).data, depth.data, size, reach), image, reach };
+  const pixels = ctx.getImageData(0, 0, size, size).data;
+  const sides = edgeSides(depth.edges, size, pixels);
+  const bg = { ...buildBackground(pixels, depth.data, size, reach, sides), ...sides, image, reach };
   cache.delete(depth);
   cache.set(depth, bg);
   if (cache.size > MAX_CACHED) cache.delete(cache.keys().next().value!);
