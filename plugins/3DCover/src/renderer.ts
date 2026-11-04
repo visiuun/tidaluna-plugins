@@ -56,6 +56,10 @@ void main() {
   // and at rest (dir = 0) the output is pixel-identical to the original cover.
   float margin = max(abs(dir.x), abs(dir.y)) * max(uFocal, 1.0 - uFocal);
   vec2 p = (vUv - 0.5) * uCover * (1.0 - 2.0 * margin) + 0.5;
+  // Mip level from the screen, not from where the rays land: neighbouring rays can land far apart
+  // (one hits the foreground, the next the background behind it), which would pick a blurry mip that
+  // mixes the foreground's colour into the background and draws faint lines along the tilt
+  vec2 gx = dFdx(p), gy = dFdy(p);
 
   // March t from near (1) to far (0); the ray position is where depth t would come from
   float stepT = 1.0 / float(STEPS);
@@ -81,7 +85,7 @@ void main() {
     if (dm >= tm) { tB = tm; dB = dm; } else { tA = tm; dA = dm; }
   }
   vec2 hitUv = p - dir * (tB - uFocal);
-  vec3 col = texture(uImage, hitUv).rgb;
+  vec3 col = textureGrad(uImage, hitUv, gx, gy).rgb;
 
   // Once the foreground has moved off it, its anti-aliased rim left on the background would show as
   // a ghost outline, so once tilted, show those pixels repainted from their own surface
@@ -106,7 +110,7 @@ void main() {
     vec2 bgUv = p - dir * (bd - uFocal);
     float hidden = smoothstep(0.03, 0.06, abs(depthAt(bgUv) - bd));
     vec4 bgRim = texture(uRim, bgUv);
-    vec3 shown = mix(texture(uImage, bgUv).rgb, bgRim.rgb, min(bgRim.a * 2.0, 1.0));
+    vec3 shown = mix(textureGrad(uImage, bgUv, gx, gy).rgb, bgRim.rgb, min(bgRim.a * 2.0, 1.0));
     // Averaged across the tilt: neighbouring texel rows can have grown from different sources, which
     // would show as bars along the tilt direction
     vec2 across = normalize(vec2(-dir.y, dir.x)) * ${(2 / DEPTH_SIZE).toFixed(5)};
@@ -117,7 +121,7 @@ void main() {
     // before the wall rather than open a hole through it.
     vec2 aboveUv = p - dir * (tA - uFocal);
     vec4 aboveRim = texture(uRim, aboveUv);
-    vec3 above = mix(texture(uImage, aboveUv).rgb, aboveRim.rgb, min(aboveRim.a * 2.0, 1.0));
+    vec3 above = mix(textureGrad(uImage, aboveUv, gx, gy).rgb, aboveRim.rgb, min(aboveRim.a * 2.0, 1.0));
     vec3 behind = mix(grown.rgb, above, smoothstep(0.05, 0.1, bd - grown.a));
     col = mix(col, mix(shown, behind, hidden), hole);
   }

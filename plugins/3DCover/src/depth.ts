@@ -281,6 +281,20 @@ export const setInferenceLogger = (fn: typeof onInferred) => (onInferred = fn);
 // Resolution is part of the key so maps from older builds aren't read at the wrong size
 const depthKey = (coverId: string, model: ModelKey) => `${model}@${DEPTH_SIZE}:${coverId}`;
 
+// Cover pixels at depth-map size, so depth edges can be placed on the cover's own outlines.
+// Without them (decode failed) edges just follow the depth map.
+const coverPixels = async (bitmap: () => Promise<ImageBitmap>) => {
+  try {
+    const image = await bitmap();
+    const ctx = new OffscreenCanvas(DEPTH_SIZE, DEPTH_SIZE).getContext("2d", { willReadFrequently: true })!;
+    ctx.drawImage(image, 0, 0, DEPTH_SIZE, DEPTH_SIZE);
+    image.close();
+    return ctx.getImageData(0, 0, DEPTH_SIZE, DEPTH_SIZE).data;
+  } catch {
+    return undefined;
+  }
+};
+
 export const getCachedDepth = (coverId: string, model: ModelKey): DepthMap | undefined => memCache.get(depthKey(coverId, model));
 
 /**
@@ -303,7 +317,7 @@ export const getDepth = (coverId: string, model: ModelKey, bitmap: () => Promise
   job.promise = (async () => {
     const stored = await readDepth(key).catch(() => null);
     if (stored?.length === DEPTH_SIZE * DEPTH_SIZE) {
-      const map = { size: DEPTH_SIZE, ...sharpenEdges(stored, DEPTH_SIZE) };
+      const map = { size: DEPTH_SIZE, ...sharpenEdges(stored, DEPTH_SIZE, await coverPixels(bitmap)) };
       memSet(key, map);
       return map;
     }
@@ -314,7 +328,7 @@ export const getDepth = (coverId: string, model: ModelKey, bitmap: () => Promise
     });
     // Stored before edge sharpening, so tuning it later doesn't need fresh inference
     const smooth = postProcess(raw.data, raw.width, raw.height);
-    const map = { size: DEPTH_SIZE, ...sharpenEdges(smooth, DEPTH_SIZE) };
+    const map = { size: DEPTH_SIZE, ...sharpenEdges(smooth, DEPTH_SIZE, await coverPixels(bitmap)) };
     onInferred?.(raw.backend, raw.ms);
     memSet(key, map);
     writeDepth(key, smooth).catch(() => {});

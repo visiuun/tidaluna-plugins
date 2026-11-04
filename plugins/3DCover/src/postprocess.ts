@@ -116,18 +116,79 @@ export const windowMinMax = (src: Uint8Array, size: number, r: number) => {
 const EDGE_RADIUS = 3;
 export const EDGE_RANGE = 24;
 export const FOREGROUND_BIAS = 0.45; // slightly below the midpoint so the subject keeps its whole outline
-export const sharpenEdges = (src: Uint8Array, size: number) => {
+export const sharpenEdges = (src: Uint8Array, size: number, rgba?: Uint8ClampedArray | Uint8Array) => {
   const { lo, hi } = windowMinMax(src, size, EDGE_RADIUS);
+  const ramp = new Uint8Array(src);
+  if (rgba) followColourEdges(ramp, src, lo, hi, size, rgba);
   const data = new Uint8Array(src);
   const edges = new Uint8Array(src.length * 4);
   for (let i = 0; i < data.length; i++) {
     const range = hi[i] - lo[i];
-    if (range >= EDGE_RANGE) data[i] = src[i] - lo[i] > range * FOREGROUND_BIAS ? hi[i] : lo[i];
-    edges[i * 4] = src[i];
+    if (range >= EDGE_RANGE) data[i] = ramp[i] - lo[i] > range * FOREGROUND_BIAS ? hi[i] : lo[i];
+    edges[i * 4] = ramp[i];
     edges[i * 4 + 1] = lo[i];
     edges[i * 4 + 2] = hi[i];
   }
   return { data, edges };
+};
+
+// The model's edges are a few pixels soft and don't sit exactly on the object's outline, so snapping
+// them by depth alone bites into letters and drops thin parts. Inside each edge band, re-place the
+// ramp by colour instead: how far a pixel's colour lies from the nearby far side towards the nearby
+// near side is how much of it belongs to the near side (a matte). Only trusted where the two sides
+// are cleanly separable (flat colours far apart, like lettering): on textured or blurry edges (hair,
+// leather highlights) colour would misplace pixels, so the depth ramp stays. Colour can't overrule
+// clear depth either way.
+const MATTE_CONTRAST = [16, 48]; // colour distance (0-441) between the sides: depth only → colour only
+const MATTE_SEPARATION = [2, 4]; // that distance over the sides' own colour spread: same ramp
+const followColourEdges = (ramp: Uint8Array, src: Uint8Array, lo: Uint8Array, hi: Uint8Array, size: number, rgba: Uint8ClampedArray | Uint8Array) => {
+  const r = EDGE_RADIUS;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const range = hi[i] - lo[i];
+      if (range < EDGE_RANGE * 0.75) continue;
+      const nearCut = lo[i] + range * 0.75;
+      const farCut = lo[i] + range * 0.25;
+      let nn = 0, nr = 0, ng = 0, nb = 0, nq = 0, fn = 0, fr = 0, fg = 0, fb = 0, fq = 0;
+      for (let yy = Math.max(0, y - r); yy <= Math.min(size - 1, y + r); yy++) {
+        for (let xx = Math.max(0, x - r); xx <= Math.min(size - 1, x + r); xx++) {
+          const j = yy * size + xx;
+          const dj = src[j];
+          if (dj >= nearCut) {
+            nn++;
+            nr += rgba[j * 4];
+            ng += rgba[j * 4 + 1];
+            nb += rgba[j * 4 + 2];
+            nq += rgba[j * 4] ** 2 + rgba[j * 4 + 1] ** 2 + rgba[j * 4 + 2] ** 2;
+          } else if (dj <= farCut) {
+            fn++;
+            fr += rgba[j * 4];
+            fg += rgba[j * 4 + 1];
+            fb += rgba[j * 4 + 2];
+            fq += rgba[j * 4] ** 2 + rgba[j * 4 + 1] ** 2 + rgba[j * 4 + 2] ** 2;
+          }
+        }
+      }
+      if (!nn || !fn) continue;
+      const er = nr / nn - fr / fn, eg = ng / nn - fg / fn, eb = nb / nn - fb / fn;
+      const contrast2 = er * er + eg * eg + eb * eb;
+      if (contrast2 < MATTE_CONTRAST[0] ** 2) continue;
+      const t = (rgba[i * 4] - fr / fn) * er + (rgba[i * 4 + 1] - fg / fn) * eg + (rgba[i * 4 + 2] - fb / fn) * eb;
+      const byColour = Math.min(1, Math.max(0, t / contrast2));
+      const byDepth = (src[i] - lo[i]) / range;
+      const contrast = Math.sqrt(contrast2);
+      const nearSpread = Math.sqrt(Math.max(0, nq / nn - ((nr / nn) ** 2 + (ng / nn) ** 2 + (nb / nn) ** 2)));
+      const farSpread = Math.sqrt(Math.max(0, fq / fn - ((fr / fn) ** 2 + (fg / fn) ** 2 + (fb / fn) ** 2)));
+      const separation = contrast / (nearSpread + farSpread + 1);
+      const trust =
+        Math.min(1, (contrast - MATTE_CONTRAST[0]) / (MATTE_CONTRAST[1] - MATTE_CONTRAST[0])) *
+        Math.min(1, Math.max(0, (separation - MATTE_SEPARATION[0]) / (MATTE_SEPARATION[1] - MATTE_SEPARATION[0])));
+      if (trust <= 0) continue;
+      const a = Math.min(byDepth + 0.6, Math.max(byDepth - 0.6, byDepth + (byColour - byDepth) * trust));
+      ramp[i] = Math.round(lo[i] + a * range);
+    }
+  }
 };
 
 // Model output → stored map (before edge sharpening)

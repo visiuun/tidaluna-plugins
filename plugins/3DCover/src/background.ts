@@ -206,9 +206,10 @@ const repaintRim = (rgba: Uint8ClampedArray | Uint8Array, depth: Uint8Array, rim
       break;
     }
   }
-  // Foreground texels touching the rim carry the repainted colour too (still a = 0): the texture is
-  // filtered, and the repaint applies right up to the edge, where it would otherwise blend in the
-  // foreground's own colour and leave a faint outline
+  // Foreground texels touching the rim are repainted too: the GPU places the silhouette between
+  // texels, so rays can land on the outer half of such a texel as background, and the repaint applies
+  // right up to the edge (the shader only uses it for hits on the far side of an edge, so the
+  // foreground itself keeps its colours). Otherwise its anti-aliased colour streaks along the tilt.
   const size2 = size * size;
   const edge = new Uint8Array(out);
   for (let i = 0; i < size2; i++) {
@@ -231,6 +232,7 @@ const repaintRim = (rgba: Uint8ClampedArray | Uint8Array, depth: Uint8Array, rim
     edge[i * 4] = r / w;
     edge[i * 4 + 1] = g / w;
     edge[i * 4 + 2] = b / w;
+    edge[i * 4 + 3] = 255;
   }
   return edge;
 };
