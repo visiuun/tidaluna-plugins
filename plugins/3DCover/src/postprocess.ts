@@ -139,12 +139,17 @@ export const sharpenEdges = (src: Uint8Array, size: number, rgba?: Uint8ClampedA
 // are cleanly separable (flat colours far apart, like lettering): on textured or blurry edges (hair,
 // leather highlights) colour would misplace pixels, so the depth ramp stays. Colour can't overrule
 // clear depth either way.
+// Ink lines (outlines in drawings, dark seams) are darker than both sides; the model's edge tends to
+// run down their middle, which would leave half the outline behind on the background. They belong to
+// the near side.
 // With sides, also writes each edge pixel's two colours for the renderer, which repeats the matte on
 // the full-resolution cover so silhouettes are as crisp as the artwork: near = (near colour, 255) and
-// far = (far colour, 255), both scaled by trust, so filtering between edge and non-edge texels can
-// be undone by dividing by alpha.
+// far rgb = far colour, both scaled by trust, so filtering between edge and non-edge texels can be
+// undone by dividing by near's alpha. far's alpha = the darker side's brightness, for the ink rule.
 const MATTE_CONTRAST = [16, 48]; // colour distance (0-441) between the sides: depth only → colour only
 const MATTE_SEPARATION = [2, 4]; // that distance over the sides' own colour spread: same ramp
+export const INK = [10, 35]; // how much darker (0-255) than both sides: not ink → ink
+const luma = (r: number, g: number, b: number) => 0.299 * r + 0.587 * g + 0.114 * b;
 export type Sides = { near: Uint8Array; far: Uint8Array };
 const followColourEdges = (
   ramp: Uint8Array,
@@ -184,12 +189,19 @@ const followColourEdges = (
         }
       }
       if (!nn || !fn) continue;
+      const sideLum = Math.min(luma(nr / nn, ng / nn, nb / nn), luma(fr / fn, fg / fn, fb / fn));
+      const inkT = Math.min(1, Math.max(0, (sideLum - luma(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]) - INK[0]) / (INK[1] - INK[0])));
+      const ink = inkT * inkT * (3 - 2 * inkT);
+      if (sides) sides.far[i * 4 + 3] = sideLum;
+      const byDepth = (src[i] - lo[i]) / range;
       const er = nr / nn - fr / fn, eg = ng / nn - fg / fn, eb = nb / nn - fb / fn;
       const contrast2 = er * er + eg * eg + eb * eb;
-      if (contrast2 < MATTE_CONTRAST[0] ** 2) continue;
+      if (contrast2 < MATTE_CONTRAST[0] ** 2) {
+        if (ink > 0) ramp[i] = Math.round(lo[i] + Math.max(byDepth, ink) * range);
+        continue;
+      }
       const t = (rgba[i * 4] - fr / fn) * er + (rgba[i * 4 + 1] - fg / fn) * eg + (rgba[i * 4 + 2] - fb / fn) * eb;
       const byColour = Math.min(1, Math.max(0, t / contrast2));
-      const byDepth = (src[i] - lo[i]) / range;
       const contrast = Math.sqrt(contrast2);
       const nearSpread = Math.sqrt(Math.max(0, nq / nn - ((nr / nn) ** 2 + (ng / nn) ** 2 + (nb / nn) ** 2)));
       const farSpread = Math.sqrt(Math.max(0, fq / fn - ((fr / fn) ** 2 + (fg / fn) ** 2 + (fb / fn) ** 2)));
@@ -197,7 +209,10 @@ const followColourEdges = (
       const trust =
         Math.min(1, (contrast - MATTE_CONTRAST[0]) / (MATTE_CONTRAST[1] - MATTE_CONTRAST[0])) *
         Math.min(1, Math.max(0, (separation - MATTE_SEPARATION[0]) / (MATTE_SEPARATION[1] - MATTE_SEPARATION[0])));
-      if (trust <= 0) continue;
+      if (trust <= 0) {
+        if (ink > 0) ramp[i] = Math.round(lo[i] + Math.max(byDepth, ink) * range);
+        continue;
+      }
       if (sides) {
         sides.near[i * 4] = (nr / nn) * trust;
         sides.near[i * 4 + 1] = (ng / nn) * trust;
@@ -206,9 +221,8 @@ const followColourEdges = (
         sides.far[i * 4] = (fr / fn) * trust;
         sides.far[i * 4 + 1] = (fg / fn) * trust;
         sides.far[i * 4 + 2] = (fb / fn) * trust;
-        sides.far[i * 4 + 3] = 255 * trust;
       }
-      const a = Math.min(byDepth + 0.6, Math.max(byDepth - 0.6, byDepth + (byColour - byDepth) * trust));
+      const a = Math.max(ink, Math.min(byDepth + 0.6, Math.max(byDepth - 0.6, byDepth + (byColour - byDepth) * trust)));
       ramp[i] = Math.round(lo[i] + a * range);
     }
   }

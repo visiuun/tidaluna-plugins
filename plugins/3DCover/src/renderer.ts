@@ -1,6 +1,7 @@
 import { backgroundFor, reachFor } from "./background";
 import type { DepthMap } from "./depth";
-import { DEPTH_SIZE, EDGE_RANGE, FOREGROUND_BIAS } from "./postprocess";
+import { surfaceFor } from "./lighting";
+import { DEPTH_SIZE, EDGE_RANGE, FOREGROUND_BIAS, INK } from "./postprocess";
 
 export type ParallaxParams = {
   nx: number; // normalized mouse [-1, 1]
@@ -8,6 +9,7 @@ export type ParallaxParams = {
   intensity: number; // px of shift on a 500px cover
   focal: number; // 0..1
   suppress: number; // depth-cliff threshold for hole filling, 0.02..0.30
+  lighting: number; // 0 = off, 1 = full strength
 };
 
 const VERT = `#version 300 es
@@ -31,8 +33,10 @@ uniform sampler2D uImage;
 uniform sampler2D uDepth; // r = smooth depth, g/b = far/near side of the edge it's on
 uniform sampler2D uBg;    // rgb = background colour, a = background depth
 uniform sampler2D uNear;  // per edge: near side's colour × trust, a = trust (colour matte, see edgeSides)
-uniform sampler2D uFar;   // far side's colour × trust
+uniform sampler2D uFar;   // far side's colour × trust, a = the darker side's brightness
 uniform sampler2D uRim;   // rgb = background pixels tinted by the foreground's anti-aliased edge, repainted; a = rim
+uniform sampler2D uSurface; // rg = surface normal xy, b = gloss, a = blurred depth (see buildSurface)
+uniform float uLight;       // lighting strength, 0 = off
 uniform vec2 uMouse;
 uniform float uIntensity;
 uniform float uFocal;
@@ -52,16 +56,87 @@ float depthAt(vec2 uv) {
   vec3 s = texture(uDepth, uv).rgb;
   float range = s.b - s.g;
   float a = (s.r - s.g) / max(range, 1e-4);
-  vec4 near = texture(uNear, uv);
-  if (near.a > 0.004) {
-    vec3 nearCol = near.rgb / near.a;
-    vec3 farCol = texture(uFar, uv).rgb / near.a;
-    vec3 e = nearCol - farCol;
-    float byColour = clamp(dot(textureGrad(uImage, uv, gx, gy).rgb - farCol, e) / max(dot(e, e), 1e-4), 0.0, 1.0);
-    a = clamp(mix(a, byColour, near.a), a - 0.6, a + 0.6);
+  vec4 far = texture(uFar, uv);
+  if (far.a > 0.004) {
+    vec3 c = textureGrad(uImage, uv, gx, gy).rgb;
+    vec4 near = texture(uNear, uv);
+    if (near.a > 0.004) {
+      vec3 nearCol = near.rgb / near.a;
+      vec3 farCol = far.rgb / near.a;
+      vec3 e = nearCol - farCol;
+      float byColour = clamp(dot(c - farCol, e) / max(dot(e, e), 1e-4), 0.0, 1.0);
+      a = clamp(mix(a, byColour, near.a), a - 0.6, a + 0.6);
+    }
+    // Ink lines (darker than both sides) go with the near side, so outlines stay whole
+    a = max(a, smoothstep(${(INK[0] / 255).toFixed(4)}, ${(INK[1] / 255).toFixed(4)}, far.a - dot(c, vec3(0.299, 0.587, 0.114))));
   }
   float snapped = a > ${FOREGROUND_BIAS.toFixed(3)} ? s.b : s.g;
   return mix(s.r, snapped, smoothstep(${((EDGE_RANGE * 0.75) / 255).toFixed(4)}, ${(EDGE_RANGE / 255).toFixed(4)}, range));
+}
+
+// Lighting from the AI depth: a light that swings round as the cover tilts, so relief catches light
+// on one side and falls into shade on the other, a glare spot that sweeps across glossy surfaces,
+// reflections on surfaces turned away from the viewer, and foreground casting soft shadows onto what's
+// behind it (also into the gaps that open behind it). Everything scales with the tilt: at rest the
+// cover is untouched.
+vec3 shade(vec3 col, vec2 uv, float here, float flatten) {
+  float tilt = min(length(uMouse), 1.0);
+  if (tilt < 1e-3) return col;
+  vec2 toLight = -uMouse / length(uMouse);
+  vec4 surf = texture(uSurface, uv);
+  vec2 nxy = (surf.rg * 2.0 - 1.0) * (1.0 - flatten);
+  vec3 n = vec3(nxy, sqrt(max(0.0, 1.0 - dot(nxy, nxy))));
+  float amt = uLight * tilt;
+  vec3 base = col;
+
+  // Highlights already in the artwork (gold, chrome, glass, eyes, wet skin): pixels much brighter than
+  // their surroundings. Shiny materials are made of these, so they're what shines.
+  // Measured at the depth map's scale, so grain (pores, stubble, leather) doesn't sparkle, and only
+  // strong ones: a lit patch of skin is brighter than its surroundings too, but not by this much.
+  // Not along silhouettes: there a bright background next to a dark subject would count as one.
+  const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+  float texels = float(textureSize(uImage, 0).x);
+  float lum = dot(textureLod(uImage, uv, log2(texels / ${DEPTH_SIZE}.0)).rgb, LUMA);
+  float around = dot(textureLod(uImage, uv, log2(texels / 96.0)).rgb, LUMA);
+  vec3 sides = texture(uDepth, uv).rgb;
+  float highlight = smoothstep(0.08, 0.3, lum - around) * smoothstep(0.35, 0.75, lum)
+                  * (1.0 - smoothstep(${((EDGE_RANGE * 0.4) / 255).toFixed(4)}, ${((EDGE_RANGE * 0.8) / 255).toFixed(4)}, sides.b - sides.g));
+  float shiny = max(surf.b * (1.0 - flatten), highlight);
+
+  // Diffuse, relative to the light at rest: surfaces turned towards the light brighten, those turned
+  // away darken a little (mostly a lift, so covers don't just get darker), flat areas stay as they are
+  // Brightening works on the midtones (bright areas can't blow out)
+  float diffuse = dot(nxy, toLight) * tilt * 1.4 * uLight;
+  col = diffuse > 0.0 ? col + col * (1.0 - col) * diffuse * 2.0 : col * (1.0 + diffuse * 0.35);
+
+  // Soft shadows: anything well above this point, towards the light, blocks it. The occluders come
+  // from blurred depth, so the shadow fades out gradually instead of copying the silhouette
+  float shadow = 0.0;
+  for (int k = 1; k <= 4; k++) {
+    float dist = float(k) * 0.008 * tilt;
+    float occluder = texture(uSurface, uv + toLight * dist).a;
+    shadow += smoothstep(0.02, 0.25, occluder - here - dist * 2.0);
+  }
+  col *= 1.0 - shadow * 0.05 * amt;
+
+  // Reflection of the (blurred) cover around it, mostly on surfaces turned away from the viewer
+  vec3 env = textureLod(uImage, 0.5 + (uv - 0.5) * 0.5 - nxy * 0.7 + uMouse * 0.2, 5.0).rgb;
+  float fresnel = 0.04 + 0.96 * pow(1.0 - n.z, 3.0);
+  col = mix(col, max(col, env), min(1.0, fresnel * shiny * 0.6) * amt);
+
+  // Shine: highlights brighten as the cover tilts and flare as a soft band of light sweeps across it
+  // (bent by the surface shape), so gold, chrome and glass glint like the real thing
+  float along = dot(uv - 0.5, toLight) + dot(nxy, toLight) * 0.6;
+  float band = exp(-pow((along - mix(0.8, -0.2, tilt)) / 0.2, 2.0));
+  vec3 shine = mix(base, vec3(1.0), 0.25) * highlight * (0.3 + 1.6 * band) * amt;
+  col = 1.0 - (1.0 - col) * (1.0 - clamp(shine, 0.0, 1.0));
+
+  // Glare spot: sweeps in from the edge as the cover tilts
+  vec2 spot = 0.5 + toLight * mix(1.1, 0.3, tilt);
+  vec3 H = normalize(normalize(vec3(spot - uv, 0.5)) + vec3(0.0, 0.0, 1.0));
+  float spec = pow(max(dot(n, H), 0.0), mix(16.0, 60.0, shiny)) * (0.03 + 0.12 * shiny);
+  vec3 glare = mix(vec3(1.0), col, 0.3) * spec * amt;
+  return 1.0 - (1.0 - min(col, 1.0)) * (1.0 - clamp(glare, 0.0, 1.0));
 }
 
 void main() {
@@ -118,13 +193,14 @@ void main() {
   // silhouette, so fading in over that gives the silhouette a one-pixel anti-aliased edge.
   float wall = smoothstep(uSuppress * 0.3, uSuppress * 0.6, dB - dA);
   float hole = wall * smoothstep(0.0, uPixel / max(length(dir), 1e-5), dB - tB);
+  float bd = dA;
+  vec2 bgUv = p - dir * (bd - uFocal);
+  float hidden = 0.0;
   if (hole > 0.0) {
     // The layer behind the wall is the one the ray just passed over (edges are snapped per sample, so
     // that depth is clean). Where the cover really shows that layer, use the sharp original; where it's
     // hidden, take the grown-in background.
-    float bd = dA;
-    vec2 bgUv = p - dir * (bd - uFocal);
-    float hidden = smoothstep(0.03, 0.06, abs(depthAt(bgUv) - bd));
+    hidden = smoothstep(0.03, 0.06, abs(depthAt(bgUv) - bd));
     vec4 bgRim = texture(uRim, bgUv);
     vec3 shown = mix(textureGrad(uImage, bgUv, gx, gy).rgb, bgRim.rgb, min(bgRim.a * 2.0, 1.0));
     // Averaged across the tilt: neighbouring texel rows can have grown from different sources, which
@@ -142,6 +218,11 @@ void main() {
     vec3 behind = mix(grown.rgb, above, smoothstep(0.05, 0.1, abs(bd - grown.a)));
     col = mix(col, mix(shown, behind, hidden), hole);
   }
+  // Grown-in background has no surface of its own in the map (that spot holds the foreground's): light it flat
+  if (uLight > 0.0) {
+    bool gap = hole > 0.5;
+    col = shade(col, gap ? bgUv : hitUv, gap ? bd : dB, hole * hidden);
+  }
   outColor = vec4(col, 1.0);
 }`;
 
@@ -156,6 +237,8 @@ export class ParallaxRenderer {
   private rimTex: WebGLTexture | null = null;
   private nearTex: WebGLTexture | null = null;
   private farTex: WebGLTexture | null = null;
+  private surfaceTex: WebGLTexture | null = null;
+  private surfaceDepth?: DepthMap;
   private uniforms: Record<string, WebGLUniformLocation | null> = {};
   private imageAspect = 1;
   private currentImage?: ImageBitmap;
@@ -195,7 +278,7 @@ export class ParallaxRenderer {
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
-    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uPixel", "uBg", "uRim", "uNear", "uFar"]) {
+    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uPixel", "uBg", "uRim", "uNear", "uFar", "uSurface", "uLight"]) {
       this.uniforms[name] = gl.getUniformLocation(program, name);
     }
     gl.uniform1i(this.uniforms.uImage, 0);
@@ -204,6 +287,7 @@ export class ParallaxRenderer {
     gl.uniform1i(this.uniforms.uRim, 3);
     gl.uniform1i(this.uniforms.uNear, 4);
     gl.uniform1i(this.uniforms.uFar, 5);
+    gl.uniform1i(this.uniforms.uSurface, 6);
 
     const makeTex = () => {
       const tex = gl.createTexture()!;
@@ -220,6 +304,7 @@ export class ParallaxRenderer {
     this.rimTex = makeTex();
     this.nearTex = makeTex();
     this.farTex = makeTex();
+    this.surfaceTex = makeTex();
 
     this.gl = gl;
     this.program = program;
@@ -233,7 +318,10 @@ export class ParallaxRenderer {
 
   setSource(image: ImageBitmap, depth: DepthMap) {
     const gl = this.init();
-    if (image !== this.currentImage || depth !== this.currentDepth) this.bgReach = 0;
+    if (image !== this.currentImage || depth !== this.currentDepth) {
+      this.bgReach = 0;
+      this.surfaceDepth = undefined;
+    }
     if (image !== this.currentImage) {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.imageTex);
@@ -278,6 +366,18 @@ export class ParallaxRenderer {
     this.bgReach = bg.reach;
   }
 
+  // Surface map for lighting, built only once lighting is on
+  private syncSurface(gl: WebGL2RenderingContext) {
+    if (this.surfaceDepth === this.currentDepth) return;
+    const depth = this.currentDepth!;
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, this.surfaceTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    const surface = surfaceFor(this.currentImage!, depth);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, surface.size, surface.size, 0, gl.RGBA, gl.UNSIGNED_BYTE, surface.data);
+    this.surfaceDepth = depth;
+  }
+
   resize(cssW: number, cssH: number) {
     // Match the screen (capped at the 1280px source) so it's as sharp as TIDAL's own <img>
     const scale = Math.min(window.devicePixelRatio || 1, 1280 / Math.max(cssW, cssH, 1));
@@ -293,6 +393,7 @@ export class ParallaxRenderer {
     const gl = this.init();
     if (!this.currentImage || !this.currentDepth) return;
     this.syncBackground(gl, p.intensity);
+    if (p.lighting > 0) this.syncSurface(gl);
     const { width: w, height: h } = this.canvas;
     gl.viewport(0, 0, w, h);
 
@@ -304,6 +405,7 @@ export class ParallaxRenderer {
     gl.uniform1f(this.uniforms.uIntensity, p.intensity / 500);
     gl.uniform1f(this.uniforms.uFocal, p.focal);
     gl.uniform1f(this.uniforms.uSuppress, p.suppress);
+    gl.uniform1f(this.uniforms.uLight, p.lighting);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 

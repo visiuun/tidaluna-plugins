@@ -2,6 +2,7 @@ import { LunaUnload, Tracer } from "@luna/core";
 import type { MediaItem } from "@luna/lib";
 import { type DepthMap, closeDepthCache, disposeDepthWorker, getCachedDepth, getDepth, isAbort, loadCoverBitmap, setInferenceLogger, setInfoLogger } from "./depth";
 import { backgroundFor, clearBackgrounds, reachFor } from "./background";
+import { clearSurfaces, surfaceFor } from "./lighting";
 import { ParallaxRenderer } from "./renderer";
 import { settings } from "./Settings";
 
@@ -138,7 +139,10 @@ const prebuildBackground = (cover: Cover, depth: DepthMap, signal: AbortSignal) 
   new Promise<void>((resolve, reject) =>
     requestIdleCallback(async () => {
       try {
-        if (!signal.aborted) backgroundFor(await getBitmap(cover), depth, reachFor(settings.intensity, depth.size));
+        if (signal.aborted) return resolve();
+        const image = await getBitmap(cover);
+        backgroundFor(image, depth, reachFor(settings.intensity, depth.size));
+        if (settings.lighting) surfaceFor(image, depth);
         resolve();
       } catch (err) {
         reject(err);
@@ -301,6 +305,7 @@ const frame = (now: number) => {
         intensity: settings.intensity,
         focal: settings.focal / 100,
         suppress: settings.antiSmear / 100,
+        lighting: settings.lighting ? settings.lightStrength / 100 : 0,
       });
       Object.assign(drawn, { x: n.x, y: n.y, w, h, dirty: false });
     } catch (err) {
@@ -423,6 +428,7 @@ unloads.add(() => {
   teardown();
   bitmaps.clear();
   clearBackgrounds();
+  clearSurfaces();
   disposeDepthWorker();
   closeDepthCache();
 });

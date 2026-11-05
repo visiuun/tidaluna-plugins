@@ -11,6 +11,8 @@ export type PluginSettings = {
   antiSmear: number; // 2-30 → occlusion threshold 0.02-0.30
   mouseSmoothing: number; // only used when the cover has no tilt container to follow
   invert: boolean;
+  lighting: boolean; // light, reflections and shadows from the AI depth
+  lightStrength: number; // 0-100
 };
 
 export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("3DCover", {
@@ -20,6 +22,8 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("3D
   antiSmear: 10,
   mouseSmoothing: 85,
   invert: false,
+  lighting: true,
+  lightStrength: 60,
 });
 
 // Older builds could store a React element here from the select's onChange
@@ -30,6 +34,7 @@ export const Settings = () => {
   const { LunaButtonSetting, LunaNumberSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, LunaSwitchSetting } = window.luna.ui!;
   const [model, setModel] = React.useState(settings.model);
   const [invert, setInvert] = React.useState(settings.invert);
+  const [lighting, setLighting] = React.useState(settings.lighting);
   const [clearingDepth, setClearingDepth] = React.useState(false);
   const [clearingModel, setClearingModel] = React.useState(false);
   const [stats, setStats] = React.useState<{ count: number; bytes: number } | null>(null);
@@ -87,6 +92,29 @@ export const Settings = () => {
         value={settings.antiSmear}
         onNumber={(num: number) => updateSetting("antiSmear", num)}
       />
+
+      <LunaSwitchSetting
+        title="AI Lighting"
+        desc="Light, reflections and shadows that move with the tilt, from the AI depth map's surface shape"
+        checked={lighting}
+        value={lighting}
+        onChange={(e: any, checked?: boolean) => {
+          const val = typeof checked === "boolean" ? checked : (e?.target?.checked ?? !lighting);
+          setLighting(val);
+          updateSetting("lighting", val);
+        }}
+      />
+
+      {lighting && (
+        <LunaNumberSetting
+          title="Lighting Strength"
+          desc="How strong the lighting, reflections and shadows are"
+          min={0}
+          max={100}
+          value={settings.lightStrength}
+          onNumber={(num: number) => updateSetting("lightStrength", num)}
+        />
+      )}
 
       <LunaNumberSetting
         title="Fallback Mouse Smoothing"

@@ -42,7 +42,8 @@ Turns the now playing cover into a 2.5D parallax scene that moves with TIDAL's c
 - Generation starts 1.5s after a track begins playing (skipped tracks are never processed), and the next track is prepared ahead of time. Hovering a cover that isn't ready yet generates it immediately.
 - Every generated depth map is saved on disk (~7KB each), so a cover is only ever processed once.
 - Rendering is a single WebGL shader that ray-marches the depth map, so foreground correctly covers background and the gaps behind edges are filled from the background.
-- Settings: model (Small/Base), depth shift, focal plane, edge anti-smear, fallback mouse smoothing, invert direction, clear depth cache, clear downloaded model.
+- AI Lighting (on by default): light, soft shadows, reflections and shine on glossy things like gold and chrome move with the tilt, from the surface shape of the AI depth map. At rest the cover is untouched.
+- Settings: model (Small/Base), depth shift, focal plane, edge anti-smear, AI lighting and its strength, fallback mouse smoothing, invert direction, clear depth cache, clear downloaded model.
 
 ---
 
