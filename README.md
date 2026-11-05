@@ -39,11 +39,12 @@ A collection of plugins for **[TidaLuna](https://github.com/Inrixia/TidaLuna)**.
 Turns the now playing cover into a 2.5D parallax scene that moves with TIDAL's cover tilt when you hover it.
 
 - Depth is generated **locally** with Depth-Anything-V2 (WebGPU when available, CPU otherwise). The model downloads once (~27MB for Small) and is kept on disk.
-- Generation starts 1.5s after a track begins playing (skipped tracks are never processed), and the next track is prepared ahead of time. Hovering a cover that isn't ready yet generates it immediately.
+- Generation starts as soon as a track begins playing. Skipping drops the skipped track's queued work (a generation already running finishes and is saved). Hovering a cover that isn't ready yet generates it immediately.
+- Preload Next Cover (on by default): the next track's cover is generated before it plays, near the end of the current track or as soon as you hover the next button.
 - Every generated depth map is saved on disk (~7KB each), so a cover is only ever processed once.
 - Rendering is a single WebGL shader that ray-marches the depth map, so foreground correctly covers background and the gaps behind edges are filled from the background.
-- AI Lighting (on by default): light, soft shadows, reflections and shine on glossy things like gold and chrome move with the tilt, from the surface shape of the AI depth map. At rest the cover is untouched.
-- Settings: model (Small/Base), depth shift, focal plane, edge anti-smear, AI lighting and its strength, fallback mouse smoothing, invert direction, clear depth cache, clear downloaded model.
+- AI Lighting (on by default): light, soft shadows, reflections and shine on glossy things like gold and chrome, lit from TIDAL's own moving cover glare and shaped by the AI depth map. At rest the cover is untouched.
+- Settings: model (Small/Base), depth shift, focal plane, edge anti-smear, AI lighting and its strength, preload next cover, fallback mouse smoothing, invert direction, clear depth cache, clear downloaded model.
 
 ---
 

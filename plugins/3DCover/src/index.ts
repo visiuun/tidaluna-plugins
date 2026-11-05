@@ -19,6 +19,9 @@ const SPINNER_CLASS = "luna-3d-cover-spinner";
 const PLAYER_COVER = 'img[data-test="now-playing-artwork"]';
 const COVER_RE = /resources\.tidal\.com\/images\/([0-9a-f/-]+?)\/(\d+)x(\d+)\.(jpg|png|webp)/i;
 const TILT_CONTAINER = '[class*="_tilt_"]';
+// TIDAL's light over the tilted cover: a radial gradient whose centre follows the tilt
+const GLARE = '[class*="_glare_"]';
+const GLARE_AT = /circle at\s+(-?[\d.]+)%\s+(-?[\d.]+)%/;
 const SPINNER_DELAY_MS = 350;
 const LEAVE_TIMEOUT_MS = 1500;
 // Smallest tilt treated as "full" deflection until TIDAL's real maximum has been seen
@@ -65,6 +68,7 @@ unloads.add(() => spinner.remove());
 type Active = {
   img: HTMLImageElement;
   tiltEl: HTMLElement | null;
+  glareEl: HTMLElement | null;
   coverId: string;
   ready: boolean;
   leaving: boolean;
@@ -118,21 +122,16 @@ const coverOf = async (item?: MediaItem) => {
   return url ? coverFromUrl(url) : null;
 };
 
-// Background generation waits until a track has been playing for a moment, so skipping through
-// songs doesn't queue up work. Anything not started yet is dropped as soon as the track changes.
-// (Hovering a cover still generates it immediately.)
-const GENERATE_DELAY_MS = 1500;
+// Generation starts as soon as a track does. Skipping drops whatever the previous track still had
+// queued, unless the new track needs the same cover; a run already in progress finishes first (see
+// runOn in depth.ts). Hovering a cover is never cancelled.
 let trackAbort = new AbortController();
 let trackSeq = 0;
 
-const generateLater = (cover: Cover, signal: AbortSignal, context: string) => {
-  const timer = setTimeout(() => {
-    buildDepth(cover, signal)
-      .then((depth) => prebuildBackground(cover, depth, signal))
-      .catch((err) => isAbort(err) || trace.err.withContext(context)(err));
-  }, GENERATE_DELAY_MS);
-  signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
-};
+const generate = (cover: Cover, signal: AbortSignal, context: string) =>
+  buildDepth(cover, signal)
+    .then((depth) => prebuildBackground(cover, depth, signal))
+    .catch((err) => isAbort(err) || trace.err.withContext(context)(err));
 
 // The background layer takes a few ms of main-thread work: do it while idle so hovering only uploads it
 const prebuildBackground = (cover: Cover, depth: DepthMap, signal: AbortSignal) =>
@@ -151,25 +150,32 @@ const prebuildBackground = (cover: Cover, depth: DepthMap, signal: AbortSignal) 
   );
 
 const onTrack = async (item?: MediaItem) => {
-  trackAbort.abort();
-  trackAbort = new AbortController();
-  const { signal } = trackAbort;
   const seq = ++trackSeq;
-
-  const cover = await coverOf(item);
+  currentItem = item;
+  trackStart = performance.now();
+  const cover = await coverOf(item).catch(() => null);
   // A newer track arrived while this one's cover URL was resolving
-  if (!cover || seq !== trackSeq) return;
-  playingCover = cover;
-  cachedImg = null;
-  generateLater(cover, signal, "prefetch");
+  if (seq !== trackSeq) return;
+
+  const previous = trackAbort;
+  trackAbort = new AbortController();
+  if (cover) {
+    playingCover = cover;
+    cachedImg = null;
+    // Joined before the previous track's work is cancelled: if that was already this cover (the
+    // preloaded next track), it carries on instead of starting over
+    generate(cover, trackAbort.signal, "prefetch");
+  }
+  previous.abort();
 };
 
 // TIDAL preloads the next track near the end of the current one: build its depth map early too.
 // Tied to the current track's signal, so skipping cancels it.
 const onPreload = async (item?: MediaItem) => {
+  if (!settings.preloadNext) return;
   const { signal } = trackAbort;
   const cover = await coverOf(item);
-  if (cover && !signal.aborted) generateLater(cover, signal, "preload");
+  if (cover && !signal.aborted) generate(cover, signal, "preload");
 };
 
 // @luna/lib is read from window.luna instead of imported: Luna's import wrapper for plugin modules
@@ -178,7 +184,46 @@ const onPreload = async (item?: MediaItem) => {
 const lib = window.luna.lib;
 lib?.MediaItem.onMediaTransition(unloads, onTrack);
 lib?.MediaItem.onPreload(unloads, onPreload);
-setInferenceLogger((backend, ms) => trace.log(`Depth map generated in ${ms}ms (${backend})`));
+setInferenceLogger((backend, ms) => {
+  lastGenerateMs = ms;
+  trace.log(`Depth map generated in ${ms}ms (${backend})`);
+});
+
+// ------------------ NEXT COVER PRELOADING ------------------
+// The next song's cover is generated before it plays: once the current song is nearly over (early
+// enough that it's ready on time, at least PRELOAD_LEAD_MS), or as soon as the next button is hovered.
+// It's tied to the current track, so if a different song plays instead it's cancelled like a skip;
+// if the next song does play, its work carries on.
+const PRELOAD_LEAD_MS = 5000;
+let currentItem: MediaItem | undefined;
+let lastGenerateMs = 0;
+let trackStart = 0;
+let preloadedSeq = -1;
+
+const preloadNext = async () => {
+  if (!settings.preloadNext || preloadedSeq === trackSeq || !lib) return;
+  preloadedSeq = trackSeq;
+  const { signal } = trackAbort;
+  const cover = await lib.PlayState.nextMediaItem().then(coverOf).catch(() => null);
+  if (cover && !signal.aborted) generate(cover, signal, "preload next");
+};
+
+const preloadTimer = setInterval(() => {
+  const duration = currentItem?.duration;
+  // Right after a song changes, the player can still report the previous song's position
+  if (!settings.preloadNext || !duration || !lib?.PlayState.playing || performance.now() - trackStart < 3000) return;
+  const position = lib.PlayState.currentTime;
+  const remaining = (duration - position) * 1000;
+  if (position <= duration && remaining <= Math.max(PRELOAD_LEAD_MS, lastGenerateMs + 1000)) preloadNext();
+}, 1000);
+unloads.add(() => clearInterval(preloadTimer));
+
+const NEXT_BUTTON = '[data-test="next"]';
+const onPointerOver = (e: PointerEvent) => {
+  if ((e.target as Element | null)?.closest?.(NEXT_BUTTON)) preloadNext();
+};
+document.addEventListener("pointerover", onPointerOver, { passive: true });
+unloads.add(() => document.removeEventListener("pointerover", onPointerOver));
 setInfoLogger((msg) => trace.log(msg));
 lib?.MediaItem.fromPlaybackContext().then(onTrack).catch(() => {});
 unloads.add(() => trackAbort.abort());
@@ -299,6 +344,7 @@ const frame = (now: number) => {
   // Skip redundant draws while the cover is resting
   if (drawn.dirty || Math.abs(n.x - drawn.x) > 1e-4 || Math.abs(n.y - drawn.y) > 1e-4 || w !== drawn.w || h !== drawn.h) {
     try {
+      const light = lightPosition(active, { x: n.x * flip, y: n.y * flip });
       renderer.draw({
         nx: n.x * flip,
         ny: n.y * flip,
@@ -306,6 +352,8 @@ const frame = (now: number) => {
         focal: settings.focal / 100,
         suppress: settings.antiSmear / 100,
         lighting: settings.lighting ? settings.lightStrength / 100 : 0,
+        lightX: light.x,
+        lightY: light.y,
       });
       Object.assign(drawn, { x: n.x, y: n.y, w, h, dirty: false });
     } catch (err) {
@@ -314,6 +362,16 @@ const frame = (now: number) => {
     }
   }
   scheduleFrame();
+};
+
+// The lighting uses TIDAL's own light (its glare's centre), so both move together. Without one, a
+// light on the side opposite the tilt that swings in from outside the cover as the tilt grows.
+const lightPosition = (state: Active, n: { x: number; y: number }) => {
+  const at = state.glareEl?.isConnected ? GLARE_AT.exec(state.glareEl.style.background) : null;
+  if (at) return { x: parseFloat(at[1]) / 100, y: parseFloat(at[2]) / 100 };
+  const len = Math.hypot(n.x, n.y) || 1;
+  const reach = 1.1 - 0.8 * Math.min(1, len);
+  return { x: 0.5 - (n.x / len) * reach, y: 0.5 - (n.y / len) * reach };
 };
 
 // ------------------ LIFECYCLE ------------------
@@ -376,7 +434,9 @@ const activate = (img: HTMLImageElement) => {
   teardown();
   const cover = playingCover?.id;
   if (cover && failed.id === cover && performance.now() - failed.at < RETRY_AFTER_MS) return;
-  const state: Active = { img, tiltEl: img.closest<HTMLElement>(TILT_CONTAINER), coverId: "", ready: false, leaving: false, leaveStart: 0 };
+  const tiltEl = img.closest<HTMLElement>(TILT_CONTAINER);
+  const glareEl = tiltEl?.querySelector<HTMLElement>(GLARE) ?? null;
+  const state: Active = { img, tiltEl, glareEl, coverId: "", ready: false, leaving: false, leaveStart: 0 };
   active = state;
   prepare(state);
 };

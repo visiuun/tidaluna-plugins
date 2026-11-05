@@ -184,6 +184,11 @@ const createHost = async (): Promise<Host> => {
   return { kind: "worker", port: worker, dispose: () => worker.terminate() };
 };
 
+const aborted = () => new DOMException("Track skipped", "AbortError");
+
+// A run that has started always finishes (its result is still saved): the only way to stop one is
+// terminating the worker, and in TIDAL's 32-bit renderer the next worker then can't get the memory
+// it needs and hangs. Cancelling therefore only drops jobs that haven't started yet.
 const runOn = (host: Host, bitmap: ImageBitmap, model: ModelKey) =>
   new Promise<InferResult>((resolve, reject) => {
     const id = nextId++;
@@ -191,21 +196,26 @@ const runOn = (host: Host, bitmap: ImageBitmap, model: ModelKey) =>
     host.port.postMessage({ type: "infer", id, model: MODEL_IDS[model], bitmap }, [bitmap]);
   });
 
-const inferDepth = async (bitmap: () => Promise<ImageBitmap>, model: ModelKey): Promise<InferResult> => {
+const inferDepth = async (bitmap: () => Promise<ImageBitmap>, model: ModelKey, cancel?: AbortSignal): Promise<InferResult> => {
   const host = await (hostPromise ??= createHost().catch((err) => {
     hostPromise = undefined;
     throw err;
   }));
+  const image = await bitmap();
+  if (cancel?.aborted) {
+    image.close();
+    throw aborted();
+  }
   try {
-    return await runOn(host, await bitmap(), model);
+    return await runOn(host, image, model);
   } catch (err) {
-    if (host.kind !== "page") throw err;
+    if (host.kind !== "page" || isAbort(err)) throw err;
     // In-page WebGPU didn't work out: fall back to the worker (CPU) for the rest of the session
     onInfo?.(`In-page WebGPU failed, using worker: ${(err as Error).message}`);
     host.dispose();
     forceWorker = true;
     hostPromise = undefined;
-    return inferDepth(bitmap, model);
+    return inferDepth(bitmap, model, cancel);
   }
 };
 
@@ -260,8 +270,8 @@ export const getDepthCacheStats = () => depthCacheStats();
 export const closeDepthCache = () => memCache.clear();
 
 // ------------------ QUEUE ------------------
-// One inference at a time. Jobs carry an AbortSignal: if the track was skipped before a job's turn
-// comes up, it's dropped instead of burning seconds of CPU on a cover nobody will see.
+// One inference at a time. Jobs carry the AbortSignals of the tracks that want them: once all of
+// those are skipped before the job's turn comes up, it's dropped.
 let queue: Promise<unknown> = Promise.resolve();
 const enqueue = <T>(fn: () => Promise<T>): Promise<T> => {
   const run = queue.then(fn, fn);
@@ -272,7 +282,15 @@ const enqueue = <T>(fn: () => Promise<T>): Promise<T> => {
 export const isAbort = (err: unknown) => (err as Error)?.name === "AbortError";
 
 // ------------------ PUBLIC API ------------------
-type Job = { promise: Promise<DepthMap>; keep: boolean };
+// keep: someone is hovering the cover, never cancel. cancel: fires once every track that wanted it was skipped.
+type Job = { promise: Promise<DepthMap>; keep: boolean; signals: AbortSignal[]; cancel: AbortController };
+const want = (job: Job, signal?: AbortSignal) => {
+  if (!signal) return void (job.keep = true);
+  job.signals.push(signal);
+  const check = () => !job.keep && job.signals.every((s) => s.aborted) && job.cancel.abort();
+  if (signal.aborted) check();
+  else signal.addEventListener("abort", check, { once: true });
+};
 const inflight = new Map<string, Job>();
 
 let onInferred: ((backend: string, ms: number) => void) | undefined;
@@ -308,12 +326,13 @@ export const getDepth = (coverId: string, model: ModelKey, bitmap: () => Promise
   if (hit) return Promise.resolve(hit);
 
   const existing = inflight.get(key);
-  if (existing) {
-    if (!signal) existing.keep = true;
+  if (existing && !existing.cancel.signal.aborted) {
+    want(existing, signal);
     return existing.promise;
   }
 
-  const job: Job = { keep: !signal, promise: null! };
+  const job: Job = { keep: false, signals: [], cancel: new AbortController(), promise: null! };
+  want(job, signal);
   job.promise = (async () => {
     const stored = await readDepth(key).catch(() => null);
     if (stored?.length === DEPTH_SIZE * DEPTH_SIZE) {
@@ -323,8 +342,8 @@ export const getDepth = (coverId: string, model: ModelKey, bitmap: () => Promise
     }
 
     const raw = await enqueue(() => {
-      if (signal?.aborted && !job.keep) throw new DOMException("Track skipped before its turn", "AbortError");
-      return inferDepth(bitmap, model);
+      if (job.cancel.signal.aborted) throw aborted();
+      return inferDepth(bitmap, model, job.cancel.signal);
     });
     // Stored before edge sharpening, so tuning it later doesn't need fresh inference
     const smooth = postProcess(raw.data, raw.width, raw.height);
@@ -333,7 +352,7 @@ export const getDepth = (coverId: string, model: ModelKey, bitmap: () => Promise
     memSet(key, map);
     writeDepth(key, smooth).catch(() => {});
     return map;
-  })().finally(() => inflight.delete(key));
+  })().finally(() => inflight.get(key) === job && inflight.delete(key));
 
   inflight.set(key, job);
   return job.promise;

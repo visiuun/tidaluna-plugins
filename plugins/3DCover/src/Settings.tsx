@@ -13,6 +13,7 @@ export type PluginSettings = {
   invert: boolean;
   lighting: boolean; // light, reflections and shadows from the AI depth
   lightStrength: number; // 0-100
+  preloadNext: boolean; // generate the next track's cover before it plays
 };
 
 export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("3DCover", {
@@ -24,6 +25,7 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("3D
   invert: false,
   lighting: true,
   lightStrength: 60,
+  preloadNext: true,
 });
 
 // Older builds could store a React element here from the select's onChange
@@ -35,6 +37,7 @@ export const Settings = () => {
   const [model, setModel] = React.useState(settings.model);
   const [invert, setInvert] = React.useState(settings.invert);
   const [lighting, setLighting] = React.useState(settings.lighting);
+  const [preloadNext, setPreloadNext] = React.useState(settings.preloadNext);
   const [clearingDepth, setClearingDepth] = React.useState(false);
   const [clearingModel, setClearingModel] = React.useState(false);
   const [stats, setStats] = React.useState<{ count: number; bytes: number } | null>(null);
@@ -115,6 +118,18 @@ export const Settings = () => {
           onNumber={(num: number) => updateSetting("lightStrength", num)}
         />
       )}
+
+      <LunaSwitchSetting
+        title="Preload Next Cover"
+        desc="Prepare the next song's cover before it plays: near the end of the current song, or as soon as you hover the next button"
+        checked={preloadNext}
+        value={preloadNext}
+        onChange={(e: any, checked?: boolean) => {
+          const val = typeof checked === "boolean" ? checked : (e?.target?.checked ?? !preloadNext);
+          setPreloadNext(val);
+          updateSetting("preloadNext", val);
+        }}
+      />
 
       <LunaNumberSetting
         title="Fallback Mouse Smoothing"

@@ -10,6 +10,8 @@ export type ParallaxParams = {
   focal: number; // 0..1
   suppress: number; // depth-cliff threshold for hole filling, 0.02..0.30
   lighting: number; // 0 = off, 1 = full strength
+  lightX: number; // where the light is, over the cover box (0..1, can be outside)
+  lightY: number;
 };
 
 const VERT = `#version 300 es
@@ -37,6 +39,7 @@ uniform sampler2D uFar;   // far side's colour × trust, a = the darker side's b
 uniform sampler2D uRim;   // rgb = background pixels tinted by the foreground's anti-aliased edge, repainted; a = rim
 uniform sampler2D uSurface; // rg = surface normal xy, b = gloss, a = blurred depth (see buildSurface)
 uniform float uLight;       // lighting strength, 0 = off
+uniform vec2 uLightPos;     // the light's position over the cover box (TIDAL's glare), 0..1
 uniform vec2 uMouse;
 uniform float uIntensity;
 uniform float uFocal;
@@ -46,6 +49,7 @@ uniform float uPixel; // one output pixel in image uv
 
 const int STEPS = 40;
 vec2 gx, gy; // screen-space uv derivatives, for mip selection
+vec2 lightUv; // uLightPos in image uv
 
 
 // Snap to the near or far side of a depth edge on the filtered value, so the edge follows a smooth
@@ -74,15 +78,17 @@ float depthAt(vec2 uv) {
   return mix(s.r, snapped, smoothstep(${((EDGE_RANGE * 0.75) / 255).toFixed(4)}, ${(EDGE_RANGE / 255).toFixed(4)}, range));
 }
 
-// Lighting from the AI depth: a light that swings round as the cover tilts, so relief catches light
-// on one side and falls into shade on the other, a glare spot that sweeps across glossy surfaces,
-// reflections on surfaces turned away from the viewer, and foreground casting soft shadows onto what's
-// behind it (also into the gaps that open behind it). Everything scales with the tilt: at rest the
-// cover is untouched.
+// Lighting from the AI depth, lit by the same light TIDAL's glare shows moving over the cover: relief
+// facing it catches light and the rest falls into shade, glossy surfaces and highlights flare near it,
+// surfaces turned away from the viewer pick up reflections, and foreground casts soft shadows away
+// from it (also into the gaps that open behind it). Everything scales with the tilt: at rest the cover
+// is untouched.
 vec3 shade(vec3 col, vec2 uv, float here, float flatten) {
   float tilt = min(length(uMouse), 1.0);
   if (tilt < 1e-3) return col;
-  vec2 toLight = -uMouse / length(uMouse);
+  vec2 toSpot = lightUv - uv;
+  vec2 toLight = toSpot / max(length(toSpot), 1e-3);
+  vec3 L = normalize(vec3(toSpot, 0.6));
   vec4 surf = texture(uSurface, uv);
   vec2 nxy = (surf.rg * 2.0 - 1.0) * (1.0 - flatten);
   vec3 n = vec3(nxy, sqrt(max(0.0, 1.0 - dot(nxy, nxy))));
@@ -106,7 +112,7 @@ vec3 shade(vec3 col, vec2 uv, float here, float flatten) {
   // Diffuse, relative to the light at rest: surfaces turned towards the light brighten, those turned
   // away darken a little (mostly a lift, so covers don't just get darker), flat areas stay as they are
   // Brightening works on the midtones (bright areas can't blow out)
-  float diffuse = dot(nxy, toLight) * tilt * 1.4 * uLight;
+  float diffuse = dot(nxy, L.xy) * tilt * 2.0 * uLight;
   col = diffuse > 0.0 ? col + col * (1.0 - col) * diffuse * 2.0 : col * (1.0 + diffuse * 0.35);
 
   // Soft shadows: anything well above this point, towards the light, blocks it. The occluders come
@@ -117,6 +123,7 @@ vec3 shade(vec3 col, vec2 uv, float here, float flatten) {
     float occluder = texture(uSurface, uv + toLight * dist).a;
     shadow += smoothstep(0.02, 0.25, occluder - here - dist * 2.0);
   }
+  shadow *= smoothstep(0.0, 0.08, length(toSpot)); // no direction to cast in right under the light
   col *= 1.0 - shadow * 0.05 * amt;
 
   // Reflection of the (blurred) cover around it, mostly on surfaces turned away from the viewer
@@ -124,16 +131,15 @@ vec3 shade(vec3 col, vec2 uv, float here, float flatten) {
   float fresnel = 0.04 + 0.96 * pow(1.0 - n.z, 3.0);
   col = mix(col, max(col, env), min(1.0, fresnel * shiny * 0.6) * amt);
 
-  // Shine: highlights brighten as the cover tilts and flare as a soft band of light sweeps across it
-  // (bent by the surface shape), so gold, chrome and glass glint like the real thing
-  float along = dot(uv - 0.5, toLight) + dot(nxy, toLight) * 0.6;
-  float band = exp(-pow((along - mix(0.8, -0.2, tilt)) / 0.2, 2.0));
+  // Shine: highlights brighten as the cover tilts and flare where the light passes over them (bent by
+  // the surface shape), so gold, chrome and glass glint like the real thing
+  vec2 off = uv - lightUv + nxy * 0.25;
+  float band = exp(-dot(off, off) / (0.22 * 0.22));
   vec3 shine = mix(base, vec3(1.0), 0.25) * highlight * (0.3 + 1.6 * band) * amt;
   col = 1.0 - (1.0 - col) * (1.0 - clamp(shine, 0.0, 1.0));
 
-  // Glare spot: sweeps in from the edge as the cover tilts
-  vec2 spot = 0.5 + toLight * mix(1.1, 0.3, tilt);
-  vec3 H = normalize(normalize(vec3(spot - uv, 0.5)) + vec3(0.0, 0.0, 1.0));
+  // Glare spot: the light's reflection, shaped by the surface
+  vec3 H = normalize(normalize(vec3(toSpot, 0.5)) + vec3(0.0, 0.0, 1.0));
   float spec = pow(max(dot(n, H), 0.0), mix(16.0, 60.0, shiny)) * (0.03 + 0.12 * shiny);
   vec3 glare = mix(vec3(1.0), col, 0.3) * spec * amt;
   return 1.0 - (1.0 - min(col, 1.0)) * (1.0 - clamp(glare, 0.0, 1.0));
@@ -151,6 +157,7 @@ void main() {
   // mixes the foreground's colour into the background and draws faint lines along the tilt
   gx = dFdx(p);
   gy = dFdy(p);
+  lightUv = (uLightPos - 0.5) * uCover * (1.0 - 2.0 * margin) + 0.5;
 
   // March t from near (1) to far (0); the ray position is where depth t would come from
   float stepT = 1.0 / float(STEPS);
@@ -278,7 +285,7 @@ export class ParallaxRenderer {
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
-    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uPixel", "uBg", "uRim", "uNear", "uFar", "uSurface", "uLight"]) {
+    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uPixel", "uBg", "uRim", "uNear", "uFar", "uSurface", "uLight", "uLightPos"]) {
       this.uniforms[name] = gl.getUniformLocation(program, name);
     }
     gl.uniform1i(this.uniforms.uImage, 0);
@@ -406,6 +413,7 @@ export class ParallaxRenderer {
     gl.uniform1f(this.uniforms.uFocal, p.focal);
     gl.uniform1f(this.uniforms.uSuppress, p.suppress);
     gl.uniform1f(this.uniforms.uLight, p.lighting);
+    gl.uniform2f(this.uniforms.uLightPos, p.lightX, p.lightY);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
