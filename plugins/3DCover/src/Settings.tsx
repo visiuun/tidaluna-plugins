@@ -14,6 +14,7 @@ export type PluginSettings = {
   lighting: boolean; // light, reflections and shadows from the AI depth
   lightStrength: number; // 0-100
   preloadNext: boolean; // generate the next track's cover before it plays
+  breakout: boolean; // foreground can cross the cover's border
 };
 
 export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("3DCover", {
@@ -26,6 +27,7 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("3D
   lighting: true,
   lightStrength: 60,
   preloadNext: true,
+  breakout: true,
 });
 
 // Older builds could store a React element here from the select's onChange
@@ -38,6 +40,7 @@ export const Settings = () => {
   const [invert, setInvert] = React.useState(settings.invert);
   const [lighting, setLighting] = React.useState(settings.lighting);
   const [preloadNext, setPreloadNext] = React.useState(settings.preloadNext);
+  const [breakout, setBreakout] = React.useState(settings.breakout);
   const [clearingDepth, setClearingDepth] = React.useState(false);
   const [clearingModel, setClearingModel] = React.useState(false);
   const [stats, setStats] = React.useState<{ count: number; bytes: number } | null>(null);
@@ -94,6 +97,18 @@ export const Settings = () => {
         max={30}
         value={settings.antiSmear}
         onNumber={(num: number) => updateSetting("antiSmear", num)}
+      />
+
+      <LunaSwitchSetting
+        title="Break Out Of Frame"
+        desc="Let subjects cross the cover's border as it tilts, instead of being cut off at it"
+        checked={breakout}
+        value={breakout}
+        onChange={(e: any, checked?: boolean) => {
+          const val = typeof checked === "boolean" ? checked : (e?.target?.checked ?? !breakout);
+          setBreakout(val);
+          updateSetting("breakout", val);
+        }}
       />
 
       <LunaSwitchSetting

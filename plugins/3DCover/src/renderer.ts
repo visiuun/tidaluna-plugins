@@ -12,6 +12,7 @@ export type ParallaxParams = {
   lighting: number; // 0 = off, 1 = full strength
   lightX: number; // where the light is, over the cover box (0..1, can be outside)
   lightY: number;
+  glare: number; // opacity of TIDAL's glare, which only covers the frame
 };
 
 /**
@@ -60,6 +61,7 @@ uniform sampler2D uBorder; // how near the artwork is along its top, bottom, lef
 uniform vec2 uPad;     // canvas area beyond the frame on each side, as a fraction of the frame
 uniform vec2 uBox;     // the frame in output pixels
 uniform float uRadius; // the frame's corner radius in output pixels
+uniform float uGlare;  // opacity of TIDAL's glare
 
 const int STEPS = 40;
 vec2 gx, gy; // screen-space uv derivatives, for mip selection
@@ -174,7 +176,18 @@ float popOut(vec2 q, vec2 uv, float d) {
   if (q.y > 1.0 || (corner && q.y >= 0.5)) side = max(side, along.g);
   if (q.x < 0.0 || (corner && q.x < 0.5)) side = max(side, across.r);
   if (q.x > 1.0 || (corner && q.x >= 0.5)) side = max(side, across.g);
-  return smoothstep(side + 0.1, side + 0.22, d);
+  // A narrow ramp: anything partly allowed would be see-through, and look darker over TIDAL's backdrop
+  return smoothstep(side + 0.1, side + 0.13, d);
+}
+
+// TIDAL's glare (its radial-gradient's white alpha stops), t = distance from its centre / its radius
+float glareAt(float t) {
+  if (t < 0.1) return mix(0.15, 0.12, t / 0.1);
+  if (t < 0.2) return mix(0.12, 0.08, (t - 0.1) / 0.1);
+  if (t < 0.35) return mix(0.08, 0.04, (t - 0.2) / 0.15);
+  if (t < 0.5) return mix(0.04, 0.02, (t - 0.35) / 0.15);
+  if (t < 0.65) return mix(0.02, 0.005, (t - 0.5) / 0.15);
+  return mix(0.005, 0.0, clamp((t - 0.65) / 0.15, 0.0, 1.0));
 }
 
 void main() {
@@ -240,7 +253,8 @@ void main() {
   // Inside the frame everything is drawn. Outside it only what pops out, with the silhouette's
   // anti-aliasing going into the alpha: there's no background layer there to blend towards.
   float coverage = inFrame;
-  if (inFrame < 1.0) coverage = max(inFrame, (1.0 - hole) * popOut(q, hitUv, dB));
+  // (no margin = breaking out is turned off, the rounded corners just stay empty)
+  if (inFrame < 1.0 && uPad.x > 0.0) coverage = max(inFrame, (1.0 - hole) * popOut(q, hitUv, dB));
   if (coverage <= 0.0) {
     outColor = vec4(0.0);
     return;
@@ -276,6 +290,12 @@ void main() {
   if (uLight > 0.0) {
     bool gap = hole > 0.5;
     col = shade(col, gap ? bgUv : hitUv, gap ? bd : dB, hole * hidden);
+  }
+  // TIDAL's glare element ends at the box, so past it the same light has to be drawn here
+  if (uGlare > 0.0 && (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, vec2(1.0))))) {
+    vec2 centre = uLightPos * uBox;
+    float radius = length(max(abs(centre), abs(uBox - centre))); // CSS's default: to the farthest corner
+    col = mix(col, vec3(1.0), glareAt(length(q * uBox - centre) / radius) * uGlare);
   }
   outColor = vec4(clamp(col, 0.0, 1.0) * coverage, coverage);
 }`;
@@ -335,7 +355,7 @@ export class ParallaxRenderer {
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
-    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uPixel", "uBg", "uRim", "uNear", "uFar", "uSurface", "uLight", "uLightPos", "uBorder", "uPad", "uBox", "uRadius"]) {
+    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uPixel", "uBg", "uRim", "uNear", "uFar", "uSurface", "uLight", "uLightPos", "uBorder", "uPad", "uBox", "uRadius", "uGlare"]) {
       this.uniforms[name] = gl.getUniformLocation(program, name);
     }
     gl.uniform1i(this.uniforms.uImage, 0);
@@ -472,6 +492,7 @@ export class ParallaxRenderer {
     gl.uniform2f(this.uniforms.uPad, padX / w, padY / h);
     gl.uniform2f(this.uniforms.uBox, w, h);
     gl.uniform1f(this.uniforms.uRadius, radius);
+    gl.uniform1f(this.uniforms.uGlare, p.glare);
     gl.uniform2f(this.uniforms.uMouse, p.nx, p.ny);
     gl.uniform1f(this.uniforms.uIntensity, p.intensity / 500);
     gl.uniform1f(this.uniforms.uFocal, p.focal);

@@ -293,7 +293,8 @@ const syncPlacement = (img: HTMLImageElement) => {
   // The canvas is larger than the cover so foreground can cross its border; the shader draws the
   // cover's rounded frame, since CSS rounding would apply to the larger canvas
   const r = parseFloat(cs.borderTopLeftRadius) || 0;
-  const pad = renderer.resize(w, h, overflowFor(settings.intensity, settings.focal / 100), cs.borderTopLeftRadius.includes("%") ? (r / 100) * w : r);
+  const overflow = settings.breakout ? overflowFor(settings.intensity, settings.focal / 100) : 0;
+  const pad = renderer.resize(w, h, overflow, cs.borderTopLeftRadius.includes("%") ? (r / 100) * w : r);
   c.style.left = `${img.offsetLeft - pad.x}px`;
   c.style.top = `${img.offsetTop - pad.y}px`;
   c.style.width = `${w + 2 * pad.x}px`;
@@ -359,6 +360,7 @@ const frame = (now: number) => {
         lighting: settings.lighting ? settings.lightStrength / 100 : 0,
         lightX: light.x,
         lightY: light.y,
+        glare: light.glare,
       });
       Object.assign(drawn, { x: n.x, y: n.y, w, h, dirty: false });
     } catch (err) {
@@ -373,10 +375,13 @@ const frame = (now: number) => {
 // light on the side opposite the tilt that swings in from outside the cover as the tilt grows.
 const lightPosition = (state: Active, n: { x: number; y: number }) => {
   const at = state.glareEl?.isConnected ? GLARE_AT.exec(state.glareEl.style.background) : null;
-  if (at) return { x: parseFloat(at[1]) / 100, y: parseFloat(at[2]) / 100 };
+  if (at) {
+    const opacity = parseFloat(state.glareEl!.style.opacity);
+    return { x: parseFloat(at[1]) / 100, y: parseFloat(at[2]) / 100, glare: Number.isNaN(opacity) ? 1 : opacity };
+  }
   const len = Math.hypot(n.x, n.y) || 1;
   const reach = 1.1 - 0.8 * Math.min(1, len);
-  return { x: 0.5 - (n.x / len) * reach, y: 0.5 - (n.y / len) * reach };
+  return { x: 0.5 - (n.x / len) * reach, y: 0.5 - (n.y / len) * reach, glare: 0 };
 };
 
 // ------------------ LIFECYCLE ------------------

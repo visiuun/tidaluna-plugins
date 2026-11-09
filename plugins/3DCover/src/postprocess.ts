@@ -116,8 +116,35 @@ export const windowMinMax = (src: Uint8Array, size: number, r: number) => {
 const EDGE_RADIUS = 3;
 export const EDGE_RANGE = 24;
 export const FOREGROUND_BIAS = 0.45; // slightly below the midpoint so the subject keeps its whole outline
+
+// Separable box blur. The window's min and max change in whole steps as a new row or column enters it,
+// so along a long shallow edge the cut would jump sideways in stairs; blurred, it follows a smooth curve.
+const boxBlur = (src: Uint8Array, size: number, r: number) => {
+  const tmp = new Uint16Array(size * size);
+  const out = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(size - 1, x + r);
+      let sum = 0;
+      for (let xx = x0; xx <= x1; xx++) sum += src[y * size + xx];
+      tmp[y * size + x] = Math.round((sum * 16) / (x1 - x0 + 1));
+    }
+  }
+  for (let x = 0; x < size; x++) {
+    for (let y = 0; y < size; y++) {
+      const y0 = Math.max(0, y - r), y1 = Math.min(size - 1, y + r);
+      let sum = 0;
+      for (let yy = y0; yy <= y1; yy++) sum += tmp[yy * size + x];
+      out[y * size + x] = Math.round(sum / (16 * (y1 - y0 + 1)));
+    }
+  }
+  return out;
+};
+
 export const sharpenEdges = (src: Uint8Array, size: number, rgba?: Uint8ClampedArray | Uint8Array) => {
-  const { lo, hi } = windowMinMax(src, size, EDGE_RADIUS);
+  const window = windowMinMax(src, size, EDGE_RADIUS);
+  const lo = boxBlur(window.lo, size, EDGE_RADIUS);
+  const hi = boxBlur(window.hi, size, EDGE_RADIUS);
   const ramp = new Uint8Array(src);
   if (rgba) followColourEdges(ramp, src, lo, hi, size, rgba);
   const data = new Uint8Array(src);
