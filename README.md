@@ -43,6 +43,7 @@ Turns the now playing cover into a 2.5D parallax scene that moves with TIDAL's c
 - Preload Next Cover (on by default): the next track's cover is generated before it plays, near the end of the current track or as soon as you hover the next button.
 - Every generated depth map is saved on disk (~7KB each), so a cover is only ever processed once.
 - Rendering is a single WebGL shader that ray-marches the depth map, so foreground correctly covers background and the gaps behind edges are filled from the background.
+- Subjects standing in front of their background cross the cover's border as it tilts, instead of being cut off at it. Anything the artwork itself crops stays inside.
 - AI Lighting (on by default): light, soft shadows, reflections and shine on glossy things like gold and chrome, lit from TIDAL's own moving cover glare and shaped by the AI depth map. At rest the cover is untouched.
 - Settings: model (Small/Base), depth shift, focal plane, edge anti-smear, AI lighting and its strength, preload next cover, fallback mouse smoothing, invert direction, clear depth cache, clear downloaded model.
 

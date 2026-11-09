@@ -242,6 +242,33 @@ export const edgeSides = (edges: Uint8Array, size: number, rgba: Uint8ClampedArr
   return sides;
 };
 
+/**
+ * How near the artwork is along each of its four sides (RGBA = top, bottom, left, right), for deciding
+ * what may leave the frame: a subject the artwork crops at a side has no pixels beyond it, so it has
+ * to stop at that side. Widened along the side, then softened, so the limit fades in around a contact.
+ */
+export const borderProfile = (edges: Uint8Array, size: number) => {
+  const out = new Uint8Array(size * 4);
+  const reach = Math.round(size * 0.04);
+  const sides = [(i: number) => i, (i: number) => (size - 1) * size + i, (i: number) => i * size, (i: number) => i * size + size - 1];
+  const around = (i: number, each: (j: number) => void) => {
+    for (let j = Math.max(0, i - reach); j <= Math.min(size - 1, i + reach); j++) each(j);
+  };
+  sides.forEach((at, side) => {
+    const widest = new Uint8Array(size);
+    for (let i = 0; i < size; i++) around(i, (j) => (widest[i] = Math.max(widest[i], edges[at(j) * 4 + 2])));
+    for (let i = 0; i < size; i++) {
+      let sum = 0, count = 0;
+      around(i, (j) => {
+        sum += widest[j];
+        count++;
+      });
+      out[i * 4 + side] = Math.round(sum / count);
+    }
+  });
+  return out;
+};
+
 // Model output → stored map (before edge sharpening)
 export const postProcess = (raw: Uint8Array, width: number, height: number) =>
   bilateral(median3(resample(raw, width, height, DEPTH_SIZE), DEPTH_SIZE), DEPTH_SIZE);

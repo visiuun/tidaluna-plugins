@@ -1,7 +1,7 @@
 import { backgroundFor, reachFor } from "./background";
 import type { DepthMap } from "./depth";
 import { surfaceFor } from "./lighting";
-import { DEPTH_SIZE, EDGE_RANGE, FOREGROUND_BIAS, INK } from "./postprocess";
+import { DEPTH_SIZE, EDGE_RANGE, FOREGROUND_BIAS, INK, borderProfile } from "./postprocess";
 
 export type ParallaxParams = {
   nx: number; // normalized mouse [-1, 1]
@@ -12,6 +12,16 @@ export type ParallaxParams = {
   lighting: number; // 0 = off, 1 = full strength
   lightX: number; // where the light is, over the cover box (0..1, can be outside)
   lightY: number;
+};
+
+/**
+ * How far past the frame anything can land at full tilt, as a fraction of the frame. The overscan
+ * hides `margin` on each side and the nearest layer travels another `margin`, so 2 × margin of the
+ * zoomed image, which is 2 × margin / (1 - 2 × margin) of the frame.
+ */
+export const overflowFor = (intensity: number, focal: number) => {
+  const margin = (intensity / 500) * Math.max(focal, 1 - focal);
+  return (2 * margin) / (1 - 2 * margin);
 };
 
 const VERT = `#version 300 es
@@ -46,6 +56,10 @@ uniform float uFocal;
 uniform float uSuppress;
 uniform vec2 uCover;  // object-fit: cover scale
 uniform float uPixel; // one output pixel in image uv
+uniform sampler2D uBorder; // how near the artwork is along its top, bottom, left and right sides (rgba)
+uniform vec2 uPad;     // canvas area beyond the frame on each side, as a fraction of the frame
+uniform vec2 uBox;     // the frame in output pixels
+uniform float uRadius; // the frame's corner radius in output pixels
 
 const int STEPS = 40;
 vec2 gx, gy; // screen-space uv derivatives, for mip selection
@@ -57,6 +71,8 @@ vec2 lightUv; // uLightPos in image uv
 // Where the edge's two sides have clearly different colours, decide by the cover's own pixel
 // instead, at full resolution: the silhouette then follows the artwork's outline exactly.
 float depthAt(vec2 uv) {
+  // Past the artwork there's nothing to hit (rays can only get here from beyond the frame)
+  if (any(lessThan(uv, vec2(-0.002))) || any(greaterThan(uv, vec2(1.002)))) return -1.0;
   vec3 s = texture(uDepth, uv).rgb;
   float range = s.b - s.g;
   float a = (s.r - s.g) / max(range, 1e-4);
@@ -145,13 +161,33 @@ vec3 shade(vec3 col, vec2 uv, float here, float flatten) {
   return 1.0 - (1.0 - min(col, 1.0)) * (1.0 - clamp(glare, 0.0, 1.0));
 }
 
+// Whether a surface hit outside the frame may be drawn there: only if it's clearly nearer than what the
+// artwork shows at the side(s) it crossed. That's a subject standing in front of its background; the
+// background itself, and subjects the artwork crops at that side, stay inside.
+float popOut(vec2 q, vec2 uv, float d) {
+  vec2 along = texture(uBorder, vec2(uv.x, 0.5)).rg;
+  vec2 across = texture(uBorder, vec2(uv.y, 0.5)).ba;
+  // In the frame's rounded corners, q is still inside the box: both nearest sides count
+  bool corner = q.x >= 0.0 && q.x <= 1.0 && q.y >= 0.0 && q.y <= 1.0;
+  float side = 0.0;
+  if (q.y < 0.0 || (corner && q.y < 0.5)) side = max(side, along.r);
+  if (q.y > 1.0 || (corner && q.y >= 0.5)) side = max(side, along.g);
+  if (q.x < 0.0 || (corner && q.x < 0.5)) side = max(side, across.r);
+  if (q.x > 1.0 || (corner && q.x >= 0.5)) side = max(side, across.g);
+  return smoothstep(side + 0.1, side + 0.22, d);
+}
+
 void main() {
   vec2 dir = uMouse * uIntensity;
+  // Position in the frame (0..1 inside it; the canvas extends past it so things can leave it)
+  vec2 q = (vUv - 0.5) * (1.0 + 2.0 * uPad) + 0.5;
+  vec2 fromEdge = abs(q - 0.5) * uBox - 0.5 * uBox + uRadius;
+  float inFrame = clamp(0.5 - (length(max(fromEdge, 0.0)) + min(max(fromEdge.x, fromEdge.y), 0.0) - uRadius), 0.0, 1.0);
 
   // Overscan that grows with the tilt: every sample stays inside the image, so no smeared borders,
   // and at rest (dir = 0) the output is pixel-identical to the original cover.
   float margin = max(abs(dir.x), abs(dir.y)) * max(uFocal, 1.0 - uFocal);
-  vec2 p = (vUv - 0.5) * uCover * (1.0 - 2.0 * margin) + 0.5;
+  vec2 p = (q - 0.5) * uCover * (1.0 - 2.0 * margin) + 0.5;
   // Mip level from the screen, not from where the rays land: neighbouring rays can land far apart
   // (one hits the foreground, the next the background behind it), which would pick a blurry mip that
   // mixes the foreground's colour into the background and draws faint lines along the tilt
@@ -200,6 +236,17 @@ void main() {
   // silhouette, so fading in over that gives the silhouette a one-pixel anti-aliased edge.
   float wall = smoothstep(uSuppress * 0.3, uSuppress * 0.6, dB - dA);
   float hole = wall * smoothstep(0.0, uPixel / max(length(dir), 1e-5), dB - tB);
+
+  // Inside the frame everything is drawn. Outside it only what pops out, with the silhouette's
+  // anti-aliasing going into the alpha: there's no background layer there to blend towards.
+  float coverage = inFrame;
+  if (inFrame < 1.0) coverage = max(inFrame, (1.0 - hole) * popOut(q, hitUv, dB));
+  if (coverage <= 0.0) {
+    outColor = vec4(0.0);
+    return;
+  }
+  hole *= inFrame;
+
   float bd = dA;
   vec2 bgUv = p - dir * (bd - uFocal);
   float hidden = 0.0;
@@ -230,7 +277,7 @@ void main() {
     bool gap = hole > 0.5;
     col = shade(col, gap ? bgUv : hitUv, gap ? bd : dB, hole * hidden);
   }
-  outColor = vec4(col, 1.0);
+  outColor = vec4(clamp(col, 0.0, 1.0) * coverage, coverage);
 }`;
 
 // One shared canvas/GL context, moved onto whichever cover is hovered.
@@ -245,7 +292,10 @@ export class ParallaxRenderer {
   private nearTex: WebGLTexture | null = null;
   private farTex: WebGLTexture | null = null;
   private surfaceTex: WebGLTexture | null = null;
+  private borderTex: WebGLTexture | null = null;
   private surfaceDepth?: DepthMap;
+  // The cover's frame within the canvas, in canvas pixels
+  private frame = { w: 1, h: 1, padX: 0, padY: 0, radius: 0 };
   private uniforms: Record<string, WebGLUniformLocation | null> = {};
   private imageAspect = 1;
   private currentImage?: ImageBitmap;
@@ -261,7 +311,7 @@ export class ParallaxRenderer {
 
   private init(): WebGL2RenderingContext {
     if (this.gl && !this.gl.isContextLost()) return this.gl;
-    const gl = this.canvas.getContext("webgl2", { alpha: false, antialias: false, depth: false, stencil: false, premultipliedAlpha: false, powerPreference: "low-power" });
+    const gl = this.canvas.getContext("webgl2", { alpha: true, antialias: false, depth: false, stencil: false, premultipliedAlpha: true, powerPreference: "low-power" });
     if (!gl) throw new Error("WebGL2 unavailable");
 
     const compile = (type: number, src: string) => {
@@ -285,7 +335,7 @@ export class ParallaxRenderer {
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
-    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uPixel", "uBg", "uRim", "uNear", "uFar", "uSurface", "uLight", "uLightPos"]) {
+    for (const name of ["uImage", "uDepth", "uMouse", "uIntensity", "uFocal", "uSuppress", "uCover", "uPixel", "uBg", "uRim", "uNear", "uFar", "uSurface", "uLight", "uLightPos", "uBorder", "uPad", "uBox", "uRadius"]) {
       this.uniforms[name] = gl.getUniformLocation(program, name);
     }
     gl.uniform1i(this.uniforms.uImage, 0);
@@ -295,6 +345,7 @@ export class ParallaxRenderer {
     gl.uniform1i(this.uniforms.uNear, 4);
     gl.uniform1i(this.uniforms.uFar, 5);
     gl.uniform1i(this.uniforms.uSurface, 6);
+    gl.uniform1i(this.uniforms.uBorder, 7);
 
     const makeTex = () => {
       const tex = gl.createTexture()!;
@@ -312,6 +363,7 @@ export class ParallaxRenderer {
     this.nearTex = makeTex();
     this.farTex = makeTex();
     this.surfaceTex = makeTex();
+    this.borderTex = makeTex();
 
     this.gl = gl;
     this.program = program;
@@ -345,6 +397,9 @@ export class ParallaxRenderer {
       gl.bindTexture(gl.TEXTURE_2D, this.depthTex);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, depth.size, depth.size, 0, gl.RGBA, gl.UNSIGNED_BYTE, depth.edges);
+      gl.activeTexture(gl.TEXTURE7);
+      gl.bindTexture(gl.TEXTURE_2D, this.borderTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, depth.size, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, borderProfile(depth.edges, depth.size));
       this.currentDepth = depth;
     }
   }
@@ -385,15 +440,21 @@ export class ParallaxRenderer {
     this.surfaceDepth = depth;
   }
 
-  resize(cssW: number, cssH: number) {
+  /** Sizes the canvas for a frame of this size plus `overflow` of it on each side. Returns that margin in CSS px. */
+  resize(cssW: number, cssH: number, overflow: number, cssRadius: number) {
     // Match the screen (capped at the 1280px source) so it's as sharp as TIDAL's own <img>
     const scale = Math.min(window.devicePixelRatio || 1, 1280 / Math.max(cssW, cssH, 1));
     const w = Math.max(1, Math.round(cssW * scale));
     const h = Math.max(1, Math.round(cssH * scale));
-    if (this.canvas.width !== w || this.canvas.height !== h) {
-      this.canvas.width = w;
-      this.canvas.height = h;
+    // Whole pixels, so the frame stays on the pixel grid and is as sharp as without the margin
+    const padX = Math.ceil(w * overflow);
+    const padY = Math.ceil(h * overflow);
+    this.frame = { w, h, padX, padY, radius: cssRadius * (w / Math.max(cssW, 1)) };
+    if (this.canvas.width !== w + 2 * padX || this.canvas.height !== h + 2 * padY) {
+      this.canvas.width = w + 2 * padX;
+      this.canvas.height = h + 2 * padY;
     }
+    return { x: (padX / w) * cssW, y: (padY / h) * cssH };
   }
 
   draw(p: ParallaxParams) {
@@ -401,13 +462,16 @@ export class ParallaxRenderer {
     if (!this.currentImage || !this.currentDepth) return;
     this.syncBackground(gl, p.intensity);
     if (p.lighting > 0) this.syncSurface(gl);
-    const { width: w, height: h } = this.canvas;
-    gl.viewport(0, 0, w, h);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
 
+    const { w, h, padX, padY, radius } = this.frame;
     const boxAspect = w / h;
     const cover = this.imageAspect > boxAspect ? [boxAspect / this.imageAspect, 1] : [1, this.imageAspect / boxAspect];
     gl.uniform2f(this.uniforms.uCover, cover[0], cover[1]);
     gl.uniform1f(this.uniforms.uPixel, cover[0] / w);
+    gl.uniform2f(this.uniforms.uPad, padX / w, padY / h);
+    gl.uniform2f(this.uniforms.uBox, w, h);
+    gl.uniform1f(this.uniforms.uRadius, radius);
     gl.uniform2f(this.uniforms.uMouse, p.nx, p.ny);
     gl.uniform1f(this.uniforms.uIntensity, p.intensity / 500);
     gl.uniform1f(this.uniforms.uFocal, p.focal);

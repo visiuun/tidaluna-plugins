@@ -3,7 +3,7 @@ import type { MediaItem } from "@luna/lib";
 import { type DepthMap, closeDepthCache, disposeDepthWorker, getCachedDepth, getDepth, isAbort, loadCoverBitmap, setInferenceLogger, setInfoLogger } from "./depth";
 import { backgroundFor, clearBackgrounds, reachFor } from "./background";
 import { clearSurfaces, surfaceFor } from "./lighting";
-import { ParallaxRenderer } from "./renderer";
+import { ParallaxRenderer, overflowFor } from "./renderer";
 import { settings } from "./Settings";
 
 export { Settings } from "./Settings";
@@ -288,15 +288,20 @@ const syncPlacement = (img: HTMLImageElement) => {
   const c = renderer.canvas;
   if (c.previousElementSibling !== img) img.insertAdjacentElement("afterend", c);
   const cs = getComputedStyle(img);
-  c.style.left = `${img.offsetLeft}px`;
-  c.style.top = `${img.offsetTop}px`;
-  c.style.width = `${img.offsetWidth}px`;
-  c.style.height = `${img.offsetHeight}px`;
-  c.style.borderRadius = cs.borderRadius;
+  const w = img.offsetWidth;
+  const h = img.offsetHeight;
+  // The canvas is larger than the cover so foreground can cross its border; the shader draws the
+  // cover's rounded frame, since CSS rounding would apply to the larger canvas
+  const r = parseFloat(cs.borderTopLeftRadius) || 0;
+  const pad = renderer.resize(w, h, overflowFor(settings.intensity, settings.focal / 100), cs.borderTopLeftRadius.includes("%") ? (r / 100) * w : r);
+  c.style.left = `${img.offsetLeft - pad.x}px`;
+  c.style.top = `${img.offsetTop - pad.y}px`;
+  c.style.width = `${w + 2 * pad.x}px`;
+  c.style.height = `${h + 2 * pad.y}px`;
   c.style.transform = cs.transform === "none" ? "" : cs.transform;
-  c.style.transformOrigin = cs.transformOrigin;
+  const [originX, originY] = cs.transformOrigin.split(" ").map(parseFloat);
+  c.style.transformOrigin = `${originX + pad.x}px ${originY + pad.y}px`;
   c.style.zIndex = cs.zIndex === "auto" ? "" : cs.zIndex;
-  renderer.resize(img.offsetWidth, img.offsetHeight);
 };
 
 const showSpinner = (img: HTMLImageElement) => {
