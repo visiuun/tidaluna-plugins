@@ -1,6 +1,20 @@
 import { clearDepthFiles, clearFileCache, depthCacheStats, fetchCached, fetchImageBytes, readDepth, writeDepth } from "./fetch.native";
 import { DEPTH_SIZE, postProcess, sharpenEdges } from "./postprocess";
 
+// Native results are binary on Luna and base64 on TidaLunar, whose IPC is JSON
+const toBytes = (wire: Uint8Array | string) => {
+  if (typeof wire !== "string") return wire;
+  const text = atob(wire);
+  const bytes = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
+  return bytes;
+};
+const toBase64 = (bytes: Uint8Array) => {
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(text);
+};
+
 // data: snapped depth (CPU), edges: smooth depth + edge sides for the GPU (see sharpenEdges)
 export type DepthMap = { size: number; data: Uint8Array; edges: Uint8Array };
 
@@ -135,7 +149,7 @@ const blobUrl = (source: BlobPart) => {
 const getTransformersUrl = () =>
   (tfUrl ??= fetchCached(TRANSFORMERS_URL).then(({ status, data }) => {
     if (!data) throw new Error(`Failed to download transformers.js (HTTP ${status})`);
-    return blobUrl(data as BlobPart);
+    return blobUrl(toBytes(data) as BlobPart);
   })).catch((err) => {
     tfUrl = undefined;
     throw err;
@@ -144,7 +158,8 @@ const getTransformersUrl = () =>
 const onEngineMessage = (port: MessagePort | Worker) => async ({ data }: MessageEvent) => {
   if (data.type === "fetch") {
     try {
-      const { status, data: bytes } = await fetchCached(data.url);
+      const { status, data: wire } = await fetchCached(data.url);
+      const bytes = wire ? toBytes(wire) : undefined;
       port.postMessage({ type: "fetched", reqId: data.reqId, status, data: bytes }, bytes ? [bytes.buffer] : []);
     } catch (err: any) {
       port.postMessage({ type: "fetched", reqId: data.reqId, error: String(err?.message ?? err) });
@@ -235,7 +250,7 @@ export const setInfoLogger = (fn: typeof onInfo) => (onInfo = fn);
 
 // ------------------ IMAGE LOADING ------------------
 // Fetched in the main process: no CORS issues with TIDAL's image CDN.
-const fetchBlob = async (url: string): Promise<Blob> => new Blob([(await fetchImageBytes(url)) as BlobPart]);
+const fetchBlob = async (url: string): Promise<Blob> => new Blob([toBytes(await fetchImageBytes(url)) as BlobPart]);
 
 export const loadCoverBitmap = async (urls: string[]): Promise<ImageBitmap> => {
   let lastErr: unknown;
@@ -334,7 +349,7 @@ export const getDepth = (coverId: string, model: ModelKey, bitmap: () => Promise
   const job: Job = { keep: false, signals: [], cancel: new AbortController(), promise: null! };
   want(job, signal);
   job.promise = (async () => {
-    const stored = await readDepth(key).catch(() => null);
+    const stored = await readDepth(key).then((wire) => (wire ? toBytes(wire) : null)).catch(() => null);
     if (stored?.length === DEPTH_SIZE * DEPTH_SIZE) {
       const map = { size: DEPTH_SIZE, ...sharpenEdges(stored, DEPTH_SIZE, await coverPixels(bitmap)) };
       memSet(key, map);
@@ -350,7 +365,7 @@ export const getDepth = (coverId: string, model: ModelKey, bitmap: () => Promise
     const map = { size: DEPTH_SIZE, ...sharpenEdges(smooth, DEPTH_SIZE, await coverPixels(bitmap)) };
     onInferred?.(raw.backend, raw.ms);
     memSet(key, map);
-    writeDepth(key, smooth).catch(() => {});
+    writeDepth(key, toBase64(smooth)).catch(() => {});
     return map;
   })().finally(() => inflight.get(key) === job && inflight.delete(key));
 
