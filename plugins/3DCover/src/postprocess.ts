@@ -151,7 +151,8 @@ export const sharpenEdges = (src: Uint8Array, size: number, rgba?: Uint8ClampedA
   const edges = new Uint8Array(src.length * 4);
   for (let i = 0; i < data.length; i++) {
     const range = hi[i] - lo[i];
-    if (range >= EDGE_RANGE) data[i] = ramp[i] - lo[i] > range * FOREGROUND_BIAS ? hi[i] : lo[i];
+    // The real sides, not the blurred ones: in between would pass for a layer of its own when growing the background
+    if (range >= EDGE_RANGE) data[i] = ramp[i] - lo[i] > range * FOREGROUND_BIAS ? window.hi[i] : window.lo[i];
     edges[i * 4] = ramp[i];
     edges[i * 4 + 1] = lo[i];
     edges[i * 4 + 2] = hi[i];
