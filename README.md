@@ -39,6 +39,7 @@ A collection of plugins for **[TidaLuna](https://github.com/Inrixia/TidaLuna)**.
 Turns the now playing cover into a 2.5D parallax scene that moves with TIDAL's cover tilt when you hover it.
 
 - Depth is generated **locally** with Depth-Anything-V2 (WebGPU when available, CPU otherwise). The model downloads once (~27MB for Small) and is kept on disk.
+- The AI model runs in a background process of its own, outside TIDAL's window, and is closed when idle. TIDAL is a 32-bit app with ~2-4GB of memory for its window, so running the model inside it eventually crashed TIDAL with "out of memory".
 - Generation starts as soon as a track begins playing. Skipping drops the skipped track's queued work (a generation already running finishes and is saved). Hovering a cover that isn't ready yet generates it immediately.
 - Preload Next Cover (on by default): the next track's cover is generated before it plays, near the end of the current track or as soon as you hover the next button.
 - Every generated depth map is saved on disk (~7KB each), so a cover is only ever processed once.

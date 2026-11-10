@@ -26,7 +26,7 @@ const lunarDataDir = () => {
 };
 
 // TidaLunar's IPC is JSON, where a Uint8Array wouldn't survive
-const toWire = (data: Uint8Array): Wire => (lunarDataDir() ? Buffer.from(data).toString("base64") : data);
+export const toWire = (data: Uint8Array): Wire => (lunarDataDir() ? Buffer.from(data).toString("base64") : data);
 
 const cacheDir = () => path.join(lunarDataDir() ?? process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".cache"), "visiuun-3d-cover");
 const depthDir = () => path.join(cacheDir(), "depth");
@@ -82,16 +82,21 @@ export const fetchImageBytes = async (url: string): Promise<Wire> => {
 // ------------------ MODEL FILES ------------------
 // Disk-cached fetch for the AI runtime + model files. Luna clears the browser Cache Storage on every
 // launch, so without this the model would be re-downloaded each time TIDAL starts.
-export const fetchCached = async (url: string): Promise<FetchResult> => {
+export const cachedBytes = async (url: string): Promise<{ status: number; data?: Uint8Array }> => {
   const file = path.join(modelDir(), hash(url));
   try {
-    return { status: 200, data: toWire(new Uint8Array(await readFile(file))) };
+    return { status: 200, data: new Uint8Array(await readFile(file)) };
   } catch {}
 
   const { status, data } = await download(url);
   if (!data) return { status };
   await writeAtomic(file, data);
-  return { status: 200, data: toWire(data) };
+  return { status: 200, data };
+};
+
+export const fetchCached = async (url: string): Promise<FetchResult> => {
+  const { status, data } = await cachedBytes(url);
+  return data ? { status, data: toWire(data) } : { status };
 };
 
 // Model files live directly in the cache folder; depth maps are in the "depth" subfolder

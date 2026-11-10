@@ -1,5 +1,9 @@
 import { clearDepthFiles, clearFileCache, depthCacheStats, fetchCached, fetchImageBytes, readDepth, writeDepth } from "./fetch.native";
+import { CPU_ATTEMPTS, GPU_ATTEMPTS, MODEL_IDS, type ModelKey, TRANSFORMERS_URL, engineSource } from "./engine";
+import { engineStatus, inferInProcess, stopProcessEngine } from "./engine.native";
 import { DEPTH_SIZE, postProcess, sharpenEdges } from "./postprocess";
+
+export type { ModelKey };
 
 // Native results are binary on Luna and base64 on TidaLunar, whose IPC is JSON
 const toBytes = (wire: Uint8Array | string) => {
@@ -20,120 +24,16 @@ export type DepthMap = { size: number; data: Uint8Array; edges: Uint8Array };
 
 export { DEPTH_SIZE };
 
-const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1/dist/transformers.min.js";
-
-const MODEL_IDS = {
-  small: "onnx-community/depth-anything-v2-small",
-  base: "onnx-community/depth-anything-v2-base",
-} as const;
-export type ModelKey = keyof typeof MODEL_IDS;
-
-// Backends tried in order. GPU runs the model at full res in ~0.1s. The CPU fallback is
-// single-threaded (TIDAL isn't cross-origin isolated), so it uses a smaller input size.
-const GPU_ATTEMPTS = [
-  { device: "webgpu", dtype: "fp16", size: 518 },
-  { device: "webgpu", dtype: "fp32", size: 518 },
-];
-const CPU_ATTEMPTS = [{ device: "wasm", dtype: "q8", size: 392 }];
-
-// ------------------ INFERENCE ENGINE ------------------
-// One module that talks over a message port, so the same code can run in-page (to reach WebGPU
-// when workers can't) or inside a Worker (CPU fallback, off the UI thread).
-// Network requests are proxied back to the host → native disk-cached fetch, because Luna's https
-// handler fails requests made from workers and clears the browser cache on every launch.
-const engineSource = `
-let tf;
-let port;
-let attempts;
-const pipes = new Map();
-const fetches = new Map();
-let nextReq = 0;
-
-const proxyFetch = (input) => new Promise((resolve, reject) => {
-  const reqId = nextReq++;
-  fetches.set(reqId, { resolve, reject });
-  port.postMessage({ type: "fetch", reqId, url: String(input?.url ?? input) });
-});
-
-const gpuStatus = async () => {
-  if (!self.navigator?.gpu) return "navigator.gpu missing";
-  try { return (await self.navigator.gpu.requestAdapter()) ? "ok" : "no adapter"; } catch (err) { return "adapter error: " + err?.message; }
-};
-
-const getPipe = (model) => {
-  if (!pipes.has(model)) {
-    pipes.set(model, (async () => {
-      if (!tf) {
-        tf = await import(${JSON.stringify("__TF_URL__")});
-        tf.env.fetch = proxyFetch;
-        tf.env.useBrowserCache = false;
-        tf.env.allowLocalModels = false;
-        if (tf.env.backends?.onnx?.wasm) tf.env.backends.onnx.wasm.numThreads = 1;
-      }
-      const gpu = await gpuStatus();
-      const tried = ["webgpu: " + gpu];
-      for (const { device, dtype, size } of attempts) {
-        if (device === "webgpu" && gpu !== "ok") continue;
-        try {
-          const pipe = await tf.pipeline("depth-estimation", model, { device, dtype });
-          pipe.processor.image_processor.size = { width: size, height: size };
-          pipe.backend = device + "/" + dtype + "@" + size;
-          return pipe;
-        } catch (err) {
-          tried.push(device + "/" + dtype + ": " + (err?.message ?? err));
-        }
-      }
-      throw new Error("No depth backend available (" + tried.join("; ") + ")");
-    })());
-    pipes.get(model).catch(() => pipes.delete(model));
-  }
-  return pipes.get(model);
-};
-
-const onMessage = async ({ data: msg }) => {
-  if (msg.type === "fetched") {
-    const req = fetches.get(msg.reqId);
-    fetches.delete(msg.reqId);
-    if (!req) return;
-    if (msg.error) return req.reject(new Error(msg.error));
-    const headers = msg.data ? { "content-length": String(msg.data.byteLength) } : {};
-    return req.resolve(new Response(msg.data ?? null, { status: msg.status, headers }));
-  }
-  if (msg.type !== "infer") return;
-
-  const { id, model, bitmap } = msg;
-  try {
-    const pipe = await getPipe(model);
-    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(bitmap, 0, 0);
-    bitmap.close();
-    const image = new tf.RawImage(ctx.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height, 4);
-    const t0 = performance.now();
-    const { depth } = await pipe(image);
-    const out = new Uint8Array(depth.data);
-    const ms = Math.round(performance.now() - t0);
-    port.postMessage({ type: "result", id, width: depth.width, height: depth.height, data: out, backend: pipe.backend, ms }, [out.buffer]);
-  } catch (err) {
-    port.postMessage({ type: "result", id, error: String(err?.message ?? err) });
-  }
-};
-
-export const start = (p, a) => {
-  port = p;
-  attempts = a;
-  port.onmessage = onMessage;
-};
-
-if (typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope) {
-  self.onmessage = ({ data }) => data.type === "start" && start(self, data.attempts);
-}
-`;
-
 type InferResult = { width: number; height: number; data: Uint8Array; backend: string; ms: number };
-type Host = { kind: "page" | "worker"; port: MessagePort | Worker; dispose: () => void };
+// Where the model runs. "process": a hidden page with its own renderer process, owned by the main
+// process (engine.native.ts). TIDAL is 32-bit, so its page only gets ~2-4 GB, and the model's
+// WebAssembly memory never shrinks: run inside TIDAL's page it eventually crashed TIDAL with "out of
+// memory". "page"/"worker" are the fallbacks for when that's unavailable (e.g. sandboxed native code).
+type Host = { kind: "process" | "page" | "worker"; run: (bitmap: ImageBitmap, model: ModelKey) => Promise<InferResult>; dispose: () => void };
 
 let hostPromise: Promise<Host> | undefined;
+let forceInRenderer = false;
+let processWorked = false;
 let forceWorker = false;
 let tfUrl: Promise<string> | undefined;
 const blobUrls: string[] = [];
@@ -181,7 +81,34 @@ const pageHasWebGPU = async () => {
   }
 };
 
+const runOnPort = (port: MessagePort | Worker) => (bitmap: ImageBitmap, model: ModelKey) =>
+  new Promise<InferResult>((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject });
+    port.postMessage({ type: "infer", id, model: MODEL_IDS[model], bitmap }, [bitmap]);
+  });
+
+const processHost = async (): Promise<Host | undefined> => {
+  const status = await engineStatus().catch(() => null);
+  if (!status?.available) return undefined;
+  const run = async (bitmap: ImageBitmap, model: ModelKey) => {
+    const { width, height } = bitmap;
+    const ctx = new OffscreenCanvas(width, height).getContext("2d", { willReadFrequently: true })!;
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const rgba = new Uint8Array(ctx.getImageData(0, 0, width, height).data.buffer);
+    const out = await inferInProcess(MODEL_IDS[model], status.binary ? rgba : toBase64(rgba), width, height);
+    return { ...out, data: toBytes(out.data), backend: `${out.backend}, own process` };
+  };
+  return { kind: "process", run, dispose: () => void stopProcessEngine().catch(() => {}) };
+};
+
 const createHost = async (): Promise<Host> => {
+  if (!forceInRenderer) {
+    const host = await processHost();
+    if (host) return host;
+  }
+
   const engineUrl = blobUrl(engineSource.replace("__TF_URL__", await getTransformersUrl()));
 
   // Prefer running in-page when the page has WebGPU: fast, and the GPU does the heavy lifting
@@ -190,28 +117,33 @@ const createHost = async (): Promise<Host> => {
     const { port1, port2 } = new MessageChannel();
     port1.onmessage = onEngineMessage(port1);
     engine.start(port2, GPU_ATTEMPTS);
-    return { kind: "page", port: port1, dispose: () => port1.close() };
+    return { kind: "page", run: runOnPort(port1), dispose: () => port1.close() };
   }
 
   const worker = new Worker(engineUrl, { type: "module" });
   worker.onmessage = onEngineMessage(worker);
   worker.postMessage({ type: "start", attempts: [...GPU_ATTEMPTS, ...CPU_ATTEMPTS] });
-  return { kind: "worker", port: worker, dispose: () => worker.terminate() };
+  return { kind: "worker", run: runOnPort(worker), dispose: () => worker.terminate() };
 };
 
 const aborted = () => new DOMException("Track skipped", "AbortError");
 
-// A run that has started always finishes (its result is still saved): the only way to stop one is
-// terminating the worker, and in TIDAL's 32-bit renderer the next worker then can't get the memory
-// it needs and hangs. Cancelling therefore only drops jobs that haven't started yet.
-const runOn = (host: Host, bitmap: ImageBitmap, model: ModelKey) =>
-  new Promise<InferResult>((resolve, reject) => {
-    const id = nextId++;
-    pending.set(id, { resolve, reject });
-    host.port.postMessage({ type: "infer", id, model: MODEL_IDS[model], bitmap }, [bitmap]);
-  });
+// The fallback worker shares TIDAL's memory, so it's closed once idle to hand that memory back.
+// (Never mid-run: a run that has started always finishes and its result is still saved.)
+const WORKER_IDLE_MS = 30_000;
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
+const recycleWhenIdle = (host: Host) => {
+  clearTimeout(idleTimer);
+  if (host.kind !== "worker") return;
+  idleTimer = setTimeout(async () => {
+    if (pending.size > 0 || !hostPromise || (await hostPromise.catch(() => null)) !== host) return;
+    hostPromise = undefined;
+    host.dispose();
+  }, WORKER_IDLE_MS);
+};
 
 const inferDepth = async (bitmap: () => Promise<ImageBitmap>, model: ModelKey, cancel?: AbortSignal): Promise<InferResult> => {
+  clearTimeout(idleTimer);
   const host = await (hostPromise ??= createHost().catch((err) => {
     hostPromise = undefined;
     throw err;
@@ -222,21 +154,39 @@ const inferDepth = async (bitmap: () => Promise<ImageBitmap>, model: ModelKey, c
     throw aborted();
   }
   try {
-    return await runOn(host, image, model);
+    const result = await host.run(image, model);
+    if (host.kind === "process") processWorked = true;
+    return result;
   } catch (err) {
-    if (host.kind !== "page" || isAbort(err)) throw err;
+    if (isAbort(err)) throw err;
+    if (host.kind === "process") {
+      // Once it has worked, a failure is a one-off (the next cover gets a fresh process). If it never
+      // worked here, it can't: run the model the old way rather than not at all.
+      if (processWorked) throw err;
+      onInfo?.(`Separate depth process failed, running the model in TIDAL instead: ${(err as Error).message}`);
+      host.dispose();
+      forceInRenderer = true;
+      hostPromise = undefined;
+      return inferDepth(bitmap, model, cancel);
+    }
+    if (host.kind !== "page") throw err;
     // In-page WebGPU didn't work out: fall back to the worker (CPU) for the rest of the session
     onInfo?.(`In-page WebGPU failed, using worker: ${(err as Error).message}`);
     host.dispose();
     forceWorker = true;
     hostPromise = undefined;
     return inferDepth(bitmap, model, cancel);
+  } finally {
+    recycleWhenIdle(host);
   }
 };
 
 export const disposeDepthWorker = () => {
+  clearTimeout(idleTimer);
   hostPromise?.then((host) => host.dispose()).catch(() => {});
   hostPromise = undefined;
+  // Also when no host was made yet in this session: one from before a plugin reload may still be open
+  stopProcessEngine().catch(() => {});
   tfUrl = undefined;
   for (const url of blobUrls.splice(0)) URL.revokeObjectURL(url);
   for (const job of pending.values()) job.reject(new Error("Depth engine disposed"));
