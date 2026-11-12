@@ -299,15 +299,15 @@ export class Mixer {
   stopVoice(fade = 0.12) {
     return this.call("stopVoice", { fade }).catch(() => {});
   }
-  /** A line over the music, now or at `at`: the music dips for the length of the clip and comes back */
+  /** A line over the music, now or at `at`: the music eases down under it, the line starts a moment into that, and the music comes back after it */
   async aside(clip: Clip, at?: number) {
     await this.ensureClip(clip);
-    await this.call("dipMusic", { seconds: clip.duration + 0.2, at });
-    return this.spoke(await this.call<Spoken>("talk", { clip: clip.key, t0: at }));
+    const dip = await this.call<{ voiceAt: number }>("dipMusic", { seconds: clip.duration + 0.2, at });
+    return this.spoke(await this.call<Spoken>("talk", { clip: clip.key, t0: dip.voiceAt }));
   }
-  /** Everything down under the voice, right now */
-  duckAll() {
-    return this.call("duckAll", {}).catch(() => {});
+  /** Everything eases down under the voice from now on. Returns when the line should start (on the mixer's clock) */
+  async duckAll() {
+    return (await this.call<{ voiceAt: number }>("duckAll", {}).catch(() => undefined))?.voiceAt;
   }
   killAll(fade = 0.12) {
     return this.call("killAll", { fade }).catch(() => {});

@@ -1447,6 +1447,44 @@ registerProcessor("dj-limiter", Limiter);
     if (loud > 0) lastLoud = loud;
     return lastLoud;
   };
+  // The music makes way for the voice gradually: it takes DOWN seconds to get down, the voice comes in LEAD
+  // seconds into that, when the music is most of the way there, and the music comes back over UP
+  // seconds once the line is over. (It used to drop in a quarter of a second, which is heard as the
+  // volume being cut, the more so the further it drops.)
+  const DOWN = 1.3;
+  const LEAD = 1;
+  const UP = 1.6;
+  /**
+   * Moves a gain from `from` to `to` over `d` seconds from `t`: evenly to the ear (so in decibels, not
+   * in a straight line, which is heard as nothing much and then a drop), easing into it and out of it.
+   */
+  const along = (from, to, x) => Math.exp(Math.log(Math.max(from, 1e-3)) + ((Math.log(Math.max(to, 1e-3)) - Math.log(Math.max(from, 1e-3))) * (1 - Math.cos(Math.PI * x))) / 2);
+  const glide = (param, from, to, t, d) => {
+    if (Math.abs(from - to) < 1e-6) return void param.setValueAtTime(to, t);
+    const N = 64;
+    const curve = new Float32Array(N);
+    for (let i = 0; i < N; i++) curve[i] = along(from, to, i / (N - 1));
+    curve[0] = from;
+    curve[N - 1] = to;
+    param.setValueCurveAtTime(curve, t, d);
+  };
+  /**
+   * Stops whatever a gain was going to do from `t` on, leaving it where it has got to by then. (Just
+   * cancelling takes a curve that is under way out altogether, so the gain would be back where the
+   * curve started until `t`.)
+   */
+  const holdAt = (param, t) => {
+    if (param.cancelAndHoldAtTime) param.cancelAndHoldAtTime(t);
+    else param.cancelScheduledValues(t);
+  };
+  // Where the music as a whole has been sent (see dipMusic), so that a line that comes while it is
+  // still on its way somewhere starts from where it will be
+  let musicMoves = [];
+  const musicAt = (t) => {
+    let v = 1;
+    for (const m of musicMoves) if (m.t <= t) v = t >= m.t + m.d ? m.to : along(m.from, m.to, (t - m.t) / m.d);
+    return v;
+  };
   const voiceGain = (when, also) => Math.max(0.5, Math.min(1, (musicLoudness(when, also) * OVER) / VOICE_LEVEL));
   /** What the music is turned down to under a line */
   const under = (when, also) => {
@@ -1492,15 +1530,15 @@ registerProcessor("dj-limiter", Limiter);
     tail = Math.max(0.8, Math.min(tail, 6.5));
     // Starting right now (the DJ button): pick up from wherever the fader is
     const from = t0 - ctx.currentTime < 0.25 ? g.value : 1;
-    g.cancelScheduledValues(t0);
+    holdAt(g, t0);
     g.setValueAtTime(from, t0);
-    g.linearRampToValueAtTime(low * from, t0 + 0.45);
+    glide(g, from, low * from, t0 + 0.002, DOWN);
     g.setValueCurveAtTime(
       FADE_OUT.map((v) => v * low * from),
-      t0 + 0.45,
+      t0 + DOWN + 0.004,
       tail,
     );
-    const end = t0 + 0.45 + tail;
+    const end = t0 + DOWN + 0.004 + tail;
     stopSources(a, end);
     return end;
   };
@@ -1515,8 +1553,7 @@ registerProcessor("dj-limiter", Limiter);
       const BED = under(start, b.trackId);
       g.setValueAtTime(0, start);
       g.linearRampToValueAtTime(BED, start + 0.5);
-      g.setValueAtTime(BED, voiceEnd - 0.15);
-      g.linearRampToValueAtTime(1, voiceEnd + 0.45);
+      glide(g, BED, 1, Math.max(voiceEnd - 0.15, start + 0.52), UP);
     } else {
       g.setValueAtTime(0, start);
       g.linearRampToValueAtTime(1, start + 0.04);
@@ -1864,7 +1901,7 @@ registerProcessor("dj-limiter", Limiter);
       if (a) {
         const remaining = Math.max(0.8, a.buffer.duration - positionAt(a, t0));
         duckOut(a, t0, remaining);
-        voiceStart = t0 + 0.35;
+        voiceStart = t0 + LEAD;
       }
       stopVoice(0.04);
       voiceStart += 0.06;
@@ -1887,33 +1924,37 @@ registerProcessor("dj-limiter", Limiter);
       return {};
     },
     stopVoice: ({ fade }) => (stopVoice(fade ?? 0.12), {}),
-    /** All music down under the voice for `seconds`, then back up (a word from the DJ over the music) */
+    /**
+     * All music down under a line of `seconds` from the DJ, from `at` (or now), and back up after it.
+     * Returns when the line should start: a moment into the music going down.
+     */
     dipMusic: ({ seconds, at }) => {
       const g = music.gain;
-      const t = Math.max(ctx.currentTime, at ?? 0);
+      const t = Math.max(ctx.currentTime + 0.03, at ?? 0);
       const level = under(t);
-      if (g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(t);
-      else {
-        g.cancelScheduledValues(t);
-        g.setValueAtTime(g.value, t);
-      }
-      g.linearRampToValueAtTime(level, t + 0.25);
-      g.setValueAtTime(level, t + 0.25 + seconds);
-      g.linearRampToValueAtTime(1, t + 0.25 + seconds + 0.6);
-      return {};
+      const from = musicAt(t);
+      holdAt(g, t);
+      g.setValueAtTime(from, t);
+      glide(g, from, level, t + 0.002, DOWN);
+      const back = Math.max(t + DOWN + 0.01, t + LEAD + seconds);
+      glide(g, level, 1, back, UP);
+      musicMoves = musicMoves.filter((m) => m.t < t);
+      musicMoves.push({ t: t + 0.002, d: DOWN, from, to: level }, { t: back, d: UP, from: level, to: 1 });
+      if (musicMoves.length > 8) musicMoves = musicMoves.slice(-8);
+      return { voiceAt: t + LEAD };
     },
-    /** Everything down to `level` right now (under a goodbye) */
+    /** Everything down under the voice from now on (a goodbye, or a line with nothing to mix out of). Returns when the line should start */
     duckAll: () => {
-      const now = ctx.currentTime;
+      const now = ctx.currentTime + 0.03;
       const level = under(now);
       for (const d of decks.values()) {
         const g = d.fader.gain;
         const v = g.value;
-        g.cancelScheduledValues(now);
+        holdAt(g, now);
         g.setValueAtTime(v, now);
-        g.linearRampToValueAtTime(v * level, now + 0.4);
+        glide(g, v, v * level, now + 0.002, DOWN);
       }
-      return {};
+      return { voiceAt: now + LEAD };
     },
     killAll: ({ fade }) => {
       for (const d of decks.values()) killDeck(d, fade ?? 0.12);

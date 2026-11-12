@@ -1404,8 +1404,7 @@ class Session {
         } else await this.mixer.stopVoice(0.08);
       } else if (clip) {
         // Nothing playing to mix out of (a track was already on its way out): the voice, then the new track
-        await this.mixer.duckAll();
-        const t = await this.mixer.talk(clip, {});
+        const t = await this.mixer.talk(clip, { t0: await this.mixer.duckAll() });
         this.say(text, t.voiceStart, t.voiceEnd);
         this.awaiting = { voiceStart: t.voiceStart, voiceEnd: t.voiceEnd };
       } else {
@@ -1501,8 +1500,7 @@ class Session {
           // A word of goodbye over the music, then the music carries on in TIDAL itself
           const bye = await stockLine("signoff").catch(() => null);
           if (bye) {
-            await mixer.duckAll();
-            const t = await mixer.talk(bye.clip, {});
+            const t = await mixer.talk(bye.clip, { t0: await mixer.duckAll() });
             setStatus({ talking: true, caption: bye.text });
             await new Promise((r) => setTimeout(r, Math.max(0, t.voiceEnd - mixer.now) * 1000 + 100));
           }
