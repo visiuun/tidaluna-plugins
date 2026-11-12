@@ -5,10 +5,11 @@ import pageSource from "file://./mixer.page.js";
 import { cachedAnalysis, storeAnalysis, type Analysis } from "./analysis";
 import { mixerCall, mixerClose, mixerOpen, mixerTrackUrl } from "./mixer.native";
 import type { Move, Plan } from "./plan";
+import { jingleStyle } from "../config";
 import { log } from "../log";
 import { normGain, trackStream } from "./source";
 
-type Spoken = { voiceStart: number; voiceEnd: number; start?: number; voice: number; music: number; under: number };
+type Spoken = { voiceStart: number; voiceEnd: number; start?: number; voice: number; music: number; under: number; /** when the jingle before the line starts, if it has one */ jingle?: number };
 
 export type Loaded = { id: string; duration: number; analysis: Analysis; /** False while a placeholder stands in for the real analysis */ analysed: boolean };
 /** A spoken line: 16-bit mono PCM (base64), levelled and trimmed */
@@ -265,6 +266,9 @@ export class Mixer {
   createDeck(loaded: Loaded) {
     const d = new Deck(loaded);
     this.decks.add(d);
+    // (the jingle in this song's key, made ahead of the line that may come over it)
+    const sting = this.jingle(d);
+    if (sting.jingle && sting.tonic !== undefined) this.call("jinglePrep", sting).catch(() => {});
     return d;
   }
   async startAlone(deck: Deck, pos: number, when?: number, fade?: number) {
@@ -276,11 +280,24 @@ export class Mixer {
   /** The DJ speaks, optionally over a deck that fades away and/or into a deck that starts under the line */
   async talk(clip: Clip, opts: { a?: Deck; t0?: number; b?: Deck; pos?: number; intro?: number }) {
     await this.ensureClip(clip);
-    return this.spoke(await this.call<Spoken>("talk", { clip: clip.key, a: opts.a?.ref, t0: opts.t0, b: opts.b?.ref, track: opts.b?.id, pos: opts.pos, intro: opts.intro }));
+    return this.spoke(await this.call<Spoken>("talk", { clip: clip.key, a: opts.a?.ref, t0: opts.t0, b: opts.b?.ref, track: opts.b?.id, pos: opts.pos, intro: opts.intro, ...this.jingle(opts.a, opts.b) }));
+  }
+  /**
+   * The DJ's jingle, if one comes before its lines (its style), and the key it is played in: that of the
+   * song it comes over (the one going out, the one playing, or the one about to come in), C if there is none
+   */
+  private jingle(a?: Deck, b?: Deck) {
+    const now = this.now;
+    const playing = [...this.decks].filter((d) => !d.disposed && d.started && d.stopAt > now);
+    const deck = a ?? playing[playing.length - 1] ?? b;
+    const key = deck?.loaded.analysed ? deck.analysis.key : undefined;
+    const style = jingleStyle();
+    return { jingle: style === "off" ? undefined : style, tonic: key?.tonic, minor: key?.mode === "minor" };
   }
   /** Notes how a line sits against the music */
   private spoke(r: Spoken) {
     const db = (v: number) => (20 * Math.log10(Math.max(v, 1e-6))).toFixed(1);
+    if (r.jingle !== undefined) log(`Jingle ${(r.voiceStart - r.jingle).toFixed(2)}s before the line`);
     log(`Voice level: speaking at ${db(r.voice)} dBFS, the music at full ${db(r.music)} dBFS and ${db(r.music * r.under)} under the voice: the words are ${db(r.voice / (r.music * r.under))} dB above it`);
     return r;
   }
@@ -302,12 +319,13 @@ export class Mixer {
   /** A line over the music, now or at `at`: the music eases down under it, the line starts a moment into that, and the music comes back after it */
   async aside(clip: Clip, at?: number) {
     await this.ensureClip(clip);
-    const dip = await this.call<{ voiceAt: number }>("dipMusic", { seconds: clip.duration + 0.2, at });
-    return this.spoke(await this.call<Spoken>("talk", { clip: clip.key, t0: dip.voiceAt }));
+    const jingle = this.jingle();
+    const dip = await this.call<{ voiceAt: number }>("dipMusic", { seconds: clip.duration + 0.2, at, ...jingle });
+    return this.spoke(await this.call<Spoken>("talk", { clip: clip.key, t0: dip.voiceAt, ...jingle }));
   }
   /** Everything eases down under the voice from now on. Returns when the line should start (on the mixer's clock) */
   async duckAll() {
-    return (await this.call<{ voiceAt: number }>("duckAll", {}).catch(() => undefined))?.voiceAt;
+    return (await this.call<{ voiceAt: number }>("duckAll", this.jingle()).catch(() => undefined))?.voiceAt;
   }
   killAll(fade = 0.12) {
     return this.call("killAll", { fade }).catch(() => {});

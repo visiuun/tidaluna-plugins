@@ -1522,6 +1522,465 @@ registerProcessor("dj-limiter", Limiter);
     };
     return when + buffer.duration;
   };
+  // ------------------ JINGLE ------------------
+  // The DJ's signature, heard before it speaks: two seconds, the same every time (that is what is
+  // remembered), in one of five styles (`style`), each with its accent a quarter to half a second in:
+  //   swell   a soft rush of air and a string ensemble winding up, which stutter and are sucked away for a
+  //           moment, landing on a deep boom with the air rushing back out and a softly strummed chord over it
+  //   brass   a horn section: a short stab a tone below the key note and a long one on it ("ba-DAAH")
+  //   guitar  two muted chugs and an overdriven power chord, with kick, snare and a dark cymbal
+  //   drums   four toms going down and a boom
+  //   pulse   four quick notes on a synth bass, its filter opening, and a stab that closes again
+  // All of them are in the key of the song they come over (`tonic`: 0 = C ... 11 = B, C when there is
+  // none; `minor` where a third is played), so they are in tune with the music they interrupt.
+  // They are made by an offline audio context (the same oscillators and filters as the live one, run
+  // as fast as they go), the plucked strings sample by sample; once for each key asked for.
+  const JINGLE_IN = 0.45; // its start, from when the music starts to go down (its first half second needs the music partly out of the way)
+  const JINGLE_TO_VOICE = { swell: 1.15, brass: 0.95, guitar: 1.05, drums: 1.05, pulse: 1.05 }; // from its start to the DJ's first word
+  const toVoice = (style) => JINGLE_TO_VOICE[style] || 1.15;
+  const JINGLE_LEVEL = 0.24; // RMS of its loudest third of a second (the voice speaks at VOICE_LEVEL)
+  const JINGLE_GAP = 45; // not again within this many seconds: two lines in a row share one
+  const JINGLE_SECONDS = 2.1;
+  const renderJingle = async (sr, tonic, minor, style) => {
+    // (the key note between the F two octaves below middle C and the E above it)
+    const root = 41 + (((((tonic | 0) - 5) % 12) + 12) % 12);
+    const hz = (semis) => 440 * Math.pow(2, (root + semis - 69) / 12);
+    // (the same noise every time, so the jingle is the same every time)
+    let seed = 20231;
+    const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x40000000) - 1;
+    const oc = new OfflineAudioContext(2, Math.round(JINGLE_SECONDS * sr), sr);
+    const gain = (v) => {
+      const g = oc.createGain();
+      g.gain.value = v;
+      return g;
+    };
+    const filter = (type, f, q, db) => {
+      const b = oc.createBiquadFilter();
+      b.type = type;
+      b.frequency.value = f;
+      if (q !== undefined) b.Q.value = q;
+      if (db !== undefined) b.gain.value = db;
+      return b;
+    };
+    const panned = (v) => {
+      const p = oc.createStereoPanner();
+      p.pan.value = v;
+      return p;
+    };
+    const osc = (type, f, t, d, cents = 0) => {
+      const o = oc.createOscillator();
+      o.type = type;
+      o.frequency.value = f;
+      o.detune.value = cents;
+      o.start(t);
+      o.stop(t + d);
+      return o;
+    };
+    const mono = (x) => {
+      const b = oc.createBuffer(1, x.length, sr);
+      b.copyToChannel(x, 0);
+      return b;
+    };
+    const hiss = mono(Float32Array.from({ length: 2 * sr }, rand));
+    let turn = 0;
+    const noise = (t, d) => {
+      const s = oc.createBufferSource();
+      s.buffer = hiss;
+      s.loop = true;
+      s.start(t, (turn++ * 0.137) % 1.5);
+      s.stop(t + d);
+      return s;
+    };
+    /** A level that is `v` at `t` (after `attack`), has fallen to `left` of that `d` later, and is then let go */
+    const hitEnv = (param, t, v, d, attack, left = 0.003) => {
+      param.setValueAtTime(0, 0);
+      param.setValueAtTime(0, t);
+      param.linearRampToValueAtTime(v, t + attack);
+      param.exponentialRampToValueAtTime(Math.max(1e-4, v * left), t + d);
+      param.linearRampToValueAtTime(0, t + d + 0.05);
+    };
+    // The way out: a gentle compressor that holds it together; one echo, to one side and then the
+    // other; and a room
+    const out = oc.createDynamicsCompressor();
+    out.threshold.value = -12;
+    out.knee.value = 12;
+    out.ratio.value = 2.5;
+    out.attack.value = 0.01;
+    out.release.value = 0.15;
+    out.connect(oc.destination);
+    const echo = gain(1);
+    {
+      const left = oc.createDelay(1);
+      const right = oc.createDelay(1);
+      left.delayTime.value = 0.33;
+      right.delayTime.value = 0.33;
+      const level = gain(0.5);
+      echo.connect(filter("bandpass", 900, 0.5)).connect(left);
+      left.connect(gain(0.5)).connect(right);
+      left.connect(panned(-0.7)).connect(level);
+      right.connect(panned(0.7)).connect(level);
+      level.connect(out);
+    }
+    const room = oc.createConvolver();
+    {
+      const n = Math.round(1.2 * sr);
+      const ir = oc.createBuffer(2, n, sr);
+      for (let c = 0; c < 2; c++) {
+        const x = ir.getChannelData(c);
+        for (let i = 0; i < n; i++) x[i] = rand() * Math.exp(-i / (0.28 * sr)) * Math.min(1, i / (0.006 * sr));
+      }
+      room.buffer = ir;
+      room.connect(filter("highpass", 300)).connect(filter("lowpass", 4500)).connect(gain(0.2)).connect(out);
+    }
+    const kick = (t, level, d = 0.3) => {
+      const o = osc("sine", 120, t, d + 0.1);
+      o.frequency.setValueAtTime(120, t);
+      o.frequency.exponentialRampToValueAtTime(48, t + 0.08);
+      const g = gain(0);
+      hitEnv(g.gain, t, level, d, 0.004);
+      o.connect(g).connect(out);
+    };
+    /** The floor dropping away: a low note sliding down an octave */
+    const boom = (t, level) => {
+      const o = osc("sine", hz(0), t, 1);
+      o.frequency.setValueAtTime(hz(0), t);
+      o.frequency.exponentialRampToValueAtTime(Math.max(36, hz(-12)), t + 0.3);
+      const g = gain(0);
+      hitEnv(g.gain, t, level, 0.85, 0.006);
+      o.connect(g).connect(out);
+    };
+    const snare = (t, level) => {
+      const g = gain(0);
+      hitEnv(g.gain, t, level, 0.17, 0.002);
+      noise(t, 0.22).connect(filter("bandpass", 1800, 0.6)).connect(g);
+      g.connect(out);
+      g.connect(gain(0.5)).connect(room);
+      const body = osc("triangle", 200, t, 0.1);
+      body.frequency.setValueAtTime(200, t);
+      body.frequency.exponentialRampToValueAtTime(150, t + 0.07);
+      const b = gain(0);
+      hitEnv(b.gain, t, level * 0.7, 0.08, 0.002);
+      body.connect(b).connect(out);
+    };
+    /** A dark cymbal: a wash, not a splash */
+    const wash = (t, level, d) => {
+      const g = gain(0);
+      hitEnv(g.gain, t, level, d, 0.006);
+      noise(t, d + 0.06).connect(filter("highpass", 2600)).connect(filter("lowpass", 6500, 0.7)).connect(g);
+      const p = panned(0.2);
+      g.connect(p).connect(out);
+      p.connect(gain(0.5)).connect(room);
+    };
+    /**
+     * A plucked string, added to `x`: a loop of noise as long as the note's period, averaged every time
+     * round, so the highs die first. (The loop is a whole number of samples; a filter that only delays
+     * makes up the fraction, or the high notes would be out of tune.) `soft`: how soft the pluck is, 0-1.
+     */
+    const string = (x, f, at, len, damp, soft = 0.5) => {
+      const period = sr / f;
+      const N = Math.max(2, Math.floor(period - 0.6));
+      const frac = period - 0.5 - N;
+      const C = (1 - frac) / (1 + frac);
+      const line = new Float32Array(N);
+      let prev = 0;
+      let mean = 0;
+      for (let i = 0; i < N; i++) mean += line[i] = prev = soft * prev + (1 - soft) * rand();
+      mean /= N;
+      let peak = 1e-6;
+      for (let i = 0; i < N; i++) peak = Math.max(peak, Math.abs((line[i] -= mean)));
+      for (let i = 0; i < N; i++) line[i] /= peak;
+      const i0 = Math.round(at * sr);
+      const n = Math.min(x.length - i0, Math.round(len * sr));
+      const fade = 0.03 * sr;
+      let idx = 0;
+      let was = 0;
+      let gave = 0;
+      for (let k = 0; k < n; k++) {
+        const a = line[idx];
+        const next = idx + 1 === N ? 0 : idx + 1;
+        x[i0 + k] += a * Math.min(1, (n - k) / fade);
+        const avg = damp * 0.5 * (a + line[next]);
+        gave = C * avg + was - C * gave;
+        was = avg;
+        line[idx] = gave;
+        idx = next;
+      }
+    };
+    const T = 0.02;
+    const HIT = T + 0.5;
+    const third = minor ? 3 : 4;
+    const VOICE = toVoice(style);
+
+    if (style === "brass") {
+      /** A horn section on a chord: saw waves whose filter opens as they are blown, scooping up to the note */
+      const horns = (t, len, notes, level) => {
+        const lp = filter("lowpass", 450, 2.5);
+        lp.frequency.setValueAtTime(450, t);
+        lp.frequency.exponentialRampToValueAtTime(2800, t + 0.045);
+        lp.frequency.exponentialRampToValueAtTime(1500, t + Math.max(0.1, Math.min(len, 0.3)));
+        const env = gain(0);
+        env.gain.setValueAtTime(0, 0);
+        env.gain.setValueAtTime(0, t);
+        env.gain.linearRampToValueAtTime(level, t + 0.018);
+        env.gain.linearRampToValueAtTime(level * 0.8, t + len - 0.05);
+        env.gain.linearRampToValueAtTime(0, t + len);
+        for (const semis of notes) {
+          for (const cents of [-7, 7]) {
+            const o = osc("sawtooth", hz(semis), t, len + 0.02, cents);
+            o.detune.setValueAtTime(cents - 45, t);
+            o.detune.linearRampToValueAtTime(cents, t + 0.05);
+            o.connect(panned(cents / 11)).connect(gain(0.6 / Math.sqrt(2 * notes.length))).connect(lp);
+          }
+        }
+        lp.connect(env).connect(out);
+        env.connect(gain(0.4)).connect(room);
+        env.connect(gain(0.25)).connect(echo);
+      };
+      horns(T, 0.14, [-2, 10, 14, 17, 22], 0.8);
+      kick(T, 0.6, 0.2);
+      horns(T + 0.22, 0.55, [0, 12, 12 + third, 19, 24], 1);
+      kick(T + 0.22, 0.8);
+    } else if (style === "guitar") {
+      // (two takes, one to each side)
+      for (const side of [-1, 1]) {
+        const x = new Float32Array(Math.round(JINGLE_SECONDS * sr));
+        const late = side > 0 ? 0.009 : 0;
+        for (const at of [T, T + 0.14]) for (const semis of [0, 7]) string(x, hz(semis), at + late, 0.11, 0.955);
+        [0, 7, 12, 19].forEach((semis, k) => string(x, hz(semis), T + 0.3 + late + 0.011 * k, 1.4, 0.9985));
+        const s = oc.createBufferSource();
+        s.buffer = mono(x);
+        s.start(0);
+        // an amplifier turned up, and its speaker
+        const amp = oc.createWaveShaper();
+        const curve = new Float32Array(2049);
+        for (let i = 0; i < curve.length; i++) curve[i] = Math.tanh(3 * (i / 1024 - 1));
+        amp.curve = curve;
+        amp.oversample = "4x";
+        const g = gain(0.5);
+        s.connect(gain(1.5)).connect(amp).connect(filter("highpass", 100, 0.7)).connect(filter("peaking", 900, 0.9, 3)).connect(filter("lowpass", 3600, 1)).connect(filter("lowpass", 5000, 0.7)).connect(g);
+        const p = panned(side * 0.7);
+        g.connect(p).connect(out);
+        p.connect(gain(0.3)).connect(room);
+      }
+      kick(T, 0.6, 0.15);
+      kick(T + 0.14, 0.6, 0.15);
+      kick(T + 0.3, 0.9);
+      snare(T + 0.3, 0.45);
+      wash(T + 0.3, 0.14, 0.8);
+    } else if (style === "drums") {
+      const tom = (t, f, level, side) => {
+        const o = osc("sine", f * 1.6, t, 0.4);
+        o.frequency.setValueAtTime(f * 1.6, t);
+        o.frequency.exponentialRampToValueAtTime(f, t + 0.07);
+        const g = gain(0);
+        hitEnv(g.gain, t, level, 0.3, 0.003);
+        const stick = gain(0);
+        hitEnv(stick.gain, t, level * 0.25, 0.02, 0.001);
+        noise(t, 0.04).connect(filter("bandpass", 2500, 0.8)).connect(stick);
+        const p = panned(side);
+        o.connect(g).connect(p);
+        stick.connect(p);
+        p.connect(out);
+        p.connect(gain(0.5)).connect(room);
+      };
+      [12, 7, 5, 0].forEach((semis, k) => tom(T + 0.13 * k, hz(semis), 0.6 + 0.08 * k, -0.5 + 0.33 * k));
+      kick(T + 0.52, 0.9, 0.35);
+      boom(T + 0.52, 0.7);
+      wash(T + 0.52, 0.12, 0.9);
+    } else if (style === "pulse") {
+      // one filter over the four notes, opening as they go
+      const lp = filter("lowpass", 350, 7);
+      lp.frequency.setValueAtTime(350, T);
+      lp.frequency.exponentialRampToValueAtTime(2400, HIT - 0.04);
+      lp.connect(out);
+      lp.connect(gain(0.3)).connect(echo);
+      [0, 0, 12, 0].forEach((semis, k) => {
+        const t = T + 0.04 + 0.115 * k;
+        const g = gain(0);
+        hitEnv(g.gain, t, 0.5, 0.11, 0.004, 0.05);
+        osc("sawtooth", hz(semis), t, 0.2).connect(g);
+        osc("square", hz(semis), t, 0.2, -9).connect(gain(0.5)).connect(g);
+        g.connect(lp);
+      });
+      // the stab: the key note and its fifth, the filter closing again
+      const close = filter("lowpass", 3000, 4);
+      close.frequency.setValueAtTime(3000, HIT);
+      close.frequency.exponentialRampToValueAtTime(450, HIT + 0.6);
+      const env = gain(0);
+      hitEnv(env.gain, HIT, 0.9, 0.7, 0.005, 0.05);
+      for (const semis of [0, 12, 19, 24]) for (const cents of [-8, 8]) osc("sawtooth", hz(semis), HIT, 0.8, cents).connect(panned(cents / 12)).connect(gain(0.18)).connect(close);
+      close.connect(env).connect(out);
+      env.connect(gain(0.4)).connect(echo);
+      env.connect(gain(0.3)).connect(room);
+      kick(HIT, 0.85);
+    } else {
+      // swell: a rush of air and a chord fading in, which stutter as they peak and are sucked away
+      // for a moment; then the landing. Everything before the landing goes through `chop`.
+      const chop = gain(1);
+      chop.connect(out);
+      chop.connect(gain(0.5)).connect(room);
+      {
+        // (four chops, each shorter than the last, down to a quarter and back; then nothing for a twentieth of a second)
+        const g = chop.gain;
+        g.setValueAtTime(1, 0);
+        for (const [from, len] of [
+          [-0.3, 0.1],
+          [-0.2, 0.08],
+          [-0.12, 0.05],
+          [-0.07, 0.025],
+        ]) {
+          const t = HIT + from + len * 0.6;
+          g.setValueAtTime(1, t);
+          g.linearRampToValueAtTime(0.25, t + 0.006);
+          g.setValueAtTime(0.25, HIT + from + len - 0.006);
+          g.linearRampToValueAtTime(1, HIT + from + len);
+        }
+        g.setValueAtTime(1, HIT - 0.045);
+        g.linearRampToValueAtTime(0, HIT - 0.035);
+        g.setValueAtTime(0, HIT - 0.002);
+        g.linearRampToValueAtTime(1, HIT + 0.004);
+      }
+      // a rush of air, getting brighter
+      const lp = filter("lowpass", 300, 0.7);
+      lp.frequency.setValueAtTime(300, T);
+      lp.frequency.exponentialRampToValueAtTime(2600, HIT);
+      const air = gain(0);
+      air.gain.setValueAtTime(0.03, T);
+      air.gain.exponentialRampToValueAtTime(0.22, HIT - 0.04);
+      air.gain.linearRampToValueAtTime(0, HIT - 0.03);
+      noise(T, 0.6).connect(lp).connect(air).connect(chop);
+      // a chord fading in under it (the key note and its fifth: no third) on a string ensemble (saw
+      // waves, four to a note and a little apart, through a filter that opens as they swell), winding
+      // up to its pitch like a record getting up to speed; it rings on after the landing, darker
+      const rise = new Float32Array(32);
+      for (let i = 0; i < rise.length; i++) rise[i] = Math.pow(i / (rise.length - 1), 1.3);
+      const bow = filter("lowpass", 700, 1);
+      bow.frequency.setValueAtTime(700, T);
+      bow.frequency.exponentialRampToValueAtTime(2400, HIT);
+      bow.frequency.exponentialRampToValueAtTime(1100, HIT + 0.8);
+      const strings = gain(0);
+      strings.gain.setValueAtTime(0, 0);
+      strings.gain.setValueCurveAtTime(rise, T, HIT - T);
+      strings.gain.exponentialRampToValueAtTime(0.16, HIT + 1);
+      strings.gain.linearRampToValueAtTime(0, HIT + 1.3);
+      bow.connect(strings).connect(chop);
+      // (a slow waver in the pitch, as bowed strings have)
+      const waver = gain(5);
+      osc("sine", 5.2, T, 1.9).connect(waver);
+      for (const [semis, loud] of [
+        [12, 0.2],
+        [19, 0.16],
+        [24, 0.14],
+      ]) {
+        for (const cents of [-11, -4, 4, 11]) {
+          const o = osc("sawtooth", hz(semis), T, 1.9, cents);
+          o.detune.setValueAtTime(cents - 300, T);
+          o.detune.linearRampToValueAtTime(cents, HIT - 0.06);
+          waver.connect(o.detune);
+          o.connect(panned(cents / 14)).connect(gain(loud * 1.2)).connect(bow);
+        }
+      }
+      // the landing: the floor dropping away, a low note, and the air rushing back out, getting darker
+      kick(HIT, 0.5, 0.25);
+      boom(HIT, 0.8);
+      const low = gain(0);
+      hitEnv(low.gain, HIT, 0.35, 1, 0.006, 0.15);
+      osc("triangle", hz(0), HIT, 1.2).connect(filter("lowpass", 1000, 0.7)).connect(low);
+      osc("sine", hz(12), HIT, 1.2).connect(gain(0.5)).connect(low);
+      low.connect(out);
+      const dark = filter("lowpass", 2600, 0.7);
+      dark.frequency.setValueAtTime(2600, HIT);
+      dark.frequency.exponentialRampToValueAtTime(300, HIT + 0.55);
+      const away = gain(0);
+      hitEnv(away.gain, HIT, 0.13, 0.6, 0.005, 0.05);
+      noise(HIT, 0.7).connect(dark).connect(away);
+      away.connect(out);
+      away.connect(gain(0.5)).connect(room);
+      // and an open chord strummed softly over it on plucked strings (key note, fifth, octave, second,
+      // fifth: no third), two players, one to each side, echoing once
+      for (const side of [-1, 1]) {
+        const x = new Float32Array(Math.round(JINGLE_SECONDS * sr));
+        [12, 19, 24, 26, 31].forEach((semis, k) => string(x, hz(semis), HIT + 0.004 + 0.017 * k + (side > 0 ? 0.007 : 0), 1.5, 0.9975, 0.78));
+        const src = oc.createBufferSource();
+        src.buffer = mono(x);
+        src.start(0);
+        const g = gain(0.2);
+        src.connect(filter("highpass", 120, 0.7)).connect(filter("peaking", 250, 1, 3)).connect(filter("lowpass", 4200, 0.7)).connect(g);
+        const pn = panned(side * 0.6);
+        g.connect(pn).connect(out);
+        pn.connect(gain(0.7)).connect(room);
+        g.connect(gain(0.5)).connect(echo);
+      }
+    }
+
+    const made = await oc.startRendering();
+    const L = made.getChannelData(0);
+    const R = made.getChannelData(1);
+    const n = L.length;
+    const ease = (x) => 0.5 - 0.5 * Math.cos(Math.PI * Math.max(0, Math.min(1, x)));
+    // To its level: by the loudest third of a second of it
+    const block = Math.round(0.3 * sr);
+    let most = 0;
+    for (let i = 0; i + block <= n; i += block >> 2) {
+      let s = 0;
+      for (let j = i; j < i + block; j++) s += L[j] * L[j] + R[j] * R[j];
+      most = Math.max(most, s / (2 * block));
+    }
+    const up = most > 0 ? JINGLE_LEVEL / Math.sqrt(most) : 0;
+    // (what would go over full scale is rounded off instead)
+    const KNEE = 0.72;
+    const round = (v) => {
+      const a = v < 0 ? -v : v;
+      if (a <= KNEE) return v;
+      const y = KNEE + (0.97 - KNEE) * Math.tanh((a - KNEE) / (0.97 - KNEE));
+      return v < 0 ? -y : y;
+    };
+    // Out of the DJ's way: by its first word what is left is well under the voice, and it is gone a second later
+    for (let i = 0; i < n; i++) {
+      const t = i / sr;
+      const tail = 1 - 0.65 * ease((t - (VOICE - 0.25)) / 0.45);
+      const end = 1 - ease((t - (JINGLE_SECONDS - 0.75)) / 0.72);
+      const g = up * tail * end;
+      L[i] = round(L[i] * g);
+      R[i] = round(R[i] * g);
+    }
+    return made;
+  };
+  const jingles = new Map(); // style and key → the jingle, being made or made
+  // (The gap is by the clock on the wall, not the mixer's, which stands still while the music is paused:
+  // a line after a long pause gets its jingle)
+  const onTheWall = (t) => performance.now() / 1000 + (t - ctx.currentTime);
+  let jingledFor = -1e9; // the start of the last line that had one
+  const jingleDue = (on, voiceAt) => !!on && onTheWall(voiceAt) - jingledFor > JINGLE_GAP;
+  /** The jingle in a style and a key (a promise of it: it is made the first time it is asked for, which takes a moment) */
+  const jingleIn = (style, tonic, minor) => {
+    const pc = Number.isFinite(tonic) ? ((Math.round(tonic) % 12) + 12) % 12 : 0;
+    const key = style + ":" + pc + (minor ? "m" : "");
+    let made = jingles.get(key);
+    if (!made) {
+      made = renderJingle(ctx.sampleRate, pc, !!minor, style);
+      jingles.set(key, made);
+      made.catch(() => jingles.delete(key));
+      if (jingles.size > 6) jingles.delete(jingles.keys().next().value);
+    }
+    return made;
+  };
+  const playJingle = (when, buffer, level) => {
+    const s = ctx.createBufferSource();
+    s.buffer = buffer;
+    const g = ctx.createGain();
+    g.gain.value = level;
+    // (not through the voice's own filter, which takes the lows off: on the voice's way out after it)
+    s.connect(g).connect(voice);
+    s.start(when);
+    voices.add(s);
+    s.onended = () => {
+      voices.delete(s);
+      s.disconnect();
+      g.disconnect();
+    };
+  };
+
   const stopVoice = (fade) => {
     const g = voice.gain;
     const now = ctx.currentTime;
@@ -1920,10 +2379,13 @@ registerProcessor("dj-limiter", Limiter);
 
     /**
      * The DJ talks. Optionally drops deck `a` under the voice and fades it out; speaks `clip`; optionally
-     * brings deck `b` in around the end of the line (see bringIn).
+     * brings deck `b` in around the end of the line (see bringIn). With `jingle` (a style of it), its signature
+     * comes first (in the key `tonic`, `minor` or not), unless the line before had it a moment ago.
      */
-    talk: ({ a: aId, t0, clip: clipKey, b: bId, track, pos, intro }) => {
+    talk: async ({ a: aId, t0, clip: clipKey, b: bId, track, pos, intro, jingle, tonic, minor }) => {
       const a = aId ? decks.get(aId) : undefined;
+      // (made before anything is timed: the first time in a key that takes a moment)
+      const sting = jingle ? await jingleIn(jingle, tonic, minor).catch(() => null) : null;
       t0 = soon(t0 ?? 0, 0.08);
       let voiceStart = t0;
       if (a) {
@@ -1933,8 +2395,17 @@ registerProcessor("dj-limiter", Limiter);
       }
       stopVoice(0.04);
       voiceStart += 0.06;
+      let jingleAt;
+      if (sting && jingleDue(jingle, voiceStart)) {
+        // (After the voice's way out is open again, see stopVoice; where the music was already sent
+        // down for it, see dipMusic and duckAll, that is JINGLE_IN into the music going down)
+        jingleAt = Math.max(ctx.currentTime + 0.1, voiceStart - toVoice(jingle), a ? t0 + JINGLE_IN : 0);
+        playJingle(jingleAt, sting, voiceGain(voiceStart, track));
+        voiceStart = Math.max(voiceStart, jingleAt + toVoice(jingle));
+        jingledFor = onTheWall(voiceStart);
+      }
       const voiceEnd = speak(clipKey, voiceStart, track);
-      const out = { voiceStart, voiceEnd, voice: spoken.voice, music: spoken.music, under: under(voiceStart, track) };
+      const out = { voiceStart, voiceEnd, voice: spoken.voice, music: spoken.music, under: under(voiceStart, track), jingle: jingleAt };
       if (bId) out.start = bringIn(getDeck(bId, track), pos, intro, voiceStart, voiceEnd);
       return out;
     },
@@ -1954,25 +2425,29 @@ registerProcessor("dj-limiter", Limiter);
     stopVoice: ({ fade }) => (stopVoice(fade ?? 0.12), {}),
     /**
      * All music down under a line of `seconds` from the DJ, from `at` (or now), and back up after it.
-     * Returns when the line should start: a moment into the music going down.
+     * Returns when the line should start: a moment into the music going down, or, with `jingle`, once
+     * the DJ's signature has had its turn (see talk).
      */
-    dipMusic: ({ seconds, at }) => {
+    dipMusic: async ({ seconds, at, jingle, tonic, minor }) => {
+      if (jingle) await jingleIn(jingle, tonic, minor).catch(() => null);
       const g = music.gain;
       const t = Math.max(ctx.currentTime + 0.03, at ?? 0);
+      const lead = jingleDue(jingle, t + LEAD) ? JINGLE_IN + toVoice(jingle) : LEAD;
       const level = under(t);
       const from = musicAt(t);
       holdAt(g, t);
       g.setValueAtTime(from, t);
       glide(g, from, level, t + 0.002, DOWN);
-      const back = Math.max(t + DOWN + 0.01, t + LEAD + seconds);
+      const back = Math.max(t + DOWN + 0.01, t + lead + seconds);
       glide(g, level, 1, back, UP);
       musicMoves = musicMoves.filter((m) => m.t < t);
       musicMoves.push({ t: t + 0.002, d: DOWN, from, to: level }, { t: back, d: UP, from: level, to: 1 });
       if (musicMoves.length > 8) musicMoves = musicMoves.slice(-8);
-      return { voiceAt: t + LEAD };
+      return { voiceAt: t + lead };
     },
     /** Everything down under the voice from now on (a goodbye, or a line with nothing to mix out of). Returns when the line should start */
-    duckAll: () => {
+    duckAll: async ({ jingle, tonic, minor }) => {
+      if (jingle) await jingleIn(jingle, tonic, minor).catch(() => null);
       const now = ctx.currentTime + 0.03;
       const level = under(now);
       for (const d of decks.values()) {
@@ -1982,7 +2457,12 @@ registerProcessor("dj-limiter", Limiter);
         g.setValueAtTime(v, now);
         glide(g, v, v * level, now + 0.002, DOWN);
       }
-      return { voiceAt: now + LEAD };
+      return { voiceAt: now + (jingleDue(jingle, now + LEAD) ? JINGLE_IN + toVoice(jingle) : LEAD) };
+    },
+    /** Has the jingle made in a key before it is needed */
+    jinglePrep: ({ jingle, tonic, minor }) => {
+      if (jingle) jingleIn(jingle, tonic, minor).catch(() => null);
+      return {};
     },
     killAll: ({ fade }) => {
       for (const d of decks.values()) killDeck(d, fade ?? 0.12);

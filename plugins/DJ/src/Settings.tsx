@@ -1,5 +1,5 @@
 import React from "react";
-import { settings, VOICES, type Commentary, type Mixing, type PluginSettings } from "./config";
+import { JINGLES, jingleStyle, settings, VOICES, type Commentary, type Jingle, type Mixing, type PluginSettings } from "./config";
 import { getStatus, onStatus, setTransitionOnly, startSession, stopSession } from "./session";
 import { clearVoiceFiles, getDataDir } from "./store.native";
 import { prepareStock, voiceState, type VoiceState } from "./talk/voice";
@@ -120,6 +120,14 @@ export const Settings = () => {
         <LunaSelectItem value="full">Introduces every set and says why it picked it</LunaSelectItem>
         <LunaSelectItem value="less">Less chatter: only a hello and a goodbye</LunaSelectItem>
         <LunaSelectItem value="off">No talking, just the mix</LunaSelectItem>
+      </LunaSelectSetting>
+
+      <LunaSelectSetting title="Jingle" desc="The DJ's signature before it speaks: two seconds, in the key of the song it comes over" value={jingleStyle()} onChange={(e: any) => set("jingle", e.target.value as Jingle)}>
+        {JINGLES.map((j) => (
+          <LunaSelectItem key={j.id} value={j.id}>
+            {j.name}
+          </LunaSelectItem>
+        ))}
       </LunaSelectSetting>
 
       <LunaSelectSetting title="Transitions" desc="How one track moves into the next" value={state.mixing} onChange={(e: any) => set("mixing", e.target.value as Mixing)}>

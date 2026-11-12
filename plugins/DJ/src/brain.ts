@@ -13,6 +13,7 @@ import { trackVector } from "../../TrueTaste/src/vectors";
 import { settings } from "./config";
 import { log, warn } from "./log";
 import { readDoc, writeDoc } from "./store.native";
+import { speakable, type TrackFacts } from "./talk/script";
 
 export type { Track };
 export type Kind = "more" | "onRepeat" | "recentLikes" | "throwback" | "taste" | "discovery" | "artist" | "forgotten" | "mood" | "dailyMix" | "request";
@@ -118,13 +119,68 @@ export const ensureTracks = async (ids: string[]) => {
 /** Details of a track the DJ has read (see ensureTracks) */
 export const trackInfo = (id: string): Track | undefined => tracks[id];
 
-/** What's worth a word when a song is introduced: the year it came out, whether it's one you like, whether it's new to you */
-export const trackFacts = (t: Track) => {
-  const year = Number(t.album?.releaseDate?.slice(0, 4));
+// How often each track was played and when last, from the listens that were counted (not skips)
+let listens: { of: number; by: Map<string, { n: number; last: number }> } | undefined;
+const listensOf = (id: string) => {
+  if (!listens || listens.of !== state.events.length) {
+    const by = new Map<string, { n: number; last: number }>();
+    for (const e of state.events) {
+      if (e.kind === "skip") continue;
+      const l = by.get(e.id) ?? { n: 0, last: 0 };
+      l.n++;
+      if (e.t > l.last) l.last = e.t;
+      by.set(e.id, l);
+    }
+    listens = { of: state.events.length, by };
+  }
+  return listens.by.get(id);
+};
+
+/**
+ * What's worth a word when a song is introduced: when it came out and on what, what it is to you (liked
+ * and since when, how often and when last played, a month it was among your most played, how much of
+ * its artist you have), how long and how fast it is, and how it sits next to the song before it (`prev`).
+ * Only what is known: anything doubtful is left out.
+ */
+export const trackFacts = (t: Track, prev?: Track): TrackFacts => {
+  const now = Date.now();
+  const released = /^(\d{4})(?:-(\d{2})-(\d{2}))?/.exec(t.album?.releaseDate ?? "");
+  const year = released && Number(released[1]) > 1900 ? Number(released[1]) : undefined;
+  // (the first of January is what a release with only a year on it is dated: not a day to quote)
+  const dated = !!year && !!released?.[2] && !(released[2] === "01" && released[3] === "01");
+  const album = t.album?.title ? speakable(t.album.title) : "";
+  const title = speakable(t.title);
+  const onAlbum = (x: Track) => (x.album?.title && speakable(x.album.title).toLowerCase() !== speakable(x.title).toLowerCase() ? x.album.id : undefined);
+  const lead = t.artists[0]?.id;
+  const heard = listensOf(t.id);
+  // (TIDAL's own "recently played" has no real times: it only says a song is not one to call long unplayed)
+  const recently = Math.max(state.recentTracks?.[t.id] ?? 0, memory.played[t.id] ?? 0);
+  const last = Math.max(heard?.last ?? 0, memory.played[t.id] ?? 0);
+  const month = (state.historyMonths ?? [])
+    .filter((m) => /MONTHLY/.test(m.type) && now - m.at > 60 * DAY)
+    .map((m) => ({ m, rank: m.tracks.indexOf(t.id) }))
+    .filter((x) => x.rank >= 0 && x.rank < 15)
+    .sort((x, y) => x.rank - y.rank)[0]?.m;
+  const likedAt = state.likes?.[t.id];
+  const library = state.libraryArtists ?? {};
+  const knowsArtists = Object.keys(library).length > 20;
+  const fresh = !!profile && !profile.known.has(t.id);
+  const prevYear = Number(prev?.album?.releaseDate?.slice(0, 4));
   return {
-    year: year > 1900 ? year : undefined,
+    year,
+    date: dated ? [year!, Number(released![2]) - 1, Number(released![3])] : undefined,
+    album: album && album.length <= 34 && /\p{Script=Latin}{2}/u.test(album) && album.toLowerCase() !== title.toLowerCase() && !/\b(single|ep)$/i.test(album) ? album : undefined,
     liked: !!profile && (profile.seeds.get(t.id) ?? 0) >= 0.5,
-    fresh: !!profile && !profile.known.has(t.id),
+    likedAt: likedAt && likedAt > 1e11 && now - likedAt > 3 * DAY ? likedAt : undefined,
+    fresh,
+    plays: heard?.n,
+    lastPlayed: last > 1e11 && now - recently > 21 * DAY ? last : undefined,
+    topMonth: month ? { month: MONTHS[new Date(month.at).getMonth()], year: new Date(month.at).getFullYear() } : undefined,
+    artistSongs: lead && knowsArtists ? library[lead] : undefined,
+    newArtist: fresh && knowsArtists && !!lead && !library[lead] && !state.recentArtists?.[lead],
+    seconds: t.duration,
+    bpm: t.bpm,
+    prev: prev ? { year: prevYear > 1900 ? prevYear : undefined, bpm: prev.bpm, sameAlbum: !!onAlbum(prev) && onAlbum(prev) === onAlbum(t) } : undefined,
   };
 };
 

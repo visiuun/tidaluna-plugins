@@ -3,6 +3,16 @@ import { ReactiveStore } from "@luna/core";
 /** every: introduces every song, like a radio presenter; full: every set; less: a hello and a goodbye; off: nothing */
 export type Commentary = "every" | "full" | "less" | "off";
 export type Mixing = "auto" | "crossfade" | "none";
+/** The DJ's signature sound before it speaks (see the mixer's page for what each is) */
+export type Jingle = "off" | "swell" | "brass" | "guitar" | "drums" | "pulse";
+export const JINGLES: { id: Jingle; name: string }[] = [
+  { id: "swell", name: "Swell: a rush of air into a deep boom" },
+  { id: "brass", name: "Brass: two stabs from a horn section" },
+  { id: "guitar", name: "Guitar: two chugs and a power chord" },
+  { id: "drums", name: "Drums: a tom fill and a boom" },
+  { id: "pulse", name: "Pulse: a synth bass run and a stab" },
+  { id: "off", name: "Off" },
+];
 
 export type PluginSettings = {
   voice: string; // one of VOICES' ids
@@ -13,6 +23,7 @@ export type PluginSettings = {
   quality: "LOSSLESS" | "HIGH";
   homeCard: boolean;
   captions: boolean;
+  jingle: Jingle;
   coverFx: boolean; // the cover art follows the transitions
   /** Transitions only: no picks and no talking, just whatever TIDAL plays mixed together. Stays on across restarts */
   transitionOnly: boolean;
@@ -29,6 +40,7 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("DJ
   quality: "LOSSLESS",
   homeCard: true,
   captions: true,
+  jingle: "swell",
   coverFx: true,
   transitionOnly: false,
   allowExplicit: true,
@@ -47,4 +59,5 @@ export const VOICES: Persona[] = [
   { id: "emma", name: "Emma", desc: "British, calm", kokoro: "bf_emma", cloud: "shimmer", tone: "warm", speed: 1 },
   { id: "george", name: "George", desc: "British, wry", kokoro: "bm_george", cloud: "fable", tone: "dry", speed: 1 },
 ];
+export const jingleStyle = (): Jingle => (JINGLES.some((j) => j.id === settings.jingle) ? settings.jingle : "swell");
 export const persona = () => VOICES.find((v) => v.id === settings.voice) ?? VOICES[0];

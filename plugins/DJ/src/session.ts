@@ -145,8 +145,13 @@ const talksSets = () => settings.commentary === "full" || settings.commentary ==
 /** ...and every song on its own as well, like a radio presenter */
 const everySong = () => settings.commentary === "every";
 
+/** The line for a moment (a set's introduction gets what is known about its first song to talk about) */
+const lineOf = (m: Moment, link: TidalLink) => {
+  if ("segment" in m && !m.facts && m.segment.tracks[0]) m.facts = trackFacts(m.segment.tracks[0]);
+  return lineFor(m, context(link));
+};
 const makeTalk = (m: Moment, link: TidalLink, urgent: boolean): Talk => {
-  const text = lineFor(m, context(link));
+  const text = lineOf(m, link);
   const talk: Talk = { type: m.type, text, clip: speak(text, urgent) };
   talk.clip.then((c) => (talk.ready = c)).catch(() => (talk.ready = null));
   return talk;
@@ -277,7 +282,7 @@ class Session {
     let said: { text: string; clip: Clip } | null = null;
     if (talkative) {
       const m: Moment = { type: "open", segment, firstEver: sessionCount() === 0, sameDay: Date.now() - lastSessionAt() < 8 * 3600e3 };
-      const text = lineFor(m, context(this.link));
+      const text = lineOf(m, this.link);
       // Only worth waiting for when it's quick (a cloud voice); otherwise a stock hello
       const clip = voice.cloud ? await Promise.race([speak(text, true), new Promise<null>((r) => setTimeout(() => r(null), 6000))]) : null;
       said = clip ? { text, clip } : await stockLine("hello");
@@ -644,7 +649,7 @@ class Session {
       // Introducing every song: the line for the next one is written once it's certain what it follows
       // (the first song of a set has the set's introduction, which names it; a mashup needs no words)
       if (!this.piecing && !this.follow && everySong() && next && next.segment.key !== "mashup" && !(next.first && next.talk && !next.talk.after) && next.talk?.after !== cur.item.track.id) {
-        const talk = makeTalk({ type: "track", track: next.track, prev: cur.item.track, facts: trackFacts(next.track) }, this.link, false);
+        const talk = makeTalk({ type: "track", track: next.track, prev: cur.item.track, facts: trackFacts(next.track, cur.item.track) }, this.link, false);
         talk.after = cur.item.track.id;
         next.talk = talk;
         if (this.prep?.forId === next.track.id) this.prep.voice = !this.immediate;
