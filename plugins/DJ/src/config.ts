@@ -32,8 +32,8 @@ export type PluginSettings = {
 };
 
 export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("DJ", {
-  voice: "nova",
-  commentary: "full",
+  voice: "bella",
+  commentary: "every",
   mixing: "auto",
   setLength: 5,
   discovery: 30,
@@ -42,7 +42,7 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("DJ
   captions: true,
   jingle: "swell",
   coverFx: true,
-  transitionOnly: false,
+  transitionOnly: true,
   allowExplicit: true,
   cloudVoiceKey: "",
 });
@@ -60,4 +60,4 @@ export const VOICES: Persona[] = [
   { id: "george", name: "George", desc: "British, wry", kokoro: "bm_george", cloud: "fable", tone: "dry", speed: 1 },
 ];
 export const jingleStyle = (): Jingle => (JINGLES.some((j) => j.id === settings.jingle) ? settings.jingle : "swell");
-export const persona = () => VOICES.find((v) => v.id === settings.voice) ?? VOICES[0];
+export const persona = () => VOICES.find((v) => v.id === settings.voice) ?? VOICES.find((v) => v.id === "bella")!;
