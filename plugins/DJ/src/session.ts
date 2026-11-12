@@ -740,7 +740,7 @@ class Session {
       if (plan.kind === "mashup") {
         this.mashUntil = sched.end;
         setStatus({ segment: next.segment.title, busy: undefined, note: undefined });
-        log(`Mashup scheduled: it starts ${((sched.first ?? t0) - now).toFixed(1)}s from now (${plan.note}${sched.lift && sched.lift > 1.01 ? `; the voice brought up by ${(20 * Math.log10(sched.lift)).toFixed(1)} dB` : ""})`);
+        log(`Mashup scheduled: it starts ${((sched.first ?? t0) - now).toFixed(1)}s from now (${plan.note}${sched.levels ? `; the voice at ${(20 * Math.log10(sched.levels.voice)).toFixed(1)} dBFS over a band at ${(20 * Math.log10(sched.levels.band)).toFixed(1)}, brought up by ${(20 * Math.log10(sched.lift ?? 1)).toFixed(1)} dB` : ""})`);
       }
       if (plan.kind === "drop") lastMove = sched.move ?? plan.move;
       this.announce(cur, next, plan, t0, sched);
@@ -765,7 +765,9 @@ class Session {
       this.pending = { item: next, deck: plain, swap: await this.mixer.startAlone(plain, next.ready!.analysis.firstSound, this.mixer.now + 0.2) };
     }
     const key = prep.stretchKey;
-    if (key) setTimeout(() => this.mixer.dropStretch(key), 60_000);
+    // (The tempo-shifted lead-in is let go of once it has been played. A mashup's is in use for as long as
+    // the mashup lasts: its voice is still being taken out of it, piece by piece, while it plays)
+    if (key) setTimeout(() => this.mixer.dropStretch(key), Math.max(60, plan.kind === "mashup" ? plan.duration + 30 : 0) * 1000);
     if (prep.voice) {
       // Over a blend the DJ comes in just after the new track does; around a quick handover, a little
       // before the new track lands
@@ -1065,7 +1067,7 @@ class Session {
       const tag = `m${Date.now().toString(36)}`;
       const pieceS = STEM_PIECE / sr;
       let jobs = 0;
-      type Stems = { name: string; what: { id?: string; key?: string }; base: number; band: boolean; voice: Map<number, number[]> };
+      type Stems = { name: string; what: { id?: string; key?: string }; base: number; band: boolean; voice: Map<number, number[]>; level: Map<number, number[]> };
       /** Makes piece `i` of `s` (unless it is there already). Returns how much of each second of it is voice */
       const pieceOf = async (s: Stems, i: number) => {
         const had = s.voice.get(i);
@@ -1076,15 +1078,21 @@ class Session {
         // (with what is around it, for the separator to hear: see STEM_MARGIN)
         const out = await this.mixer.stemOut(job, s.what, start - STEM_MARGIN, start + STEM_PIECE + STEM_MARGIN);
         await separate(job);
-        const voice = (await this.mixer.stemIn(job, s.name, s.what, out.from, { skip: start - out.from, keep: STEM_PIECE, index: i, band: s.band })).voice;
+        const made = await this.mixer.stemIn(job, s.name, s.what, out.from, { skip: start - out.from, keep: STEM_PIECE, index: i, band: s.band });
+        const voice = made.voice;
+        s.level.set(i, made.level);
         const took = (Date.now() - began) / 1000;
         piecesTimed = Math.min(30, piecesTimed + 1);
         pieceSeconds += (took - pieceSeconds) / piecesTimed;
         s.voice.set(i, voice);
         return voice;
       };
-      // A stretch counts as sung when the voice is a fifth of the sound or more in four of every ten seconds
-      const sung = (voice: number[]) => voice.filter((v) => v >= 0.2).length / Math.max(1, voice.length) >= 0.4;
+      // A stretch counts as sung when the voice is 0.15 of the sound or more in four of every ten seconds.
+      // (That is low for a lead vocal, which is usually over half: but of a processed voice, chopped or
+      // through a vocoder, the separator only gets part, and such a song is still one with a singer.
+      // What comes out faint is brought up where it is used: see the voice's level in the mixer.)
+      const SUNG = 0.15;
+      const sung = (voice: number[]) => voice.filter((v) => v >= SUNG).length / Math.max(1, voice.length) >= 0.4;
       const tenths = (voice: number[]) => voice.map((v) => Math.min(9, Math.round(v * 10))).join("");
 
       // Each candidate is measured against the song on the audio itself. The ones that really fit are
@@ -1200,9 +1208,9 @@ class Session {
         // The other song from where it starts (unheard, a bar early) to just past where this one has
         // gone: at this song's tempo already, so its voice comes out ready to be sung over it. And this
         // song from just before its voice would be taken out.
-        const B: Stems = { name: `${tag}b`, what: stretchKey ? { key: stretchKey } : { id: partner.id }, base: stretchKey ? 0 : x0, band: true, voice: new Map() };
+        const B: Stems = { name: `${tag}b`, what: stretchKey ? { key: stretchKey } : { id: partner.id }, base: stretchKey ? 0 : x0, band: true, voice: new Map(), level: new Map() };
         const countB = Math.ceil(((hold + 1) * sr) / STEM_PIECE);
-        const A: Stems = { name: `${tag}a`, what: { id: track.id }, base: Math.round((fit.aPos - ease - 0.25) * sr), band: false, voice: new Map() };
+        const A: Stems = { name: `${tag}a`, what: { id: track.id }, base: Math.round((fit.aPos - ease - 0.25) * sr), band: false, voice: new Map(), level: new Map() };
         /** This song's pieces for a mashup that starts at `pos` of it */
         const rangeA = (pos: number) => [Math.floor(((pos - ease - 0.25) * sr - A.base) / STEM_PIECE), Math.ceil(((pos + total * bar + 0.3) * sr - A.base) / STEM_PIECE)] as const;
 
@@ -1210,15 +1218,18 @@ class Session {
         // piece and one from further on (they are pieces the mashup needs anyway, if it does)
         setStatus({ busy: `Listening for a singer in ${partner.title}` });
         const heardB: number[] = [];
+        const loudB: number[] = [];
         for (const i of new Set([0, Math.max(1, Math.min(countB - 1, Math.floor(((pre + 0.6 * voiceBars * bar) * sr) / STEM_PIECE)))])) {
           const voice = await pieceOf(B, i);
-          heardB.push(...(i === 0 ? voice.slice(Math.floor(pre)) : voice));
+          const from = i === 0 ? Math.floor(pre) : 0;
+          heardB.push(...voice.slice(from));
+          loudB.push(...(B.level.get(i) ?? []).slice(from));
           if (!still()) return movedOn();
         }
         const sings = sung(heardB);
-        // (how much of the sound the voice is where it sings: the middle one of those seconds)
-        const sungB = heardB.filter((v) => v >= 0.2).sort((x, y) => x - y);
-        const voiceShare = sungB.length ? sungB[sungB.length >> 1] : 0;
+        // (how loud the voice is where it sings: the middle one of those seconds)
+        const sungB = loudB.filter((_, k) => heardB[k] >= SUNG).sort((x, y) => x - y);
+        const voiceLevel = sungB.length ? sungB[sungB.length >> 1] : 0;
         let way: MashWay = sings ? "voice" : "layer";
         let heardA: number[] | undefined;
         if (!sings) {
@@ -1278,7 +1289,7 @@ class Session {
           period: beat,
           speed: fit.speed,
           way,
-          voiceShare,
+          voiceLevel,
           pre,
           bars1: voiceBars,
           bars2: blendBars,

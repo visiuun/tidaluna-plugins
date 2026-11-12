@@ -41,8 +41,8 @@ export type Plan = {
   pre?: number;
   bars1?: number;
   bars2?: number;
-  /** How much of the incoming track's sound its voice is where it sings (0-1): a faint one is brought up */
-  voiceShare?: number;
+  /** How loud the incoming track's voice is where it sings (RMS, as in the file): a faint one is brought up */
+  voiceLevel?: number;
   /** The two tracks' separated parts, by the names the mixer keeps them under */
   stemsA?: string;
   stemsB?: string;

@@ -439,9 +439,9 @@ registerProcessor("dj-limiter", Limiter);
   // down in two seconds, it was heard as the volume dropping the moment a transition began); the
   // incoming one comes back up slowly once it is alone, to exactly where it belongs.
   const ROOM_BACK = 6;
-  const makeRoom = (a, b, from, ease, until, room = 0.944) => {
+  const makeRoom = (a, b, from, ease, until, room = 0.944, roomA = room) => {
     a.post.gain.setValueAtTime(1, from);
-    a.post.gain.linearRampToValueAtTime(room, from + ease);
+    a.post.gain.linearRampToValueAtTime(roomA, from + ease);
     b.post.gain.setValueAtTime(room, from);
     b.post.gain.setValueAtTime(room, until);
     b.post.gain.linearRampToValueAtTime(1, until + ROOM_BACK);
@@ -886,7 +886,13 @@ registerProcessor("dj-limiter", Limiter);
     const piece = { from: from + skip, n, voc, inst };
     set.pieces.set(index, piece);
     for (const f of feeds) if (f.name === name) playPiece(f, index, piece);
-    return { seconds: n / sr, voice: Array.from(ev, (e, k) => (es[k] > 1e-7 ? Math.round(Math.sqrt(e / es[k]) * 100) / 100 : 0)) };
+    // (...and how loud the voice itself is in each second: RMS per channel)
+    const per = (k) => 2 * Math.min(sr, n - k * sr);
+    return {
+      seconds: n / sr,
+      voice: Array.from(ev, (e, k) => (es[k] > 1e-7 ? Math.round(Math.sqrt(e / es[k]) * 100) / 100 : 0)),
+      level: Array.from(ev, (e, k) => Math.round(Math.sqrt(e / per(k)) * 10000) / 10000),
+    };
   };
   const stemDrop = ({ name }) => (stemSets.delete(name), {});
 
@@ -1787,15 +1793,16 @@ registerProcessor("dj-limiter", Limiter);
         }
         // The other song comes as two parts of one deck: its voice straight to the deck's output, its
         // band through the deck's EQ and fader, silent until its turn. Both start together, a bar early.
-        // A voice that sits low in its own song (a fifth of the sound, say, where most are half of it or
-        // more) is hardly there over another song's band: it is brought up to where a voice usually
-        // sits against the band it is now over, by 6 dB at the most, and goes back to its own level
-        // as its own band comes in.
-        const levelOf = (id) => {
-          const t = tracks.get(id);
-          return t ? t.loud * t.gain : 0;
-        };
-        const lift = plan.voiceShare > 0 && levelOf(b.trackId) > 0 ? Math.max(1, Math.min(2, (0.5 * (levelOf(a.trackId) || levelOf(b.trackId))) / (plan.voiceShare * levelOf(b.trackId)))) : 1;
+        // A voice was mixed to sit in its own song, and many sit low in it (a fifth of the sound, where
+        // a lead vocal is usually well over half): over another song's band, at the level it had, such
+        // a voice can barely be heard. So it is set against the band it is now over: brought up until
+        // it is a little over half as loud as that song is at full level (VOICE_OVER_BAND), by 12 dB at
+        // the most, and back to its own level as its own band comes in. A voice that had to be brought
+        // up a good deal also gets more room: the band under it sits 2 dB lower while it sings.
+        const VOICE_OVER_BAND = 0.55;
+        const ta = tracks.get(a.trackId);
+        const tb = tracks.get(b.trackId);
+        const lift = plan.voiceLevel > 0 && ta && tb ? Math.max(1, Math.min(4, (VOICE_OVER_BAND * ta.loud * ta.gain) / (plan.voiceLevel * tb.gain))) : 1;
         const vox = ctx.createGain();
         vox.gain.value = 0;
         vox.connect(b.post);
@@ -1848,9 +1855,12 @@ registerProcessor("dj-limiter", Limiter);
         const swap = T2 + Math.max(1, Math.round(plan.bars2 / 2)) * bar;
         const swapFrom = swap - Math.min(0.09, beat * 0.2);
         handBass(a, b, FADE_OUT, T2, D, swapFrom, swapFrom + 0.05, T3);
-        makeRoom(a, b, T1 - ease, 2 * bar, T3, 0.9);
+        const roomA = lift >= 1.4 ? 0.72 : 0.9;
+        makeRoom(a, b, T1 - ease, 2 * bar, T3, 0.9, roomA);
         stopSources(a, T3);
-        return { swap: T1, end: T3, bStart: t0, first: T1 - ease, mid: T2, lift };
+        // (for the log: how loud the voice goes out, and the band it is over)
+        const levels = ta && tb && plan.voiceLevel > 0 ? { voice: plan.voiceLevel * tb.gain * lift * 0.9, band: ta.loud * ta.gain * roomA } : undefined;
+        return { swap: T1, end: T3, bStart: t0, first: T1 - ease, mid: T2, lift, levels };
       }
       if (plan.kind === "fade") {
         play(b, t0, plan.bStart);

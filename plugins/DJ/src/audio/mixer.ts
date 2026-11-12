@@ -238,7 +238,7 @@ export class Mixer {
    * `voice`: how much of each second of the piece is voice (0-1)
    */
   stemIn(job: string, name: string, what: { id?: string; key?: string }, from: number, piece: { skip: number; keep: number; index: number; band: boolean }) {
-    return this.call<{ seconds: number; voice: number[] }>("stemIn", { job, name, ...what, from, ...piece });
+    return this.call<{ seconds: number; voice: number[]; /** how loud the voice is in each second (RMS) */ level: number[] }>("stemIn", { job, name, ...what, from, ...piece });
   }
   stemDrop(name: string) {
     return this.call("stemDrop", { name }).catch(() => {});
@@ -271,7 +271,7 @@ export class Mixer {
     return (await this.call<{ start: number }>("startAlone", { deck: deck.ref, track: deck.id, pos, when, fade })).start;
   }
   transition(a: Deck, b: Deck, plan: Plan, t0: number, stretchKey?: string) {
-    return this.call<{ swap: number; end: number; bStart: number; nudgeMs?: number; beatShift?: number; bassBeat?: number; move?: Move; first?: number; mid?: number; lift?: number }>("transition", { a: a.ref, b: b.ref, track: b.id, plan, t0, stretchKey });
+    return this.call<{ swap: number; end: number; bStart: number; nudgeMs?: number; beatShift?: number; bassBeat?: number; move?: Move; first?: number; mid?: number; lift?: number; levels?: { voice: number; band: number } }>("transition", { a: a.ref, b: b.ref, track: b.id, plan, t0, stretchKey });
   }
   /** The DJ speaks, optionally over a deck that fades away and/or into a deck that starts under the line */
   async talk(clip: Clip, opts: { a?: Deck; t0?: number; b?: Deck; pos?: number; intro?: number }) {
