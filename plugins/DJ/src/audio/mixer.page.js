@@ -894,7 +894,8 @@ registerProcessor("dj-limiter", Limiter);
   //   { name, deck, frameOf(sample of the track) → frame of the output it is heard at,
   //     parts: [{ which: "voc" | "inst", to: node }], grid: { base, seg, from, to } (piece i is `seg`
   //     samples from base + i * seg; pieces from..to are wanted), whole?: { buffer, to } (what plays
-  //     instead of a piece that isn't there in time), end: when it is over, played, late, missed }
+  //     instead of a piece that isn't there in time), audible: from when it is heard, end: when it is
+  //     over, played, late, missed }
   let feedTimer = 0;
   const playPiece = (f, index, piece) => {
     if (f.played.has(index) || index < f.grid.from || index >= f.grid.to) return;
@@ -902,13 +903,15 @@ registerProcessor("dj-limiter", Limiter);
     let frame = f.frameOf(piece.from);
     let offset = 0;
     const soonest = Math.round((ctx.currentTime + 0.08) * sr);
-    // (how long before it is heard the piece got here: the least of those says how close the race was)
-    f.spare = Math.min(f.spare, (frame - soonest) / sr);
+    // (how long before it is heard the piece got here: the least of those says how close the race was.
+    // A piece can begin before its feed is heard at all, which is not being late)
+    const heard = Math.max(frame, Math.round((f.audible || 0) * sr));
+    f.spare = Math.min(f.spare, (heard - soonest) / sr);
     if (frame < soonest) {
-      // (Late: it joins in where the song has got to, on the sample)
+      // (It joins in where the song has got to, on the sample)
       offset = soonest - frame;
       frame = soonest;
-      f.late++;
+      if (heard < soonest) f.late++;
     }
     f.played.add(index);
     if (offset >= piece.n) return;
@@ -1303,9 +1306,11 @@ registerProcessor("dj-limiter", Limiter);
     let best = null;
     const byWay = [];
     for (const way of ways) {
-      // B's voice over A's band for n1 bars, then n2 for the bands to change over: the longest that fits
+      // B's voice over A's band for n1 bars, then n2 for the bands to change over. A longer one is worth
+      // more (see the score), up to two minutes of it; the best of them all is the one.
       let top = null;
-      for (const [n1, n2] of [[24, 8], [16, 8], [12, 4], [8, 4]]) {
+      for (const [n1, n2] of [[48, 16], [32, 16], [24, 8], [16, 8], [12, 4], [8, 4]]) {
+        if (A.most && n1 + n2 > A.most) continue;
         for (let ai = 0; ai < startsA.length; ai++) {
           const i = startsA[ai];
           // (A has to last through it, with a bar to spare)
@@ -1322,16 +1327,17 @@ registerProcessor("dj-limiter", Limiter);
             const s2 = 0;
             if (s1 === null || !barsB[j + n1 + n2 - 1] || !barsA[i + n1 + n2 - 1]) continue;
             // The sooner the better (in this song, and in the other, which then has more left to play
-            // afterwards); a longer mashup is worth a little; so is coming in where one of the other
-            // song's sections starts (every eight or sixteen bars from where its intro ends)
+            // afterwards); a longer mashup is worth a good deal (32 bars more make up for 0.06 less
+            // of a fit: a mashup is there to be listened to, and half a minute of it is over before it
+            // has begun); so is coming in where one of the other song's sections starts (every eight
+            // or sixteen bars from where its intro ends)
             const fit = s1;
             const fromBody = j - bodyBar;
             const section = fromBody >= 0 && fromBody % 16 === 0 ? 0.02 : fromBody >= 0 && fromBody % 8 === 0 ? 0.01 : 0;
-            const score = fit - 0.012 * ai - 0.0006 * j + section + 0.0015 * (n1 + n2) - 0.03 * Math.abs(way.k) - 1.2 * Math.abs(way.joins) - 0.004 * Math.max(0, Math.abs(way.off) - 5);
+            const score = fit - 0.012 * ai - 0.0006 * j + section + 0.002 * (n1 + n2) - 0.03 * Math.abs(way.k) - 1.2 * Math.abs(way.joins) - 0.004 * Math.max(0, Math.abs(way.off) - 5);
             if (!top || score > top.score) top = { score, fit, s1, s2, i, j, n1, n2, way };
           }
         }
-        if (top) break;
       }
       if (top) {
         byWay.push({ k: way.k, joins: Math.round(way.joins * 1000) / 10, fit: Math.round(top.fit * 100) / 100 });
@@ -1696,7 +1702,7 @@ registerProcessor("dj-limiter", Limiter);
             g.connect(to);
             return g;
           });
-          addFeed({ name: plan.stemsA, deck: a, frameOf: (s) => zero + s, parts: gains.map((g) => ({ which: "voc", to: g })), grid: { seg: grid.seg, ...grid.a }, end: until });
+          addFeed({ name: plan.stemsA, deck: a, frameOf: (s) => zero + s, parts: gains.map((g) => ({ which: "voc", to: g })), grid: { seg: grid.seg, ...grid.a }, audible: T1 - ease, end: until });
           return gains.map((g) => g.gain);
         };
         /** The other song as it is (through its tempo-shifted lead-in if it has one), unheard until its fader says so */
@@ -1781,11 +1787,22 @@ registerProcessor("dj-limiter", Limiter);
         }
         // The other song comes as two parts of one deck: its voice straight to the deck's output, its
         // band through the deck's EQ and fader, silent until its turn. Both start together, a bar early.
+        // A voice that sits low in its own song (a fifth of the sound, say, where most are half of it or
+        // more) is hardly there over another song's band: it is brought up to where a voice usually
+        // sits against the band it is now over, by 6 dB at the most, and goes back to its own level
+        // as its own band comes in.
+        const levelOf = (id) => {
+          const t = tracks.get(id);
+          return t ? t.loud * t.gain : 0;
+        };
+        const lift = plan.voiceShare > 0 && levelOf(b.trackId) > 0 ? Math.max(1, Math.min(2, (0.5 * (levelOf(a.trackId) || levelOf(b.trackId))) / (plan.voiceShare * levelOf(b.trackId)))) : 1;
         const vox = ctx.createGain();
         vox.gain.value = 0;
         vox.connect(b.post);
         vox.gain.setValueAtTime(0, T1 - ease);
-        vox.gain.linearRampToValueAtTime(1, T1);
+        vox.gain.linearRampToValueAtTime(lift, T1);
+        vox.gain.setValueAtTime(lift, T2);
+        vox.gain.linearRampToValueAtTime(1, T3);
         // (They arrive piece by piece; a piece that isn't there in time plays as the song itself)
         const L = (grid.b.to - grid.b.from) * grid.seg;
         const tEnd = (first + L) / sr;
@@ -1800,6 +1817,7 @@ registerProcessor("dj-limiter", Limiter);
           ],
           grid: { seg: grid.seg, ...grid.b },
           whole: { buffer: st ? st.buffer : b.buffer, to: b.low },
+          audible: T1 - ease,
           end: tEnd,
         });
         // ...and where the separated stretch ends, the song itself carries on from the very next sample:
@@ -1832,7 +1850,7 @@ registerProcessor("dj-limiter", Limiter);
         handBass(a, b, FADE_OUT, T2, D, swapFrom, swapFrom + 0.05, T3);
         makeRoom(a, b, T1 - ease, 2 * bar, T3, 0.9);
         stopSources(a, T3);
-        return { swap: T1, end: T3, bStart: t0, first: T1 - ease, mid: T2 };
+        return { swap: T1, end: T3, bStart: t0, first: T1 - ease, mid: T2, lift };
       }
       if (plan.kind === "fade") {
         play(b, t0, plan.bStart);

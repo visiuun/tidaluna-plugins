@@ -740,7 +740,7 @@ class Session {
       if (plan.kind === "mashup") {
         this.mashUntil = sched.end;
         setStatus({ segment: next.segment.title, busy: undefined, note: undefined });
-        log(`Mashup scheduled: it starts ${((sched.first ?? t0) - now).toFixed(1)}s from now (${plan.note})`);
+        log(`Mashup scheduled: it starts ${((sched.first ?? t0) - now).toFixed(1)}s from now (${plan.note}${sched.lift && sched.lift > 1.01 ? `; the voice brought up by ${(20 * Math.log10(sched.lift)).toFixed(1)} dB` : ""})`);
       }
       if (plan.kind === "drop") lastMove = sched.move ?? plan.move;
       this.announce(cur, next, plan, t0, sched);
@@ -1117,7 +1117,8 @@ class Session {
           this.dropExtra(c.id);
           continue;
         }
-        const fit = await this.mixer.mashMatch(track.id, c.id, side(a, here() + MASH_LEAD), other(b), !!query);
+        // (How well the two go together is judged on their best 24 bars: how long the mashup can be is found later)
+        const fit = await this.mixer.mashMatch(track.id, c.id, { ...side(a, here() + MASH_LEAD), most: 24 }, other(b), !!query);
         const quality = fit.ok ? mashQuality(fit) : -1;
         log(`Mashup: ${track.title} × ${c.title}: ${describeFit(fit)}${fit.ok ? `, quality ${quality.toFixed(2)}` : ""}`);
         if (!fit.ok) why ??= fit.why;
@@ -1156,17 +1157,27 @@ class Session {
         // Where: as soon as what has to be there by then can be. That is the other song at this one's
         // tempo (a couple of seconds), two pieces of its voice, to hear whether it sings, and then
         // either a start on the rest (with two voices to take out the work is only just faster than
-        // the playing, so the longer the mashup, the bigger the start it needs: reckoned here for the
-        // longest, the way `plansFor` below does it for the real one), or, if it doesn't sing, two
-        // pieces of this song and the first of its voice.
-        const step = pieceSeconds * PIECE_SLACK;
-        const longest: number[] = [];
-        for (let t = pieceS; t < 33 * bar + 1; t += pieceS) longest.push(t, t - pieceS + 2 * beat);
-        longest.push(33 * bar - pieceS + 2 * beat);
-        longest.sort((x, y) => x - y);
-        const start = longest.reduce((most, at, j) => Math.max(most, (j + 1) * step + 2 - at), 2);
-        const ahead = 3 + Math.max(2 * pieceSeconds + start, 4 * pieceSeconds + step + 2);
-        const fit = await this.mixer.mashMatch(track.id, partner.id, { ...side(a, here() + ahead), starts: 2 }, other(b), !!query, true);
+        // the playing, so the longer the mashup, the bigger the start it needs: reckoned here the way
+        // `plansFor` below does it for the real one), or, if it doesn't sing, two pieces of this song
+        // and the first of its voice.
+        const aheadFor = (bars: number) => {
+          const step = pieceSeconds * PIECE_SLACK;
+          const heard: number[] = [];
+          for (let t = pieceS; t < (bars + 1) * bar + 1; t += pieceS) heard.push(t, t - pieceS + 2 * beat);
+          heard.push((bars + 1) * bar - pieceS + 2 * beat);
+          heard.sort((x, y) => x - y);
+          const start = heard.reduce((most, at, j) => Math.max(most, (j + 1) * step + 2 - at), 2);
+          return 3 + Math.max(2 * pieceSeconds + start, 4 * pieceSeconds + step + 2);
+        };
+        // How long it can be is found first, with the start the longest would need; then where exactly,
+        // with the start that length needs (a shorter one can begin sooner)
+        const rough = await this.mixer.mashMatch(track.id, partner.id, { ...side(a, here() + aheadFor(64)), starts: 2 }, other(b), !!query);
+        if (!rough.ok) {
+          why = rough.why;
+          continue;
+        }
+        const most = rough.bars1 + rough.bars2;
+        const fit = await this.mixer.mashMatch(track.id, partner.id, { ...side(a, here() + aheadFor(most)), starts: 2, most }, other(b), !!query, true);
         if (!fit.ok) {
           why = fit.why;
           continue;
@@ -1205,6 +1216,9 @@ class Session {
           if (!still()) return movedOn();
         }
         const sings = sung(heardB);
+        // (how much of the sound the voice is where it sings: the middle one of those seconds)
+        const sungB = heardB.filter((v) => v >= 0.2).sort((x, y) => x - y);
+        const voiceShare = sungB.length ? sungB[sungB.length >> 1] : 0;
         let way: MashWay = sings ? "voice" : "layer";
         let heardA: number[] | undefined;
         if (!sings) {
@@ -1264,6 +1278,7 @@ class Session {
           period: beat,
           speed: fit.speed,
           way,
+          voiceShare,
           pre,
           bars1: voiceBars,
           bars2: blendBars,

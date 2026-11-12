@@ -17,7 +17,7 @@ export type Clip = { key: string; pcm: string; rate: number; duration: number };
 type MapPoint = { t: number; pos: number; rate: number };
 
 /** One track's side of a mashup: its beat, a bar line, which of every four bars starts a phrase, and the stretch of it that may be used (seconds) */
-export type MashSide = { period: number; bar0: number; phrase: number; body: number; from: number; last: number; /** How many of the next phrase lines it may start on (4 if not given) */ starts?: number };
+export type MashSide = { period: number; bar0: number; phrase: number; body: number; from: number; last: number; /** How many of the next phrase lines it may start on (4 if not given) */ starts?: number; /** The most bars the mashup may last */ most?: number };
 /** How two tracks go together (see mashMatch in mixer.page.js) */
 export type MashFit = {
   ok: boolean;
@@ -271,7 +271,7 @@ export class Mixer {
     return (await this.call<{ start: number }>("startAlone", { deck: deck.ref, track: deck.id, pos, when, fade })).start;
   }
   transition(a: Deck, b: Deck, plan: Plan, t0: number, stretchKey?: string) {
-    return this.call<{ swap: number; end: number; bStart: number; nudgeMs?: number; beatShift?: number; bassBeat?: number; move?: Move; first?: number; mid?: number }>("transition", { a: a.ref, b: b.ref, track: b.id, plan, t0, stretchKey });
+    return this.call<{ swap: number; end: number; bStart: number; nudgeMs?: number; beatShift?: number; bassBeat?: number; move?: Move; first?: number; mid?: number; lift?: number }>("transition", { a: a.ref, b: b.ref, track: b.id, plan, t0, stretchKey });
   }
   /** The DJ speaks, optionally over a deck that fades away and/or into a deck that starts under the line */
   async talk(clip: Clip, opts: { a?: Deck; t0?: number; b?: Deck; pos?: number; intro?: number }) {
