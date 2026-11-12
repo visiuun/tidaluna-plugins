@@ -122,7 +122,7 @@ export const Settings = () => {
       </LunaSelectSetting>
 
       <LunaSelectSetting title="Transitions" desc="How one track moves into the next" value={state.mixing} onChange={(e: any) => set("mixing", e.target.value as Mixing)}>
-        <LunaSelectItem value="auto">DJ mix: beatmatched blends where the tracks allow it, echo-outs and crossfades where they don't</LunaSelectItem>
+        <LunaSelectItem value="auto">DJ mix: beatmatched blends where the tracks allow it, drops and crossfades where they don't</LunaSelectItem>
         <LunaSelectItem value="crossfade">Crossfades only</LunaSelectItem>
         <LunaSelectItem value="none">None: one track after the other</LunaSelectItem>
       </LunaSelectSetting>

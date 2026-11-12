@@ -879,35 +879,61 @@ registerProcessor("dj-limiter", Limiter);
         stopSources(a, end);
         return { swap: t0 + plan.swapAt, end, bStart: t0 };
       }
-      if (plan.kind === "echo") {
-        // The last beat goes into a delay line that keeps repeating after the track itself is cut
-        const beat = plan.period ?? 0.5;
-        const send = ctx.createGain();
-        const delay = ctx.createDelay(2);
-        const feedback = ctx.createGain();
-        const tone = ctx.createBiquadFilter();
-        const out = ctx.createGain();
-        delay.delayTime.value = Math.min(1.9, beat * 0.75);
-        feedback.gain.value = 0.52;
-        tone.type = "bandpass";
-        tone.frequency.value = 1200;
-        tone.Q.value = 0.35;
-        send.gain.setValueAtTime(0, t0 - 0.01);
-        send.gain.linearRampToValueAtTime(1, t0 + 0.02);
-        send.gain.setValueAtTime(1, end);
-        send.gain.linearRampToValueAtTime(0, end + 0.02);
-        a.fader.connect(send).connect(delay).connect(tone).connect(feedback).connect(delay);
-        tone.connect(out).connect(music);
-        const tail = end + 7;
-        out.gain.setValueAtTime(0.85, t0);
-        out.gain.setValueAtTime(0.85, end + 2.5);
-        out.gain.linearRampToValueAtTime(0, tail);
-        setTimeout(() => [send, delay, feedback, tone, out].forEach((n) => n.disconnect()), Math.max(0, tail - ctx.currentTime + 0.5) * 1000);
-        fadeOutAt(a, end, 0.025);
+      if (plan.kind === "drop") {
+        // Tempos too far apart to blend, so the two never play together: the outgoing track leaves over
+        // the beats before a bar line, and the incoming one lands on that line at full level
+        const g = a.fader.gain;
+        const OUT = 0.03; // the very end is faded, so the cut can't click
+        // A deck still inside its own tempo-shifted lead-in changes sources on a schedule: no braking it
+        const last = a.map[a.map.length - 1];
+        const settled = !!last && last.t <= t0 && last.rate === 1;
+        const move = plan.move === "brake" && !settled ? "sweep" : plan.move;
+        // (A deck that has only just been mixed in may still be on its way up: that ends here)
+        if (g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(t0);
+        g.linearRampToValueAtTime(1, t0 + 0.02);
+        if (move === "brake") {
+          // A record brought to a stop: slower and lower until it stands still, quieter as it goes
+          for (const s of a.sources) {
+            s.playbackRate.setValueAtTime(1, t0);
+            s.playbackRate.linearRampToValueAtTime(0.03, end);
+          }
+          g.setValueAtTime(1, t0 + D * 0.45);
+          g.linearRampToValueAtTime(0, end);
+        } else if (move === "dive") {
+          // Closed down from the top until only a rumble is left, as if heard through a wall. The filter
+          // is put in for this move only, and passes everything untouched until the move starts.
+          const top = ctx.sampleRate / 2;
+          const lp = ctx.createBiquadFilter();
+          lp.type = "lowpass";
+          lp.frequency.value = top;
+          lp.Q.value = 0.7;
+          a.fader.disconnect(a.trim);
+          a.fader.connect(lp).connect(a.trim);
+          lp.frequency.setValueAtTime(top, t0);
+          lp.frequency.exponentialRampToValueAtTime(9000, t0 + D * 0.08);
+          lp.frequency.exponentialRampToValueAtTime(180, end);
+          lp.Q.setValueAtTime(0.7, t0);
+          lp.Q.linearRampToValueAtTime(1.3, end);
+          g.setValueAtTime(1, end - OUT);
+          g.linearRampToValueAtTime(0, end);
+          setTimeout(() => lp.disconnect(), Math.max(0, end - ctx.currentTime + 1) * 1000);
+        } else {
+          // Filtered up and away: the bass goes first, then the body, until only the top is left. The
+          // level comes down a little with it, since a filter moving through a bassline makes its peaks taller.
+          a.hp.frequency.setValueAtTime(HP_IDLE, t0);
+          a.hp.frequency.exponentialRampToValueAtTime(70, t0 + Math.min(0.15, D * 0.06));
+          a.hp.frequency.exponentialRampToValueAtTime(3600, end);
+          a.hp.Q.setValueAtTime(0.7, t0);
+          a.hp.Q.linearRampToValueAtTime(1.5, end);
+          g.linearRampToValueAtTime(0.75, t0 + D * 0.3);
+          g.setValueAtTime(0.75, end - OUT);
+          g.linearRampToValueAtTime(0, end);
+        }
+        stopSources(a, end);
         const bStart = t0 + plan.bAt;
         b.fader.gain.setValueAtTime(1, bStart);
         play(b, bStart, plan.bStart);
-        return { swap: bStart, end, bStart };
+        return { swap: bStart, end, bStart, move };
       }
       fadeOutAt(a, t0, 0.04);
       const bStart = t0 + plan.bAt;

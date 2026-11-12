@@ -2,7 +2,7 @@
 // something else, has every track loaded and analysed before it's needed, plans and schedules each
 // transition and talk break, and follows what you do with TIDAL's own controls.
 import { Mixer, type Clip, type Deck, type Loaded } from "./audio/mixer";
-import { planNow, planTransition, type Mixing, type Plan } from "./audio/plan";
+import { planNow, planTransition, type Mixing, type Move, type Plan } from "./audio/plan";
 import {
   anchorFromSegment,
   anchorFromTrack,
@@ -49,15 +49,17 @@ export type CoverTransition = {
   seq: number;
   fromId: string;
   toId: string;
-  kind: "blend" | "echo" | "fade" | "cut";
+  kind: "blend" | "drop" | "fade" | "cut";
   start: number;
-  /** The big moment: the bass changes hands (blend) or the new track lands (echo, cut) */
+  /** The big moment: the bass changes hands (blend) or the new track lands (drop, cut) */
   swap: number;
   end: number;
   /** Seconds per beat, when the transition is on a beat */
   beat?: number;
 };
 let transitionSeq = 0;
+/** How the outgoing track left at the last drop, so the next one leaves another way */
+let lastMove: Move | undefined;
 let status: Status = { phase: "off", talking: false };
 const listeners = new Set<(s: Status) => void>();
 export const getStatus = () => status;
@@ -615,7 +617,7 @@ class Session {
     const keys = { keyA: keyOf(cur.item.track), keyB: keyOf(next.track) };
     const immediate = this.immediate;
     // (Right away still means on the beat: a few seconds ahead, so the tempo shift can be worked out first)
-    const make = (mixing: Mixing, at: number) => (immediate ? planNow(a, b, { mixing, from: at + 2.5, ...keys }) : planTransition(a, b, { mixing, earliest: at + 1, ...keys }));
+    const make = (mixing: Mixing, at: number) => (immediate ? planNow(a, b, { mixing, from: at + 2.5, avoid: lastMove, ...keys }) : planTransition(a, b, { mixing, earliest: at + 1, avoid: lastMove, ...keys }));
     const plan = make(settings.mixing, pos);
     prep.plan = plan;
     log(`Transition ${cur.item.track.title} → ${next.track.title}: ${plan.kind} at ${plan.aStart.toFixed(1)}s (${plan.note})${prep.voice ? ", with the DJ over it" : ""}`);
@@ -661,6 +663,7 @@ class Session {
     try {
       const sched = await this.mixer.transition(cur.deck, deck, plan, t0, stretchKey);
       this.pending = { item: next, deck, swap: sched.swap };
+      if (plan.kind === "drop") lastMove = sched.move ?? plan.move;
       this.announce(cur, next, plan, t0, sched);
       if (plan.kind === "blend") log(`Blend scheduled: drums lined up by moving the incoming track ${sched.nudgeMs ?? 0} ms${sched.beatShift ? `, and ${sched.beatShift} beat(s) later so the patterns match` : ""}; bass hands over on beat ${sched.bassBeat ?? "?"}`);
     } catch (err) {
@@ -674,10 +677,12 @@ class Session {
     const key = prep.stretchKey;
     if (key) setTimeout(() => this.mixer.dropStretch(key), 60_000);
     if (prep.voice) {
-      // Over a blend the DJ comes in just after the new track does; around a quick handover, a little before it
+      // Over a blend the DJ comes in just after the new track does; around a quick handover, a little
+      // before the new track lands
       const blend = plan.kind === "blend" && plan.duration > 6;
-      const at = blend ? t0 + Math.min(1.2, plan.duration * 0.1) : Math.max(now + 0.1, t0 - 2.5);
-      await this.voiceOver(next, at, blend ? t0 + plan.duration * 0.5 : t0 + 3);
+      const land = t0 + plan.bAt;
+      const at = blend ? t0 + Math.min(1.2, plan.duration * 0.1) : Math.max(now + 0.1, land - 3);
+      await this.voiceOver(next, at, blend ? t0 + plan.duration * 0.5 : land + 2.5);
     }
   }
 
@@ -690,9 +695,10 @@ class Session {
     if (plan.kind === "blend") {
       // The bass handover is the moment, unless the incoming track never brings a bass in during the blend
       if (beat && sched.bassBeat !== undefined && sched.bassBeat < (plan.beats ?? 0) - 1) swap = t0 + sched.bassBeat * beat;
-    } else if (plan.kind === "echo") {
+    } else if (plan.kind === "drop") {
+      // The cover builds up while the outgoing track leaves (at least three beats of it), and lands with the new one
       swap = sched.bStart;
-      start = t0 - (beat ? 2 * beat : 1);
+      start = Math.min(t0, swap - (beat ? 3 * beat : 1.5));
       end = swap + 1.6;
     } else if (plan.kind === "cut") {
       swap = sched.bStart;

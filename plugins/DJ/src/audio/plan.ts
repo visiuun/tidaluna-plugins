@@ -2,7 +2,9 @@
 // where to bring the incoming one in, and which kind of transition the two tracks allow.
 import type { Analysis, Grid } from "./analysis";
 
-export type PlanKind = "blend" | "echo" | "fade" | "cut";
+export type PlanKind = "blend" | "drop" | "fade" | "cut";
+/** How the outgoing track leaves before a drop: filtered up and away, closed down to a rumble, or braked like a record */
+export type Move = "sweep" | "dive" | "brake";
 export type Plan = {
   kind: PlanKind;
   /** Position in the outgoing track (s) where the transition starts */
@@ -11,7 +13,7 @@ export type Plan = {
   duration: number;
   /** Position in the incoming track that starts playing */
   bStart: number;
-  /** Seconds after the start when the incoming track starts (0 for blends and fades) */
+  /** Seconds after the start when the incoming track starts (0 for blends and fades; the bar line for drops) */
   bAt: number;
   /** Seconds after the start when the incoming track counts as "now playing" */
   swapAt: number;
@@ -25,13 +27,15 @@ export type Plan = {
   style?: "swap" | "filter";
   fadeIn?: number; // seconds over which the incoming track comes up
   fadeOutFrom?: number; // seconds after the start when the outgoing track starts to leave
+  // Drops
+  move?: Move;
   note: string;
 };
 
 export type Mixing = "auto" | "crossfade" | "none";
 export type Key = { tonic: number; mode: "major" | "minor" } | undefined;
 
-const MATCH_LIMIT = 0.06;
+const MATCH_LIMIT = 0.08;
 const usable = (g: Grid | null | undefined): g is Grid => !!g && g.resid < 0.03 && g.inlierShare > 0.5 && g.contrast > 1.25 && g.count >= 12;
 const snap = (g: Grid, t: number) => g.phase + Math.round((t - g.phase) / g.period) * g.period;
 
@@ -94,6 +98,8 @@ type Options = {
   earliest: number;
   keyA?: Key;
   keyB?: Key;
+  /** The move the last drop used: not the same one twice in a row */
+  avoid?: Move;
 };
 
 const fade = (a: Analysis, b: Analysis, earliest: number, seconds: number, note: string): Plan => {
@@ -111,6 +117,32 @@ const fade = (a: Analysis, b: Analysis, earliest: number, seconds: number, note:
 const cut = (a: Analysis, b: Analysis, earliest: number, note: string): Plan => {
   const aStart = Math.max(earliest, a.lastSound - 0.06);
   return { kind: "cut", aStart, duration: 0.06, bStart: b.firstSound, bAt: 0.03, swapAt: 0.03, note };
+};
+
+/**
+ * Tempos too far apart to blend: the two tracks never play together. The outgoing one leaves over the beats
+ * before a bar line, and the incoming one lands on that line with its own first beat. How it leaves follows
+ * where the tempo is going (up: filtered thinner and thinner, so the new track arrives as a release; down:
+ * braked like a record, or closed down to a rumble), and is never the same twice in a row.
+ *   aCut: the bar line; room: seconds available before it; longest: the most beats a move may take
+ */
+const drop = (aCut: number, room: number, longest: number, pA: number, pB: number, bStart: number, avoid: Move | undefined, where: string): Plan | undefined => {
+  // Filter moves take two bars (one when two would run past five seconds, or there's no room)
+  let filterBeats = 0;
+  for (const n of [8, 4]) {
+    if (!filterBeats && n <= longest && n * pA <= 5 && n * pA <= room) filterBeats = n;
+  }
+  // A brake takes about as long as a record does to stop
+  const brakeBeats = pA < 0.6 ? 2 : 1;
+  const length: Record<Move, number> = { sweep: filterBeats, dive: filterBeats, brake: brakeBeats * pA <= room ? brakeBeats : 0 };
+  const order: Move[] = pB < pA ? ["sweep", "brake", "dive"] : ["brake", "dive", "sweep"];
+  const possible = order.filter((m) => length[m] > 0);
+  const move = possible.find((m) => m !== avoid) ?? possible[0];
+  if (!move) return undefined;
+  const beats = length[move];
+  const L = beats * pA;
+  const how = move === "sweep" ? `filtered away over ${beats} beats` : move === "dive" ? `closed down over ${beats} beats` : `record brake over ${beats} beat${beats > 1 ? "s" : ""}`;
+  return { kind: "drop", move, aStart: aCut - L, duration: L, bStart, bAt: L, swapAt: L, beats, period: pA, note: `${how}, new track lands on ${where}, ${(60 / pA).toFixed(1)} → ${(60 / pB).toFixed(1)} BPM` };
 };
 
 const barAtOrAfter = (a: Analysis, g: Grid, t: number) => {
@@ -131,13 +163,15 @@ type NowOptions = {
   from: number;
   keyA?: Key;
   keyB?: Key;
+  /** The move the last drop used: not the same one twice in a row */
+  avoid?: Move;
 };
 
 /**
  * A move to the next track right away (the DJ button, a request) instead of at the outgoing track's own
  * mix-out point. It is still a DJ's move: the incoming track comes in on the next phrase or bar line,
  * locked to the beat, over eight bars (four if the keys clash) with the outgoing one filtered thin, since
- * it is in full swing. Tempos too far apart to match get an echo out on the next bar line.
+ * it is in full swing. Tempos too far apart to match get a drop on the next bar line (see drop).
  */
 export const planNow = (a: Analysis, b: Analysis, opts: NowOptions): Plan => {
   const { from } = opts;
@@ -205,12 +239,17 @@ export const planNow = (a: Analysis, b: Analysis, opts: NowOptions): Plan => {
     }
   }
 
-  // Tempos too far apart (or no room left): echo out on the next bar line, and drop the new track on its one
+  // Tempos too far apart (or no room left): the outgoing track leaves over the next beats, and the new one
+  // lands on the bar line after them. Kept short, since this was asked for right now.
   const aCut = barAtOrAfter(a, gA, from + pA);
   if (aCut > a.lastSound - 0.1) return fadeNow(3, "too close to the end");
   let bStart = bIn;
   if (introBeats > 16) bStart = bIn + Math.floor((introBeats - 16) / 4) * 4 * pB;
-  return { kind: "echo", aStart: aCut - pA, duration: pA, bStart, bAt: pA, swapAt: pA, period: pA, note: `echo out on the next bar, ${(60 / pA).toFixed(1)} → ${(60 / gB.period).toFixed(1)} BPM` };
+  let plan = drop(aCut, aCut - from, 4, pA, gB.period, bStart, opts.avoid, "the next bar");
+  // (A bar further on, if that's what it takes not to leave the same way as last time)
+  const later = aCut + 4 * pA;
+  if (plan && plan.move === opts.avoid && later <= a.lastSound - 0.1) plan = drop(later, later - from, 4, pA, gB.period, bStart, opts.avoid, "the next bar") ?? plan;
+  return plan ?? fadeNow(3, "no room for a move");
 };
 
 export const planTransition = (a: Analysis, b: Analysis, opts: Options): Plan => {
@@ -236,7 +275,7 @@ export const planTransition = (a: Analysis, b: Analysis, opts: Options): Plan =>
     }
   }
   const pB = gB.period * mult; // incoming seconds per outgoing beat, at its own tempo
-  // Up to 6% apart the incoming track can be brought to the same tempo and still sound like itself
+  // Up to 8% apart the incoming track can be brought to the same tempo and still sound like itself
   const matchable = Math.abs(speed - 1) <= MATCH_LIMIT;
 
   const bIn = mixInPoint(b, gB);
@@ -346,7 +385,7 @@ export const planTransition = (a: Analysis, b: Analysis, opts: Options): Plan =>
     }
   }
 
-  // Tempos too far apart to match: leave on a bar line with an echo, and drop the next track on its one
+  // Tempos too far apart to match: the outgoing track leaves ahead of a bar line, and the next one lands on it
   let aCut: number;
   if (outroBeats >= 8) aCut = outro + 8 * pA;
   else if (outroBeats >= 4) aCut = outro + 4 * pA;
@@ -356,14 +395,5 @@ export const planTransition = (a: Analysis, b: Analysis, opts: Options): Plan =>
   let bStart = bIn;
   // Don't follow a hard cut with a long sparse intro
   if (introBeats > 16) bStart = bIn + Math.floor((introBeats - 16) / 4) * 4 * pB;
-  return {
-    kind: "echo",
-    aStart: aCut - pA,
-    duration: pA,
-    bStart,
-    bAt: pA,
-    swapAt: pA,
-    period: pA,
-    note: `echo out on the bar, ${(60 / pA).toFixed(1)} → ${(60 / gB.period).toFixed(1)} BPM`,
-  };
+  return drop(aCut, aCut - earliest - 0.3, 8, pA, gB.period, bStart, opts.avoid, "the bar") ?? fade(a, b, earliest, 5, "past the mix-out point");
 };

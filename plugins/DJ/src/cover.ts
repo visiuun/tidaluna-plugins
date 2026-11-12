@@ -177,7 +177,7 @@ void main() {
     col *= 1.0 + ripple * 0.18;
     glow = (exp(-abs(dist) * 45.0) * 1.4 + exp(-abs(dist) * 8.0) * 0.25) * live;
   } else {
-    // Echo: the old cover repeats outwards, fainter each time, like the sound; then the new one lands
+    // Echo (for drops and cuts): the old cover repeats outwards, fainter each time; then the new one lands
     float build = clamp(u_p * 2.0, 0.0, 1.0);
     float landed = step(0.5, u_p);
     float after = max(u_dropT, 0.0);
@@ -231,7 +231,7 @@ const frameAt = (tr, t) => {
   const dropT = t - tr.swap;
   const drop = dropT >= 0 ? Math.exp(-dropT * 2.2) : 0;
   let p;
-  if (tr.kind === "echo" || tr.kind === "cut") {
+  if (tr.kind === "drop" || tr.kind === "cut") {
     // Half the way is the build-up to the moment the new track lands, the other half its arrival
     const lead = Math.max(0.05, tr.swap - tr.start);
     p = t < tr.swap ? 0.5 * smooth((t - tr.start) / lead) * 0.98 : 0.5 + 0.5 * smooth((t - tr.swap) / Math.max(0.05, tr.end - tr.swap));
@@ -591,7 +591,7 @@ const hashOf = (s: string) => {
 };
 let lastStyle = -1;
 const styleFor = (tr: CoverTransition) => {
-  if (tr.kind === "echo" || tr.kind === "cut") return STYLES.indexOf("echo");
+  if (tr.kind === "drop" || tr.kind === "cut") return STYLES.indexOf("echo");
   if (tr.kind === "fade") return STYLES.indexOf("liquid");
   // Blends take turns through the looks, never the same one twice in a row
   const blends = [0, 1, 2, 3, 4];

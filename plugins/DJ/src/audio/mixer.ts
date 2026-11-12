@@ -4,7 +4,7 @@ import dspSource from "file://./dsp.js";
 import pageSource from "file://./mixer.page.js";
 import { cachedAnalysis, storeAnalysis, type Analysis } from "./analysis";
 import { mixerCall, mixerClose, mixerOpen, mixerTrackUrl } from "./mixer.native";
-import type { Plan } from "./plan";
+import type { Move, Plan } from "./plan";
 import { log } from "../log";
 import { normGain, trackStream } from "./source";
 
@@ -206,7 +206,7 @@ export class Mixer {
     return (await this.call<{ start: number }>("startAlone", { deck: deck.ref, track: deck.id, pos, when, fade })).start;
   }
   transition(a: Deck, b: Deck, plan: Plan, t0: number, stretchKey?: string) {
-    return this.call<{ swap: number; end: number; bStart: number; nudgeMs?: number; beatShift?: number; bassBeat?: number }>("transition", { a: a.ref, b: b.ref, track: b.id, plan, t0, stretchKey });
+    return this.call<{ swap: number; end: number; bStart: number; nudgeMs?: number; beatShift?: number; bassBeat?: number; move?: Move }>("transition", { a: a.ref, b: b.ref, track: b.id, plan, t0, stretchKey });
   }
   /** The DJ speaks, optionally over a deck that fades away and/or into a deck that starts under the line */
   async talk(clip: Clip, opts: { a?: Deck; t0?: number; b?: Deck; pos?: number; intro?: number }) {
