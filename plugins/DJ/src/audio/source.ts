@@ -57,7 +57,8 @@ export const trackStream = async (id: string, quality: "LOSSLESS" | "HIGH"): Pro
  * TIDAL itself does; with it on, tracks get their full ReplayGain, as TIDAL's player gives them.
  */
 export const normGain = (raw: Pick<TrackStream, "replayGain" | "peak">, tidalNormalizes = false) => {
-  const preamp = tidalNormalizes ? 0 : 8.5;
-  const g = Math.pow(10, (raw.replayGain + preamp) / 20);
-  return Math.max(0.15, Math.min(g, 0.98 / Math.max(0.1, raw.peak), 1));
+  // TIDAL's loudness normalisation off: every sample goes out as it is on the record
+  if (!tidalNormalizes) return 1;
+  const g = Math.pow(10, raw.replayGain / 20);
+  return Math.max(0.15, Math.min(g, 1 / Math.max(0.1, raw.peak), 1));
 };

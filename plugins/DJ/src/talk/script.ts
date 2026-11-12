@@ -10,7 +10,11 @@ export type Moment =
   | { type: "segment"; segment: Segment; prev?: Segment }
   | { type: "switch"; segment: Segment }
   | { type: "request"; segment: Segment }
+  // One song into the next, the way a radio presenter does it: what that was, and what this is
+  | { type: "track"; track: Track; prev?: Track; facts: TrackFacts }
   | { type: "signoff" };
+/** What is known about a song that's worth a word: when it came out, and what it is to you */
+export type TrackFacts = { year?: number; liked?: boolean; fresh?: boolean };
 export type Context = { name?: string; tone: Tone; less: boolean };
 
 // ------------------ SAYING NAMES ------------------
@@ -234,6 +238,67 @@ const bridge = (prev: Segment | undefined, ctx: Context) => {
   ]);
 };
 
+/** A song introduced on its own: a word about the one before, the name of this one, and now and then something about it */
+const between = (m: Extract<Moment, { type: "track" }>, ctx: Context) => {
+  const t = ctx.tone;
+  const a = artistOf(m.track);
+  const title = titleOf(m.track);
+  const short = !!title && title.length <= 34;
+  const pa = m.prev ? artistOf(m.prev) : "";
+  const pt = m.prev ? titleOf(m.prev) : "";
+  const prevShort = !!pt && pt.length <= 30;
+  const same = !!a && a === pa;
+  // What that was (not every time: a presenter doesn't either)
+  const back =
+    m.prev && pa && Math.random() < 0.7
+      ? one([
+          `That was ${pa}.`,
+          prevShort && `That was ${pt}, by ${pa}.`,
+          prevShort && `${pa}, with ${pt}.`,
+          prevShort && `You just heard ${pt}, by ${pa}.`,
+          t === "hype" && `${pa}! Love that one.`,
+          t === "dry" && `${pa}. Fine choice, if I say so myself.`,
+        ])
+      : "";
+  // What this is
+  let next = "";
+  if (same && short) next = one([`Staying with ${a}: here's ${title}.`, `More from ${a} now. This is ${title}.`, `Another one from ${a}, ${title}.`]);
+  else if (a) {
+    next = one([
+      short && `Up next, ${a}, with ${title}.`,
+      short && `Here's ${title}, by ${a}.`,
+      short && `Now, ${a}. This is ${title}.`,
+      short && `Coming up, ${title}, by ${a}.`,
+      short && `This is ${a}, and ${title}.`,
+      `Next up, ${a}.`,
+      `Here's ${a}.`,
+      t === "hype" && short && `Turn it up: ${a}, ${title}!`,
+      t === "dry" && short && `Next, ${a}. It's called ${title}.`,
+      t === "chill" && short && `Easing into ${title}, by ${a}.`,
+    ]);
+  } else if (short) next = one([`Up next, ${title}.`, `Here's ${title}.`, `This one is called ${title}.`]);
+  else next = one(["Here's the next one.", "On to the next.", "Let's keep it moving."]);
+  // Something about it, every other time or so, and only what is actually known
+  const f = m.facts;
+  const age = f.year ? new Date().getFullYear() - f.year : 0;
+  const colour =
+    Math.random() < 0.55
+      ? one([
+          f.fresh && "You haven't heard this one yet.",
+          f.fresh && "This one's new to you.",
+          f.fresh && t === "dry" && "New to you. Trust me.",
+          f.liked && "One of your favourites.",
+          f.liked && "You've had this one saved for a while.",
+          f.liked && t === "hype" && "You love this one!",
+          !!f.year && age >= 3 && `That's from ${f.year}.`,
+          !!f.year && age >= 8 && `Taking it back to ${f.year}.`,
+          !!f.year && age >= 15 && `A classic, from ${f.year}.`,
+          !!f.year && age <= 1 && "Fresh out, this one.",
+        ])
+      : "";
+  return join(back, next, colour);
+};
+
 // Short lines that never mention a track, generated once per voice and kept, so they're there instantly
 export const GENERIC = {
   switch: ["Alright, switching it up.", "Okay, let's try something different.", "Sure, let's change it up.", "Changing gears."],
@@ -255,6 +320,8 @@ export const lineFor = (m: Moment, ctx: Context): string => {
       return join(one(GENERIC.switch), about(m.segment, ctx, false), Math.random() < 0.6 && firstUp(m.segment, ctx));
     case "request":
       return join(about(m.segment, ctx, false), firstUp(m.segment, ctx));
+    case "track":
+      return between(m, ctx);
     case "signoff":
       return one(GENERIC.signoff);
   }

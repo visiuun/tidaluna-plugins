@@ -1,6 +1,7 @@
 import { ReactiveStore } from "@luna/core";
 
-export type Commentary = "full" | "less" | "off";
+/** every: introduces every song, like a radio presenter; full: every set; less: a hello and a goodbye; off: nothing */
+export type Commentary = "every" | "full" | "less" | "off";
 export type Mixing = "auto" | "crossfade" | "none";
 
 export type PluginSettings = {

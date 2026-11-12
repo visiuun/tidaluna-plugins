@@ -3,6 +3,7 @@
 // and decrypted here, on its way to the mixer; nothing is written to disk.
 import { createDecipheriv } from "crypto";
 import os from "os";
+import { blobRoute } from "./stems.native";
 
 // Through a variable so the build leaves it alone, and inside a try: TidaLunar may not hand out electron
 const runtimeRequire = (id: string) => require(id);
@@ -87,6 +88,9 @@ const getSession = () => {
     const url = new URL(req.url);
     if (url.hostname !== HOST) return new Response(null, { status: 403 });
     if (url.pathname === "/") return new Response("<!doctype html><meta charset=utf-8><title>DJ mixer</title>", { headers: { "content-type": "text/html" } });
+    // (A stretch of sound on its way to the vocal separator, or the voice on its way back)
+    const blob = await blobRoute(req, url);
+    if (blob) return blob;
     const token = url.pathname.match(/^\/track\/([\w-]+)$/)?.[1];
     const src = token && sources.get(token);
     if (!src) return new Response(null, { status: 404 });
@@ -103,7 +107,7 @@ const getSession = () => {
 };
 
 // ------------------ THE PAGE ------------------
-type Host = { id: number; view: any; ready: Promise<void>; died: Promise<never>; gone?: string };
+type Host = { id: number; view: any; ready: Promise<void>; died: Promise<never>; gone?: string; awake?: ReturnType<typeof setInterval> };
 let host: Host | undefined;
 let hostSeq = 0;
 
@@ -150,10 +154,24 @@ const detach = (view: any) => {
   } catch {}
 };
 
+// Being created with background throttling off isn't enough: the page still ends up treated as hidden
+// (it reports itself as such), and its process is then run at about a fifth of the speed. Measured: the
+// same loop took 500 ms in the mixer's page and 100 ms in TIDAL's, and a blend took so long to work out
+// that it was scheduled seconds after it should have started. Saying it again on the page itself brings
+// it straight back to full speed, so that is done once it has loaded and repeated while it lives.
+const keepAwake = (contents: any) => {
+  try {
+    if (contents.isDestroyed()) return;
+    contents.setBackgroundThrottling(false);
+    os.setPriority(contents.getOSProcessId(), os.constants.priority.PRIORITY_ABOVE_NORMAL);
+  } catch {}
+};
+
 const closeHost = () => {
   const current = host;
   host = undefined;
   sources.clear();
+  clearInterval(current?.awake);
   try {
     if (current) detach(current.view);
     if (current && !current.view.webContents.isDestroyed()) current.view.webContents.close();
@@ -184,6 +202,7 @@ const openHost = (pageSource: string): Host => {
   died.catch(() => {});
   const created: Host = { id: ++hostSeq, view, ready: null!, died };
   contents.on("render-process-gone", (_: unknown, details: { reason: string }) => {
+    clearInterval(created.awake);
     created.gone = details.reason;
     markDead(new Error(`The DJ's mixer stopped (${details.reason})`));
     if (host === created) closeHost();
@@ -192,9 +211,8 @@ const openHost = (pageSource: string): Host => {
     (async () => {
       await contents.loadURL(PAGE_URL);
       // A page nobody can see gets background priority from the system; this one is making the sound
-      try {
-        os.setPriority(contents.getOSProcessId(), os.constants.priority.PRIORITY_ABOVE_NORMAL);
-      } catch {}
+      keepAwake(contents);
+      created.awake = setInterval(() => (contents.isDestroyed() ? clearInterval(created.awake) : keepAwake(contents)), 10000);
       await contents.executeJavaScript(pageSource, true);
     })(),
     died,

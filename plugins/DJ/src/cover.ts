@@ -18,7 +18,7 @@ const COVER_ID = /resources\.tidal\.com\/images\/([0-9a-f/-]+?)\/\d+x\d+\./i;
 /** Room around the cover (a share of its size) for light and echoes that go past its edge */
 const PAD = 0.2;
 
-const STYLES = ["liquid", "slices", "swirl", "mosaic", "wave", "echo"] as const;
+const STYLES = ["liquid", "slices", "swirl", "mosaic", "wave", "echo", "duo"] as const;
 
 const VERT = `
 attribute vec2 a_pos;
@@ -176,7 +176,7 @@ void main() {
     col = mix(splitB(uz - push, ca + vec2(0.01 * lens, 0.0)), splitA(uz + push, ca + vec2(0.02 * lens, 0.0)), m);
     col *= 1.0 + ripple * 0.18;
     glow = (exp(-abs(dist) * 45.0) * 1.4 + exp(-abs(dist) * 8.0) * 0.25) * live;
-  } else {
+  } else if (u_style < 5.5) {
     // Echo (for drops and cuts): the old cover repeats outwards, fainter each time; then the new one lands
     float build = clamp(u_p * 2.0, 0.0, 1.0);
     float landed = step(0.5, u_p);
@@ -192,6 +192,25 @@ void main() {
     }
     vec3 a = splitA(uz, ca + c * 0.03 * build);
     col = mix(a, splitB(uz, ca), landed);
+  } else {
+    // Duo (for mashups): both covers at once, either side of a seam that slowly turns and ripples. Along
+    // the seam the two are woven through each other, and each leans away from it a little, like two
+    // sheets held together. How much of the picture each has follows the music: half and half while
+    // the two songs play together.
+    float ang = 0.62 + 0.34 * sin(u_time * 0.11 + u_seed);
+    vec2 n = vec2(cos(ang), sin(ang));
+    vec2 along = vec2(-n.y, n.x);
+    float wob = (fbm(uv * 2.2 + vec2(u_time * 0.06, u_seed)) - 0.47) * 0.17 + sin(dot(c, along) * 9.0 + u_time * 0.8) * 0.016;
+    float dist = dot(c, n) + wob - (u_p - 0.5) * 1.75; // above 0: the old cover's side
+    float m = smoothstep(-0.01, 0.01, dist);
+    float near = exp(-abs(dist) * 7.0) * live;
+    vec3 a = splitA(uz + n * 0.028 * near, ca + n * 0.011 * near);
+    vec3 b = splitB(uz - n * 0.028 * near, ca - n * 0.011 * near);
+    col = mix(b, a, m);
+    float band = exp(-abs(dist) * 24.0) * live;
+    float weave = smoothstep(0.42, 0.58, abs(fract(dot(c, along) * 22.0 + u_time * 0.22) - 0.5) * 2.0);
+    col = mix(col, mix(a, b, weave), band * 0.9);
+    glow = (exp(-abs(dist) * 60.0) * 1.3 + exp(-abs(dist) * 9.0) * 0.22) * live;
   }
 
   // Light on the line where the two covers meet, in the new cover's colour
@@ -217,12 +236,14 @@ const FRAG = ${JSON.stringify(FRAG)};
 const NAMES = ["u_a", "u_b", "u_p", "u_time", "u_drop", "u_dropT", "u_style", "u_seed", "u_alpha", "u_pad", "u_px", "u_radius", "u_cb"];
 const views = new Map();
 let run = null;
-let clock = { mixer: 0, wall: 0, running: false };
+let clock = { offset: 0, frozen: 0, at: 0, running: false };
 let looping = false;
 let lastDraw = 0;
-const wallNow = () => performance.timeOrigin + performance.now();
-// The mixer's clock, carried forward from the last reading the page sent (it stands still while paused)
-const mixerNow = () => clock.mixer + (clock.running ? Math.min(1.5, Math.max(0, (wallNow() - clock.wall) / 1000)) : 0);
+// The mixer's clock, carried forward on this worker's own clock from the readings the page sends (it
+// stands still while paused). Each reading is timed on arrival here: the page's clock and this one can't
+// be compared (they were seen 1.9 s apart, after which the picture only moved when a reading came in,
+// four times a second).
+const mixerNow = () => (clock.running ? clock.offset + Math.min(performance.now(), clock.at + 1500) / 1000 : clock.frozen);
 const smooth = (x) => { const t = Math.max(0, Math.min(1, x)); return t * t * (3 - 2 * t); };
 // Where the picture is at mixer time t: how far along, and the moment of the song change
 const frameAt = (tr, t) => {
@@ -231,7 +252,14 @@ const frameAt = (tr, t) => {
   const dropT = t - tr.swap;
   const drop = dropT >= 0 ? Math.exp(-dropT * 2.2) : 0;
   let p;
-  if (tr.kind === "drop" || tr.kind === "cut") {
+  if (tr.kind === "mashup") {
+    // In with the other song's voice, to half and half by the time it sings; there for as long as the
+    // two play together (swaying a little); over to the new cover as the bands change over
+    const mid = tr.mid > tr.swap ? tr.mid : tr.swap + (tr.end - tr.swap) * 0.7;
+    if (t < tr.swap) p = 0.5 * smooth((t - tr.start) / Math.max(0.05, tr.swap - tr.start));
+    else if (t < mid) p = 0.5 + 0.035 * Math.sin((t - tr.swap) * 0.45) * Math.min(1, (t - tr.swap) / 2) * Math.min(1, (mid - t) / 2);
+    else p = 0.5 + 0.5 * smooth((t - mid) / Math.max(0.05, tr.end - mid));
+  } else if (tr.kind === "drop" || tr.kind === "cut") {
     // Half the way is the build-up to the moment the new track lands, the other half its arrival
     const lead = Math.max(0.05, tr.swap - tr.start);
     p = t < tr.swap ? 0.5 * smooth((t - tr.start) / lead) * 0.98 : 0.5 + 0.5 * smooth((t - tr.swap) / Math.max(0.05, tr.end - tr.swap));
@@ -369,7 +397,12 @@ onmessage = (e) => {
     run = { id: m.id, tr: m.tr, style: m.style, seed: m.seed, cb: m.cb, a: m.a, b: m.b, shownAt: performance.now(), leaving: undefined };
     if (!looping) { looping = true; requestAnimationFrame(frame); }
   } else if (m.type === "clock") {
-    clock = { mixer: m.mixer, wall: m.wall, running: m.running };
+    const at = performance.now();
+    const offset = m.mixer - at / 1000;
+    // Readings a few milliseconds apart are eased together, so the picture doesn't twitch with each one;
+    // a real jump (a seek, coming back from a pause) is followed at once
+    const eased = clock.running && m.running && Math.abs(offset - clock.offset) < 0.08 ? clock.offset + (offset - clock.offset) * 0.25 : offset;
+    clock = { offset: eased, frozen: m.mixer, at: at, running: m.running };
   } else if (m.type === "leave") {
     if (run && run.id === m.id && run.leaving === undefined) run.leaving = performance.now() - (m.quick ? 150 : 0);
   } else if (m.type === "stop") {
@@ -548,11 +581,11 @@ const removeTargets = () => {
 let lastClock: { mixer: number; wall: number } | undefined;
 const sendClock = () => {
   const mixer = mixerClock();
-  const wall = performance.timeOrigin + performance.now();
+  const wall = performance.now();
   // (The mixer's clock stands still while paused)
   const running = !lastClock || mixer - lastClock.mixer > ((wall - lastClock.wall) / 1000) * 0.4;
   lastClock = { mixer, wall };
-  worker?.postMessage({ type: "clock", mixer, wall, running });
+  worker?.postMessage({ type: "clock", mixer, running });
 };
 
 const finish = () => {
@@ -591,6 +624,7 @@ const hashOf = (s: string) => {
 };
 let lastStyle = -1;
 const styleFor = (tr: CoverTransition) => {
+  if (tr.kind === "mashup") return STYLES.indexOf("duo");
   if (tr.kind === "drop" || tr.kind === "cut") return STYLES.indexOf("echo");
   if (tr.kind === "fade") return STYLES.indexOf("liquid");
   // Blends take turns through the looks, never the same one twice in a row

@@ -116,6 +116,7 @@ export const Settings = () => {
       </LunaSelectSetting>
 
       <LunaSelectSetting title="Commentary" desc="How much the DJ talks" value={state.commentary} onChange={(e: any) => set("commentary", e.target.value as Commentary)}>
+        <LunaSelectItem value="every">Introduces every song, like a radio presenter</LunaSelectItem>
         <LunaSelectItem value="full">Introduces every set and says why it picked it</LunaSelectItem>
         <LunaSelectItem value="less">Less chatter: only a hello and a goodbye</LunaSelectItem>
         <LunaSelectItem value="off">No talking, just the mix</LunaSelectItem>

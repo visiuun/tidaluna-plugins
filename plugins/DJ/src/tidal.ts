@@ -99,6 +99,7 @@ export class TidalLink {
     if (!player) throw new Error("Couldn't find TIDAL's player");
     silence(player);
     this.active = true;
+    this.posTimer = setInterval(() => this.notePosition(), 20);
     window.__visiuunDjRelease = () => this.release();
     const { redux } = lib();
     const pq = state().playQueue;
@@ -126,6 +127,8 @@ export class TidalLink {
   release() {
     if (!this.active) return;
     this.active = false;
+    clearInterval(this.posTimer);
+    this.posTimer = undefined;
     for (const u of this.unloads) {
       try {
         u();
@@ -214,8 +217,24 @@ export class TidalLink {
     const pc = state().playbackControls;
     return { percent: Number(pc.volume) || 0, muted: !!pc.muted };
   }
+  // TIDAL only moves its position on four times a second, so a reading of it is up to a quarter of a
+  // second old. Lyrics have to be closer to the sound than that: the moment each new value appears is
+  // noted, and the position is carried forward from there.
+  private posValue = -1;
+  private posAt = 0;
+  private posTimer?: ReturnType<typeof setInterval>;
+  private notePosition() {
+    const v = lib().PlayState.currentTime;
+    if (v !== this.posValue) {
+      this.posValue = v;
+      this.posAt = performance.now();
+    }
+    return v;
+  }
   position() {
-    return lib().PlayState.currentTime;
+    const v = this.notePosition();
+    if (!this.posTimer || !this.playing) return v;
+    return v + Math.min(0.4, (performance.now() - this.posAt) / 1000);
   }
   get playing() {
     return state().playbackControls.desiredPlaybackState === "PLAYING";

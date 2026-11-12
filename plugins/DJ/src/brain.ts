@@ -118,6 +118,16 @@ export const ensureTracks = async (ids: string[]) => {
 /** Details of a track the DJ has read (see ensureTracks) */
 export const trackInfo = (id: string): Track | undefined => tracks[id];
 
+/** What's worth a word when a song is introduced: the year it came out, whether it's one you like, whether it's new to you */
+export const trackFacts = (t: Track) => {
+  const year = Number(t.album?.releaseDate?.slice(0, 4));
+  return {
+    year: year > 1900 ? year : undefined,
+    liked: !!profile && (profile.seeds.get(t.id) ?? 0) >= 0.5,
+    fresh: !!profile && !profile.known.has(t.id),
+  };
+};
+
 const parse = <T>(json: string | null, fallback: T): T => {
   try {
     return json ? (JSON.parse(json) ?? fallback) : fallback;
@@ -846,6 +856,95 @@ export const continueSegment = async (anchor: Anchor, history: Segment[]): Promi
   const seg: Segment = { kind: "more", key: `more:${anchor.label}`, title: named.title, tracks: ordered, facts: { genre: named.sound }, anchor };
   log(`Next set: ${seg.title} [${seg.tracks.map((t) => `${t.artists[0]?.name} - ${t.title}${t.bpm ? ` (${Math.round(t.bpm)})` : ""}`).join(" | ")}]`);
   return seg;
+};
+
+// ------------------ MASHUPS ------------------
+type MusicKey = { tonic: number; mode: "major" | "minor" };
+const camelotOf = (k: MusicKey) => {
+  const n = k.mode === "major" ? ((k.tonic * 7) % 12) + 8 : (((k.tonic + 3) * 7) % 12) + 8;
+  return { n: ((n - 1) % 12) + 1, major: k.mode === "major" };
+};
+const baseTitle = (t: Track) =>
+  api.normName(
+    t.title
+      .replace(/\s*[([].*$/, "")
+      .replace(/\s+-\s+.*$/, ""),
+  );
+
+/**
+ * Songs that could be played on top of `a`: the same vibe (what TIDAL's listeners play next to it, and your
+ * own music that sits close to it), at its tempo, in its key or the relative one. Best first. This goes by
+ * what TIDAL says about each track; whether two really fit is then measured on the audio.
+ *   bpm: a's tempo as measured; keys: a's key as TIDAL has it and as measured (either will do)
+ */
+export const mashupCandidates = async (a: Track, bpm: number, keys: MusicKey[]): Promise<Track[]> => {
+  await initBrain();
+  const p = profile!;
+  const pool = new Map<string, number>();
+  const add = (id: string, w: number) => id !== a.id && pool.set(id, Math.max(pool.get(id) ?? 0, w));
+  const [similar, radio] = await Promise.all([api.similarTracks(a.id).catch(() => [] as string[]), api.trackMixItems(a.id).catch(() => [] as string[])]);
+  similar.forEach((id, i) => add(id, 1 / (1 + i / 20)));
+  radio.forEach((id, i) => add(id, 0.9 / (1 + i / 40)));
+  await ensureTracks([...pool.keys()]);
+  // (TIDAL's tempos are whole numbers: a track it has within one of this one can be within reach, 1.2%)
+  const tempoFits = (t: Track | undefined): t is Track => !!t?.bpm && Math.abs(t.bpm / bpm - 1) <= 0.0105;
+  // Your own music at this tempo, as far as its details are known
+  const va = vectorOf(a.id);
+  if (va) {
+    for (const id of p.seeds.keys()) {
+      if (!tempoFits(tracks[id])) continue;
+      const v = vectorOf(id);
+      const sim = v ? dot(v, va) : 0;
+      if (sim > 0.5) add(id, 0.3 + 0.5 * sim);
+    }
+  }
+  const mine = keys.map(camelotOf);
+  const title = baseTitle(a);
+  const scored: { t: Track; s: number }[] = [];
+  for (const [id, source] of pool) {
+    const t = tracks[id];
+    if (!tempoFits(t) || !eligible(t, true) || t.ai || recentlyPlayed(id, 30 * 60e3)) continue;
+    // (Another version of the same song is no mashup)
+    if (baseTitle(t) === title && t.artists.some((x) => a.artists.some((y) => y.id === x.id))) continue;
+    const kb = keyOf(t);
+    let key = 0.55;
+    if (kb && mine.length) {
+      const c = camelotOf(kb);
+      const same = mine.some((m) => m.n === c.n && m.major === c.major);
+      const relative = mine.some((m) => m.n === c.n);
+      if (!same && !relative) continue;
+      key = same ? 1 : 0.9;
+    }
+    const v = va && vectorOf(id);
+    const sim = v ? Math.max(0, dot(v, va!)) : 0.3;
+    const liked = p.seeds.has(id) ? 0.15 : 0;
+    const tempo = 0.25 * (1 - Math.abs(t.bpm! / bpm - 1) / 0.0105);
+    scored.push({ t, s: key * (0.5 * source + 0.6 * sim + liked + tempo) });
+  }
+  scored.sort((x, y) => y.s - x.s);
+  const out: Track[] = [];
+  const perArtist = new Map<string, number>();
+  for (const { t } of scored) {
+    const artist = leadArtist(t);
+    if ((perArtist.get(artist) ?? 0) >= 2) continue;
+    perArtist.set(artist, (perArtist.get(artist) ?? 0) + 1);
+    out.push(t);
+    if (out.length >= 12) break;
+  }
+  log(`Mashup candidates for ${a.title} (${bpm.toFixed(1)} BPM): ${out.length ? out.map((t) => `${t.artists[0]?.name} - ${t.title} (${t.bpm}${t.key ? `, ${t.key} ${t.keyScale?.toLowerCase() ?? ""}` : ""})`).join(" | ") : "none"} [from ${pool.size}]`);
+  return out;
+};
+
+/** A song named by the user: the best match TIDAL's search has for it */
+export const findTrack = async (query: string, not?: string): Promise<Track | undefined> => {
+  const res = await api.v1<{ items?: { id: number; streamReady?: boolean; allowStreaming?: boolean }[] }>("search/tracks", { query: query.trim(), limit: 8 });
+  const ids = (res?.items ?? [])
+    .filter((t) => t.streamReady !== false && t.allowStreaming !== false)
+    .map((t) => String(t.id))
+    .filter((id) => id !== not);
+  await ensureTracks(ids);
+  // (Long tracks are left out: decoded audio is held in memory)
+  return ids.map((id) => tracks[id]).find((t) => t?.available && t.duration >= 60 && t.duration <= 600);
 };
 
 // ------------------ REQUESTS ------------------

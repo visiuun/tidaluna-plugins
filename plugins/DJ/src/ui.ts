@@ -3,7 +3,7 @@
 import type { LunaUnload } from "@luna/core";
 import { suggestions } from "./brain";
 import { persona, settings, VOICES, type Commentary } from "./config";
-import { ask, getStatus, isActive, onStatus, setTransitionOnly, skip, startSession, stopSession, switchUp, voiceLevel, type Status } from "./session";
+import { ask, getStatus, isActive, mashup, mixerClock, onStatus, setTransitionOnly, skip, startSession, stopSession, switchUp, voiceLevel, type Status } from "./session";
 
 const ROOT = "visiuun-dj";
 const STYLE_ID = `${ROOT}-style`;
@@ -30,6 +30,37 @@ const css = `
   [data-dj="playing"] .${ROOT}-orb::after, [data-dj="talking"] .${ROOT}-orb::after, [data-dj="busy"] .${ROOT}-orb::after { opacity: .5; }
   [data-dj="talking"] .${ROOT}-orb::after { opacity: calc(.45 + var(--lvl) * .5); }
   .${ROOT}-btn:active .${ROOT}-orb { transform: scale(.9); }
+  /* While one track is being mixed into the next: a second ring comes out around the orb, turning with
+     it, faster. It starts as two separate arcs, one for each track, each with a tail; over the length of
+     the mix the gap between them closes, and when the new track is on its own they have become one ring,
+     which folds back into the orb. (Nothing here follows the beat: it turns and closes steadily.) */
+  @property --${ROOT}-turn { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+  @property --${ROOT}-gap { syntax: "<angle>"; inherits: false; initial-value: 115deg; }
+  @keyframes ${ROOT}-turn { from { --${ROOT}-turn: 0deg; } to { --${ROOT}-turn: 360deg; } }
+  @keyframes ${ROOT}-close { from { --${ROOT}-gap: 115deg; } to { --${ROOT}-gap: 0deg; } }
+  .${ROOT}-orb i { position: absolute; inset: -21%; border-radius: 50%; pointer-events: none; opacity: 0; transform: scale(.72); transition: opacity .5s ease, transform .5s cubic-bezier(.3, 1.4, .5, 1);
+    background: conic-gradient(from var(--${ROOT}-turn), #33ffee, #b45cff, #ff5ea8, #5b8cff, #33ffee);
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.4px), #000 calc(100% - 1.8px)), conic-gradient(from var(--${ROOT}-turn), transparent 0deg, #000 calc(180deg - var(--${ROOT}-gap)), transparent calc(180deg - var(--${ROOT}-gap)), transparent 180deg, #000 calc(360deg - var(--${ROOT}-gap)), transparent calc(360deg - var(--${ROOT}-gap)));
+    mask: radial-gradient(farthest-side, transparent calc(100% - 2.4px), #000 calc(100% - 1.8px)), conic-gradient(from var(--${ROOT}-turn), transparent 0deg, #000 calc(180deg - var(--${ROOT}-gap)), transparent calc(180deg - var(--${ROOT}-gap)), transparent 180deg, #000 calc(360deg - var(--${ROOT}-gap)), transparent calc(360deg - var(--${ROOT}-gap)));
+    -webkit-mask-composite: source-in; mask-composite: intersect; }
+  [data-mix] .${ROOT}-orb i { opacity: 1; transform: none; animation: ${ROOT}-turn 1.9s linear infinite, ${ROOT}-close var(--${ROOT}-mix, 20s) linear var(--${ROOT}-mixed, 0s) both; }
+  [data-mix] .${ROOT}-orb { animation: ${ROOT}-spin 2.6s linear infinite; }
+  [data-mix] .${ROOT}-orb::after { opacity: .85; }
+  /* A mashup shows both songs where the title is: the playing one and the one sung over it, with what
+     makes it a mashup between them */
+  .${ROOT}-duo { display: none; min-width: 0; max-width: 100%; line-height: 1.25; }
+  body.${ROOT}-mashing .${ROOT}-duo { display: block; }
+  body.${ROOT}-mashing [data-test="footer-track-title"] { display: none !important; }
+  .${ROOT}-duo .tag { font: 800 9px/1 system-ui, sans-serif; letter-spacing: 1.8px; margin-bottom: 3px; background: linear-gradient(90deg, #33ffee, #5b8cff, #b45cff, #ff5ea8, #33ffee); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent !important; animation: ${ROOT}-slide 6s linear infinite; }
+  .${ROOT}-duo .names { display: flex; align-items: baseline; gap: 6px; font-size: 14px; font-weight: 700; white-space: nowrap; }
+  .${ROOT}-duo .names span { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+  /* (themes that colour every span from the cover do it with !important: these must outrank them) */
+  .${ROOT}-duo .names .a { color: #7ffcf0 !important; }
+  .${ROOT}-duo .names .b { color: #ff9cc7 !important; }
+  .${ROOT}-duo .names i { flex: none; font-style: normal; font-weight: 800; background: linear-gradient(135deg, #33ffee, #b45cff, #ff5ea8); -webkit-background-clip: text; background-clip: text; color: transparent !important; display: inline-block; animation: ${ROOT}-cross 5s ease-in-out infinite; }
+  .${ROOT}-duo .by { font-size: 11px; opacity: .6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @keyframes ${ROOT}-slide { to { background-position: -200% 0; } }
+  @keyframes ${ROOT}-cross { 0%, 100% { transform: rotate(0deg) scale(1); } 50% { transform: rotate(180deg) scale(1.25); } }
   .${ROOT}-more { width: 16px; height: 28px; border: 0; padding: 0; margin-left: -3px; background: none; color: inherit; opacity: .55; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
   .${ROOT}-more:hover { opacity: 1; }
   /* TIDAL's own rules for buttons in the player bar size every icon to 16px and fill its paths, which
@@ -64,7 +95,7 @@ const css = `
   .${ROOT}-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 14px; }
   .${ROOT}-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
   .${ROOT}-row label { opacity: .6; font-size: 12px; width: 78px; flex: none; }
-  .${ROOT}-row select { flex: 1; height: 30px; border-radius: 8px; border: 1px solid rgba(255,255,255,.14); background: #1d1d24; color: #fff; font: inherit; font-size: 12px; padding: 0 8px; }
+  .${ROOT}-row select { flex: 1; min-width: 0; max-width: 100%; text-overflow: ellipsis; height: 30px; border-radius: 8px; border: 1px solid rgba(255,255,255,.14); background: #1d1d24; color: #fff; font: inherit; font-size: 12px; padding: 0 6px; }
   .${ROOT}-mode { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.08); }
   .${ROOT}-mode div { flex: 1; min-width: 0; }
   .${ROOT}-mode strong { display: block; font-size: 12.5px; font-weight: 600; }
@@ -98,7 +129,8 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, t
 };
 const orb = () => {
   const o = el("div", `${ROOT}-orb`);
-  o.appendChild(el("span", undefined, "DJ"));
+  // (The <i> is the second ring shown while a mix is under way)
+  o.append(el("span", undefined, "DJ"), el("i"));
   return o;
 };
 /** TIDAL's keyboard shortcuts (space, arrows…) must not fire while typing a request */
@@ -154,6 +186,17 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
   send.type = "button";
   askRow.append(input, send);
   const chips = el("div", `${ROOT}-chips`);
+  // Mashup: with a song you name, or (left empty) one the DJ finds
+  const mashRow = el("div", `${ROOT}-ask`);
+  const mashInput = el("input");
+  mashInput.type = "text";
+  mashInput.placeholder = "Mash up with… (empty: DJ picks)";
+  mashInput.maxLength = 120;
+  shield(mashInput);
+  const mashBtn = el("button", "pill", "Mashup");
+  mashBtn.type = "button";
+  mashBtn.title = "Plays another song together with this one: one you name, or one the DJ finds that fits";
+  mashRow.append(mashInput, mashBtn);
   const voiceRow = el("div", `${ROOT}-row`);
   const voiceSelect = el("select");
   for (const v of VOICES) {
@@ -165,6 +208,7 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
   const talkRow = el("div", `${ROOT}-row`);
   const talkSelect = el("select");
   for (const [value, label] of [
+    ["every", "Introduces every song, radio style"],
     ["full", "Introduces every set"],
     ["less", "Less chatter: hello and goodbye only"],
     ["off", "No talking, just the mix"],
@@ -188,7 +232,7 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
   for (const b of [primary, skipBtn, stopBtn]) b.type = "button";
   const spacer = el("div", "spacer");
   actions.append(primary, skipBtn, spacer, stopBtn);
-  panel.append(title, statusLine, said, askRow, chips, voiceRow, talkRow, modeRow, actions);
+  panel.append(title, statusLine, said, askRow, chips, mashRow, voiceRow, talkRow, modeRow, actions);
   document.body.appendChild(panel);
 
   let open = false;
@@ -234,7 +278,74 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
     }
   };
 
+  // ------------------ MASHUP: BOTH SONGS WHERE THE TITLE IS ------------------
+  const duo = el("div", `${ROOT}-duo`);
+  const duoNames = el("div", "names");
+  const duoA = el("span", "a");
+  const duoB = el("span", "b");
+  duoNames.append(duoA, el("i", undefined, "×"), duoB);
+  const duoBy = el("div", "by");
+  duo.append(el("div", "tag", "MASHUP"), duoNames, duoBy);
+  const showDuo = () => {
+    const songs = mixing?.songs;
+    document.body.classList.toggle(`${ROOT}-mashing`, !!songs);
+    if (!songs) return void duo.remove();
+    duoA.textContent = songs.a;
+    duoB.textContent = songs.b;
+    duoBy.textContent = [songs.artistA, songs.artistB].filter(Boolean).join(" × ");
+    // (TIDAL redraws the player bar now and then: it goes back in front of the title each time)
+    const title = document.querySelector<HTMLElement>('[data-test="footer-track-title"]');
+    if (title?.parentElement && duo.nextElementSibling !== title) title.parentElement.insertBefore(duo, title);
+  };
+
+  // ------------------ MIXING ------------------
+  // The orbs show a mix for as long as it lasts (the times are the mixer's, see session.ts)
+  let mixSeq = -1;
+  let mixTimers: ReturnType<typeof setTimeout>[] = [];
+  let mixing: { length: number; since: number; songs?: NonNullable<Status["transition"]>["songs"] } | undefined;
+  const showMix = (target: HTMLElement) => {
+    if (mixing) {
+      target.dataset.mix = "1";
+      target.style.setProperty(`--${ROOT}-mix`, `${mixing.length.toFixed(2)}s`);
+      // (Something drawn part-way through a mix picks the closing ring up where it is)
+      target.style.setProperty(`--${ROOT}-mixed`, `${(-(performance.now() - mixing.since) / 1000).toFixed(2)}s`);
+    } else delete target.dataset.mix;
+  };
+  const mixTargets = () => [wrap, panel, ...document.querySelectorAll<HTMLElement>(`.${ROOT}-card[data-instance="${instance}"]`)];
+  const setMix = (state: typeof mixing) => {
+    mixing = state;
+    for (const t of mixTargets()) showMix(t);
+    showDuo();
+  };
+  const followMix = (s: Status) => {
+    const tr = s.phase === "off" || s.phase === "stopping" ? undefined : s.transition;
+    if ((tr?.seq ?? -1) === mixSeq) return;
+    mixSeq = tr?.seq ?? -1;
+    for (const t of mixTimers) clearTimeout(t);
+    mixTimers = [];
+    setMix(undefined);
+    if (!tr) return;
+    const now = mixerClock();
+    if (now >= tr.end) return;
+    const length = Math.max(1, tr.end - tr.start);
+    // (Both ends are checked against the mixer's clock when their time comes: it stands still while
+    // paused, and one reading of it can be a little out)
+    const begin = () => {
+      const wait = tr.start - mixerClock();
+      if (wait > 0.05) mixTimers.push(setTimeout(begin, wait * 1000));
+      else setMix({ length, since: performance.now() + wait * 1000, songs: tr.kind === "mashup" ? tr.songs : undefined });
+    };
+    const finish = () => {
+      const left = tr.end - mixerClock();
+      if (left > 0.1) mixTimers.push(setTimeout(finish, left * 1000 + 60));
+      else setMix(undefined);
+    };
+    begin();
+    mixTimers.push(setTimeout(finish, Math.max(0, tr.end - now) * 1000 + 60));
+  };
+
   const render = (s: Status) => {
+    followMix(s);
     const follow = s.phase !== "off" && s.mode === "follow";
     const state = s.phase === "off" ? "off" : follow ? "follow" : s.phase === "starting" ? "starting" : s.talking ? "talking" : s.busy ? "busy" : "playing";
     for (const label of document.querySelectorAll<HTMLElement>(`.${ROOT}-orb span`)) label.textContent = follow ? "MIX" : "DJ";
@@ -270,6 +381,7 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
     const on = s.phase === "playing" && !follow;
     askRow.style.display = on ? "" : "none";
     chips.style.display = on ? "" : "none";
+    mashRow.style.display = s.phase === "starting" || s.phase === "stopping" ? "none" : "";
     primary.textContent = s.phase === "off" || follow ? "Start DJ" : "Switch it up";
     primary.disabled = s.phase === "starting" || s.phase === "stopping";
     skipBtn.style.display = on ? "" : "none";
@@ -309,6 +421,16 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
     stopSession("stopped from the panel");
     setOpen(false);
   });
+  const mash = () => {
+    const text = mashInput.value;
+    mashInput.value = "";
+    void mashup(text);
+  };
+  mashBtn.addEventListener("click", mash);
+  mashInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") mash();
+    if (e.key === "Escape") setOpen(false);
+  });
   send.addEventListener("click", () => submit(input.value));
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") submit(input.value);
@@ -343,6 +465,7 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
     const sub = card.querySelector<HTMLElement>(".text span")!;
     const play = card.querySelector<HTMLButtonElement>(".play")!;
     card.dataset.dj = wrap.dataset.dj;
+    showMix(card);
     if (s.phase === "off") {
       sub.textContent = "Your own DJ: music picked for you, mixed together, with a word about what's next";
       play.textContent = "Play";
@@ -378,6 +501,7 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
       const before = anchor.parentElement!.querySelector<HTMLElement>(".true-taste-feedback") ?? anchor;
       anchor.parentElement!.insertBefore(wrap, before.parentElement === anchor.parentElement ? before : anchor);
     }
+    if (mixing?.songs) showDuo();
     const feed = document.querySelector<HTMLElement>(HOME_FEED);
     const existing = document.querySelector<HTMLElement>(`.${ROOT}-card[data-instance="${instance}"]`);
     if (!settings.homeCard) existing?.remove();
@@ -410,9 +534,11 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
     observer.disconnect();
     offStatus();
     cancelAnimationFrame(raf);
+    for (const t of mixTimers) clearTimeout(t);
     document.removeEventListener("mousedown", outside, true);
     window.removeEventListener("resize", onResize);
-    document.body.classList.remove(`${ROOT}-locked`);
+    document.body.classList.remove(`${ROOT}-locked`, `${ROOT}-mashing`);
+    duo.remove();
     wrap.remove();
     panel.remove();
     caption.remove();

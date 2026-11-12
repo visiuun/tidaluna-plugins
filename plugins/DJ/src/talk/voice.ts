@@ -5,6 +5,7 @@
 import type { Clip } from "../audio/mixer";
 import { persona, settings, type Persona } from "../config";
 import { log, warn } from "../log";
+import { carry } from "./level";
 import { readVoice, writeVoice } from "../store.native";
 import { GENERIC, type GenericKind } from "./script";
 import { cloudSpeak, kokoroSpeak, voiceStatus } from "./voice.native";
@@ -32,7 +33,7 @@ const fromPcm = (base64: string, rate: number, key: string): Clip => {
   return polish(samples, rate, key);
 };
 
-/** Trims silence, evens out the level and softens the edges */
+/** Trims silence, makes the line carry over music at the level every line has (see level.ts) and softens the edges */
 const polish = (x: Float32Array, rate: number, key: string): Clip => {
   const thresh = 0.012;
   let a = 0;
@@ -42,27 +43,15 @@ const polish = (x: Float32Array, rate: number, key: string): Clip => {
   a = Math.max(0, a - Math.round(rate * 0.03));
   b = Math.min(x.length - 1, b + Math.round(rate * 0.08));
   const n = Math.max(1, b - a + 1);
-  // Level by the loud parts, not the pauses
-  let sum = 0;
-  let count = 0;
-  let peak = 1e-6;
-  for (let i = a; i <= b; i++) {
-    const v = Math.abs(x[i]);
-    if (v > peak) peak = v;
-    if (v > 0.03) {
-      sum += v * v;
-      count++;
-    }
-  }
-  const rms = Math.sqrt(sum / Math.max(1, count));
-  const gain = Math.min(0.95 / peak, rms > 0 ? 0.2 / rms : 1, 4);
+  const y = x.subarray(a, a + n);
+  carry(y, rate);
   const bytes = new Uint8Array(n * 2);
   const edge = Math.min(Math.round(rate * 0.01), n >> 1);
   for (let i = 0; i < n; i++) {
-    let g = gain;
-    if (i < edge) g *= i / edge;
-    else if (i >= n - edge) g *= (n - 1 - i) / edge;
-    const v = Math.max(-32768, Math.min(32767, Math.round(x[a + i] * g * 32767)));
+    let g = 1;
+    if (i < edge) g = i / edge;
+    else if (i >= n - edge) g = (n - 1 - i) / edge;
+    const v = Math.max(-32768, Math.min(32767, Math.round(y[i] * g * 32767)));
     bytes[2 * i] = v & 255;
     bytes[2 * i + 1] = (v >> 8) & 255;
   }

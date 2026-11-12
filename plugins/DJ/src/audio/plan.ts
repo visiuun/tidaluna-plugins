@@ -2,9 +2,10 @@
 // where to bring the incoming one in, and which kind of transition the two tracks allow.
 import type { Analysis, Grid } from "./analysis";
 
-export type PlanKind = "blend" | "drop" | "fade" | "cut";
-/** How the outgoing track leaves before a drop: filtered up and away, closed down to a rumble, or braked like a record */
-export type Move = "sweep" | "dive" | "brake";
+export type PlanKind = "blend" | "drop" | "fade" | "cut" | "mashup";
+/** How the outgoing track leaves before a drop: filtered up and away, or braked like a record */
+export type MashWay = "voice" | "carry" | "layer";
+export type Move = "sweep" | "brake";
 export type Plan = {
   kind: PlanKind;
   /** Position in the outgoing track (s) where the transition starts */
@@ -29,6 +30,22 @@ export type Plan = {
   fadeOutFrom?: number; // seconds after the start when the outgoing track starts to leave
   // Drops
   move?: Move;
+  // Mashups (see mixer.page.js). What one is depends on who sings (`way`):
+  //   voice: from `pre` seconds after the start the incoming track's voice sings over the outgoing track's
+  //          band for `bars1` bars; over the next `bars2` the incoming track's band takes over
+  //   carry: only the outgoing track sings. The bands change over first (`bars2`), and its voice carries
+  //          on over the incoming track's band for `bars1` bars
+  //   layer: nobody sings. The incoming track plays over the outgoing one's bass for `bars1` bars, then
+  //          the bass changes hands and the outgoing one leaves over `bars2`
+  way?: MashWay;
+  pre?: number;
+  bars1?: number;
+  bars2?: number;
+  /** The two tracks' separated parts, by the names the mixer keeps them under */
+  stemsA?: string;
+  stemsB?: string;
+  /** ...which come in pieces of `seg` samples: piece i of a track is from its sample base + i * seg, and pieces from..to are the ones the mashup plays */
+  stems?: { seg: number; a?: { base: number; from: number; to: number }; b?: { base: number; from: number; to: number } };
   note: string;
 };
 
@@ -123,25 +140,25 @@ const cut = (a: Analysis, b: Analysis, earliest: number, note: string): Plan => 
  * Tempos too far apart to blend: the two tracks never play together. The outgoing one leaves over the beats
  * before a bar line, and the incoming one lands on that line with its own first beat. How it leaves follows
  * where the tempo is going (up: filtered thinner and thinner, so the new track arrives as a release; down:
- * braked like a record, or closed down to a rumble), and is never the same twice in a row.
+ * braked like a record), and is never the same twice in a row.
  *   aCut: the bar line; room: seconds available before it; longest: the most beats a move may take
  */
 const drop = (aCut: number, room: number, longest: number, pA: number, pB: number, bStart: number, avoid: Move | undefined, where: string): Plan | undefined => {
-  // Filter moves take two bars (one when two would run past five seconds, or there's no room)
+  // The filter move takes two bars (one when two would run past five seconds, or there's no room)
   let filterBeats = 0;
   for (const n of [8, 4]) {
     if (!filterBeats && n <= longest && n * pA <= 5 && n * pA <= room) filterBeats = n;
   }
   // A brake takes about as long as a record does to stop
   const brakeBeats = pA < 0.6 ? 2 : 1;
-  const length: Record<Move, number> = { sweep: filterBeats, dive: filterBeats, brake: brakeBeats * pA <= room ? brakeBeats : 0 };
-  const order: Move[] = pB < pA ? ["sweep", "brake", "dive"] : ["brake", "dive", "sweep"];
+  const length: Record<Move, number> = { sweep: filterBeats, brake: brakeBeats * pA <= room ? brakeBeats : 0 };
+  const order: Move[] = pB < pA ? ["sweep", "brake"] : ["brake", "sweep"];
   const possible = order.filter((m) => length[m] > 0);
   const move = possible.find((m) => m !== avoid) ?? possible[0];
   if (!move) return undefined;
   const beats = length[move];
   const L = beats * pA;
-  const how = move === "sweep" ? `filtered away over ${beats} beats` : move === "dive" ? `closed down over ${beats} beats` : `record brake over ${beats} beat${beats > 1 ? "s" : ""}`;
+  const how = move === "sweep" ? `filtered away over ${beats} beats` : `record brake over ${beats} beat${beats > 1 ? "s" : ""}`;
   return { kind: "drop", move, aStart: aCut - L, duration: L, bStart, bAt: L, swapAt: L, beats, period: pA, note: `${how}, new track lands on ${where}, ${(60 / pA).toFixed(1)} → ${(60 / pB).toFixed(1)} BPM` };
 };
 
@@ -217,7 +234,7 @@ export const planNow = (a: Analysis, b: Analysis, opts: NowOptions): Plan => {
         const bodyAt = Math.round((b.introEnd - bStart) / pB / 4) * 4;
         const middle = Math.round(beats / 2 / 8) * 8 || Math.round(beats / 2 / 4) * 4;
         const swapBeat = bodyAt >= beats * 0.3 && bodyAt < middle ? bodyAt : middle;
-        const stretched = Math.abs(speed - 1) > 0.003;
+        const stretched = Math.abs(speed - 1) > 2e-5;
         return {
           kind: "blend",
           aStart,
@@ -319,7 +336,7 @@ export const planTransition = (a: Analysis, b: Analysis, opts: Options): Plan =>
       // than that, the swap happens there.
       const middle = Math.round(beats / 2 / 8) * 8 || Math.round(beats / 2 / 4) * 4;
       const swapBeat = bodyAt >= beats * 0.3 && bodyAt < middle ? bodyAt : middle;
-      const stretched = Math.abs(speed - 1) > 0.003;
+      const stretched = Math.abs(speed - 1) > 2e-5;
       return {
         kind: "blend",
         aStart,
@@ -342,7 +359,7 @@ export const planTransition = (a: Analysis, b: Analysis, opts: Options): Plan =>
     {
       const aStart = barAtOrBefore(a, gA, blendEnd - 8 * pA + 0.02);
       if (aStart >= earliest + 0.5) {
-        const stretched = Math.abs(speed - 1) > 0.003;
+        const stretched = Math.abs(speed - 1) > 2e-5;
         const duration = Math.round((blendEnd - aStart) / pA) * pA;
         return {
           kind: "blend",
@@ -366,7 +383,7 @@ export const planTransition = (a: Analysis, b: Analysis, opts: Options): Plan =>
     {
       const aStart = barAtOrBefore(a, gA, Math.min(blendEnd, hardEnd) - 4 * pA + 0.02);
       if (aStart >= earliest + 0.5 && aStart + 4 * pA <= a.lastSound + 0.75 * pA) {
-        const stretched = Math.abs(speed - 1) > 0.003;
+        const stretched = Math.abs(speed - 1) > 2e-5;
         return {
           kind: "blend",
           aStart,

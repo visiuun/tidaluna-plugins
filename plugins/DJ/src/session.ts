@@ -1,21 +1,26 @@
 // A DJ session: takes over the song that's playing, keeps sets coming in the same sound until asked for
 // something else, has every track loaded and analysed before it's needed, plans and schedules each
 // transition and talk break, and follows what you do with TIDAL's own controls.
-import { Mixer, type Clip, type Deck, type Loaded } from "./audio/mixer";
-import { planNow, planTransition, type Mixing, type Move, type Plan } from "./audio/plan";
+import type { Analysis } from "./audio/analysis";
+import { Mixer, type Clip, type Deck, type Loaded, type MashFit, type MashSide } from "./audio/mixer";
+import { planNow, planTransition, type MashWay, type Mixing, type Move, type Plan } from "./audio/plan";
+import { prepareSeparator, separate, separatorProgress, STEM_MARGIN, STEM_PIECE } from "./audio/stems";
 import {
   anchorFromSegment,
   anchorFromTrack,
   continueSegment,
   ensureTracks,
+  findTrack,
   initBrain,
   keyOf,
   lastSessionAt,
   markPlayed,
   markSession,
+  mashupCandidates,
   nextSegment,
   request as brainRequest,
   sessionCount,
+  trackFacts,
   trackInfo,
   type Anchor,
   type Segment,
@@ -49,7 +54,10 @@ export type CoverTransition = {
   seq: number;
   fromId: string;
   toId: string;
-  kind: "blend" | "drop" | "fade" | "cut";
+  kind: "blend" | "drop" | "fade" | "cut" | "mashup";
+  /** A mashup: the two songs, to be shown together while it lasts, and when the incoming song starts taking over altogether */
+  songs?: { a: string; b: string; artistA: string; artistB: string };
+  mid?: number;
   start: number;
   /** The big moment: the bass changes hands (blend) or the new track lands (drop, cut) */
   swap: number;
@@ -77,7 +85,7 @@ const setStatus = (patch: Partial<Status>) => {
 };
 
 // ------------------ TYPES ------------------
-type Talk = { type: Moment["type"]; text: string; clip: Promise<Clip | null>; ready?: Clip | null };
+type Talk = { type: Moment["type"]; text: string; clip: Promise<Clip | null>; ready?: Clip | null; /** A song's own introduction: the track it was written to follow */ after?: string };
 type Item = {
   track: Track;
   segment: Segment;
@@ -93,11 +101,49 @@ type Pending = Playing & { swap: number };
 type Prep = { forId: string; fromId: string; plan?: Plan; stretchKey?: string; working?: boolean; /** The DJ introduces the incoming set over this transition */ voice?: boolean };
 
 const TICK_MS = 200;
+/** How far TIDAL's own position (and with it the lyrics) may be from the sound before it is put right, seconds */
+const SYNC_SLACK = 0.11;
+// A mashup the DJ picks itself has to be this good (see mashQuality); one that is this good ends the search
+const MASH_OK = 0.4;
+const MASH_GREAT = 0.75;
+/**
+ * How good a mashup of two tracks would be, from what was measured (see mashMatch in mixer.page.js).
+ * Everything is taken relative to how well the two tracks' own bass and notes agree, which is what a
+ * perfect fit scores (about 1 then): how close the fit comes to that, and how far it stands out from the
+ * same two tracks in the wrong keys. Something is added for drum patterns that sit on each other, and
+ * taken off when the key isn't among the best three of the twelve. (A voice sits on a band in its key far
+ * more easily than one band's bass sits under another's chords, so the bar is no higher than it has to be:
+ * what the voice really needs, that there is singing in the stretch, is checked once it has been taken out.)
+ */
+/** About how many seconds it is from asking for a mashup to its start: finding the song, and the first pieces through the vocal separator */
+const MASH_LEAD = 30;
+/**
+ * How long the vocal separator takes over one piece (see STEM_PIECE), seconds: the average of the last
+ * thirty or so, as measured (2.5 s before a mashup starts and 3.3 s while it plays, on the machine this
+ * was written on: the average is what the planning needs, the last one would have it wait too long)
+ */
+let pieceSeconds = 3.2;
+let piecesTimed = 4;
+/** ...and how much longer than that each piece is allowed to take, when working out how soon a mashup can start */
+const PIECE_SLACK = 1.1;
+const mashQuality = (f: MashFit) => {
+  const own = f.self.filter((v) => v > 0.05);
+  const scale = own.length ? own.reduce((x, y) => x + y, 0) / own.length : 0.25;
+  return 0.5 * (f.fit / scale) + 0.5 * ((f.fit - f.median) / scale) + 0.1 * Math.max(0, f.rhythm) - (f.beaten < 9 ? 0.2 : 0);
+};
+const describeFit = (f: MashFit) =>
+  f.ok
+    ? `notes fit ${f.fit.toFixed(2)} (halves ${f.halves.map((v) => v.toFixed(2)).join("/")}; other keys' middle ${f.median.toFixed(2)}, beats ${f.beaten} of 11; own ${f.self.map((v) => v.toFixed(2)).join("/")}), drums ${f.rhythm.toFixed(2)}, ${f.tempo.map((v) => v.toFixed(2)).join(" vs ")} BPM, tuned ${f.tuning.join(" vs ")} cents (clarity ${f.clarity.join("/")}), ${f.semitones} semitones, joins ${(f.joins * 100).toFixed(1)}%, off ${f.off.toFixed(0)} cents, drum lags ${f.lags.join("/") || "none"} ms${f.shift ? `, moved ${f.shift} beat(s)` : ""}, took ${f.ms?.join(" + ") ?? "?"} ms`
+    : `no (${f.why}): ${f.tempo?.map((v) => v.toFixed(2)).join(" vs ")} BPM, tuned ${f.tuning?.join(" vs ")} cents`;
 /** The "set" every track belongs to in transitions-only mode */
 const FOLLOW_SEGMENT: Segment = { kind: "more", key: "queue", title: "Transitions only", tracks: [], facts: {} };
 const ARM_LEAD = 5;
 
-const context = (link: TidalLink): Context => ({ name: link.firstName(), tone: persona().tone, less: settings.commentary !== "full" });
+const context = (link: TidalLink): Context => ({ name: link.firstName(), tone: persona().tone, less: settings.commentary === "less" || settings.commentary === "off" });
+/** The DJ introduces sets (and says why it picked them) */
+const talksSets = () => settings.commentary === "full" || settings.commentary === "every";
+/** ...and every song on its own as well, like a radio presenter */
+const everySong = () => settings.commentary === "every";
 
 const makeTalk = (m: Moment, link: TidalLink, urgent: boolean): Talk => {
   const text = lineFor(m, context(link));
@@ -143,6 +189,14 @@ class Session {
   private starvedSince = 0;
   /** When a switch/request started: further ones wait until its first track is playing */
   private cutting = 0;
+  /** A mashup is being put together */
+  private mashing = false;
+  /** This session was started by asking for a mashup */
+  forMashup = false;
+  /** Until when (on the mixer's clock) a mashup is playing out: nothing else is started over it */
+  private mashUntil = 0;
+  /** A mashup's pieces are being made (see mashup): nothing else that is heavy on the processor is started meanwhile */
+  private piecing = false;
   private failures = 0;
 
   // Everything that touches the mixer runs one at a time, in order: the loop, and whatever you do meanwhile
@@ -198,7 +252,9 @@ class Session {
     const voice = await voiceState();
     const talkative = settings.commentary !== "off" && voice.usable;
     if (talkative && !voice.cloud && !voice.downloaded) notify("DJ: setting up the voice (one-time download, about 330 MB). The voice joins in a few minutes");
-    if (talkative) prepareStock();
+    // (Started for a mashup: the voice's stock lines are made once that is under way, not while it is
+    // being put together, which the same processor has to do)
+    if (talkative && !this.forMashup) prepareStock();
     await initBrain();
     if (this.stopped) return;
 
@@ -451,7 +507,7 @@ class Session {
       segment ??= await nextSegment(this.planned);
       if (this.stopped) return;
       this.anchor ??= anchorFromSegment(segment);
-      this.queueSegment(segment, settings.commentary === "full");
+      this.queueSegment(segment, talksSets());
     } catch (err) {
       warn("Couldn't pick the next set", err);
     } finally {
@@ -461,7 +517,8 @@ class Session {
 
   /** A different set kept ready, so the DJ button answers instantly */
   private async prepareAlt() {
-    if (this.alt || this.stopped) return;
+    // (Not while a mashup is being put together: picking a set and voicing its introduction would slow that down)
+    if (this.alt || this.stopped || this.mashing) return;
     const alt: NonNullable<Session["alt"]> = { segment: null!, building: true };
     this.alt = alt;
     try {
@@ -556,7 +613,7 @@ class Session {
         if (id && Date.now() > (this.avoid.get(id) ?? 0)) void this.pickUp(id);
       }
       void this.followQueue();
-    } else if (this.items.length < 2) this.fillQueue();
+    } else if (this.items.length < 2 && !this.mashing) this.fillQueue();
     const next = this.items[0];
     if (next) this.ensureLoading(next);
 
@@ -584,8 +641,18 @@ class Session {
     if (cur && !this.pending && !this.awaiting) {
       const pos = cur.deck.positionAt(now);
       const a = cur.deck.analysis;
+      // Introducing every song: the line for the next one is written once it's certain what it follows
+      // (the first song of a set has the set's introduction, which names it; a mashup needs no words)
+      if (!this.piecing && !this.follow && everySong() && next && next.segment.key !== "mashup" && !(next.first && next.talk && !next.talk.after) && next.talk?.after !== cur.item.track.id) {
+        const talk = makeTalk({ type: "track", track: next.track, prev: cur.item.track, facts: trackFacts(next.track) }, this.link, false);
+        talk.after = cur.item.track.id;
+        next.talk = talk;
+        if (this.prep?.forId === next.track.id) this.prep.voice = !this.immediate;
+      }
       // (A song picked up mid-play is analysed after it starts: no planning until that's in)
-      if (next?.ready && cur.deck.loaded.analysed) this.prepare(cur, next, pos);
+      // (...and none while a mashup's voices are still being taken out, which is a race against the playing:
+      // the next transition's tempo shift and the DJ's line for it can wait the few seconds that takes)
+      if (next?.ready && cur.deck.loaded.analysed && !(this.piecing && this.prep?.forId !== next.track.id)) this.prepare(cur, next, pos);
       const prep = this.prep;
       if (next?.ready && prep && prep.forId === next.track.id && prep.fromId === cur.item.track.id && !prep.working) await this.arm(cur, next, prep, pos);
       // The track ran out with nothing ready to follow it
@@ -611,7 +678,7 @@ class Session {
     this.prep = prep;
     // A new set is introduced by the DJ, over the transition into it (after the DJ button or a request
     // the DJ has already spoken)
-    prep.voice = !this.immediate && next.first && !!next.talk && settings.commentary !== "off";
+    prep.voice = !this.immediate && !!next.talk && settings.commentary !== "off" && (next.talk.after ? everySong() && next.talk.after === cur.item.track.id : next.first);
     const a = cur.deck.analysis;
     const b = next.ready!.analysis;
     const keys = { keyA: keyOf(cur.item.track), keyB: keyOf(next.track) };
@@ -621,7 +688,7 @@ class Session {
     const plan = make(settings.mixing, pos);
     prep.plan = plan;
     log(`Transition ${cur.item.track.title} → ${next.track.title}: ${plan.kind} at ${plan.aStart.toFixed(1)}s (${plan.note})${prep.voice ? ", with the DJ over it" : ""}`);
-    if (plan.kind === "blend" && Math.abs((plan.speed ?? 1) - 1) > 0.003) {
+    if (plan.kind === "blend" && Math.abs((plan.speed ?? 1) - 1) > 2e-5) {
       prep.working = true;
       const sr = 44100;
       this.mixer
@@ -644,6 +711,13 @@ class Session {
     let t0 = cur.deck.timeAt(plan.aStart);
     if (t0 - now > ARM_LEAD) return;
     let stretchKey = prep.stretchKey;
+    if (plan.kind === "mashup" && t0 < now + 0.3) {
+      // Too late for it: the track simply comes next, mixed in the usual way
+      log("Missed the start of the mashup");
+      setStatus({ note: "Missed the moment for that mashup. Try again" });
+      this.prep = undefined;
+      return;
+    }
     if (t0 < now + 0.15) {
       if (this.immediate && this.immediateTries < 2) {
         // Missed the bar line (the tempo shift took longer than expected): take the next one
@@ -663,10 +737,26 @@ class Session {
     try {
       const sched = await this.mixer.transition(cur.deck, deck, plan, t0, stretchKey);
       this.pending = { item: next, deck, swap: sched.swap };
+      if (plan.kind === "mashup") {
+        this.mashUntil = sched.end;
+        setStatus({ segment: next.segment.title, busy: undefined, note: undefined });
+        log(`Mashup scheduled: it starts ${((sched.first ?? t0) - now).toFixed(1)}s from now (${plan.note})`);
+      }
       if (plan.kind === "drop") lastMove = sched.move ?? plan.move;
       this.announce(cur, next, plan, t0, sched);
       if (plan.kind === "blend") log(`Blend scheduled: drums lined up by moving the incoming track ${sched.nudgeMs ?? 0} ms${sched.beatShift ? `, and ${sched.beatShift} beat(s) later so the patterns match` : ""}; bass hands over on beat ${sched.bassBeat ?? "?"}`);
+      // (The mixer has to have it worked out before it starts: if it ever hasn't, that should be known)
+      const ahead = t0 - this.mixer.now;
+      if (ahead < 0.3) warn(`The transition was scheduled late: ${ahead.toFixed(1)}s before its start`);
     } catch (err) {
+      if (plan.kind === "mashup") {
+        // (The current track is still playing untouched: nothing to rescue, the mashup just doesn't happen)
+        warn("Couldn't schedule the mashup", err);
+        this.mixer.dispose(deck);
+        this.prep = undefined;
+        setStatus({ note: "That mashup didn't work out. Try again", busy: undefined });
+        return;
+      }
       // Never leave silence because of a scheduling error: cut straight over
       warn("Couldn't schedule the transition, cutting over", err);
       this.mixer.dispose(deck);
@@ -687,12 +777,20 @@ class Session {
   }
 
   /** Tells the UI what's about to happen to the sound, so the cover art can do the same */
-  private announce(cur: Playing, next: Item, plan: Plan, t0: number, sched: { swap: number; end: number; bStart: number; bassBeat?: number }) {
+  private announce(cur: Playing, next: Item, plan: Plan, t0: number, sched: { swap: number; end: number; bStart: number; bassBeat?: number; first?: number; mid?: number }) {
     const beat = plan.period;
     let start = t0;
     let swap = sched.swap;
     let end = t0 + plan.duration;
-    if (plan.kind === "blend") {
+    let songs: CoverTransition["songs"];
+    let mid: number | undefined;
+    if (plan.kind === "mashup") {
+      // From where the other song's voice comes in to where that song is on its own
+      start = sched.first ?? t0;
+      end = sched.end;
+      songs = { a: cur.item.track.title, b: next.track.title, artistA: cur.item.track.artists[0]?.name ?? "", artistB: next.track.artists[0]?.name ?? "" };
+      mid = sched.mid ?? sched.end - (plan.bars2 ?? 4) * 4 * (beat ?? 0.5);
+    } else if (plan.kind === "blend") {
       // The bass handover is the moment, unless the incoming track never brings a bass in during the blend
       if (beat && sched.bassBeat !== undefined && sched.bassBeat < (plan.beats ?? 0) - 1) swap = t0 + sched.bassBeat * beat;
     } else if (plan.kind === "drop") {
@@ -705,7 +803,7 @@ class Session {
       start = swap - 0.6;
       end = swap + 1.3;
     } else swap = t0 + plan.duration / 2;
-    setStatus({ transition: { seq: ++transitionSeq, fromId: cur.item.track.id, toId: next.track.id, kind: plan.kind, start, swap, end, beat } });
+    setStatus({ transition: { seq: ++transitionSeq, fromId: cur.item.track.id, toId: next.track.id, kind: plan.kind, songs, mid, start, swap, end, beat } });
   }
 
   /** The DJ introduces `item`'s set over the music at `at`. If the line is still being made, it's said as soon as it's ready, up to `until` */
@@ -755,7 +853,7 @@ class Session {
     this.lastTid = tid;
     if (tid === want) {
       // Keep TIDAL's position where the music you hear actually is: lyrics, the progress bar and
-      // everything else in TIDAL follow it. A quarter of a second is the most it may be out.
+      // everything else in TIDAL follow it. A tenth of a second or so is the most it may be out.
       const heard = this.current.deck.positionAt(now) - this.mixer.latency;
       const dur = this.current.deck.loaded.duration;
       const off = this.link.position() - heard;
@@ -764,10 +862,10 @@ class Session {
         this.seekCheckAt = 0;
         if (Math.abs(off) < 1.5) this.seekLead = Math.max(0, Math.min(1.2, this.seekLead - off * 0.7));
       }
-      this.offCount = Math.abs(off) > 0.25 ? this.offCount + 1 : 0;
+      this.offCount = Math.abs(off) > SYNC_SLACK ? this.offCount + 1 : 0;
       // Right after TIDAL has been moved to a new track it starts from zero while the mixer is already
       // well into it: line it up at once instead of waiting to be sure
-      if (this.justMoved && Math.abs(off) > 0.25) this.offCount = 3;
+      if (this.justMoved && Math.abs(off) > SYNC_SLACK) this.offCount = 3;
       this.justMoved = false;
       if (this.link.playing && this.offCount >= 3 && Date.now() > this.nextSeekAt && heard > 0.3 && heard < dur - 3) {
         this.offCount = 0;
@@ -828,7 +926,7 @@ class Session {
     if (this.current) await this.mixer.kill(this.current.deck, 0.12);
     this.ensureLoading(item);
     // Skipping into a new set still gets its introduction, when the line is ready
-    const clip = item.first && settings.commentary !== "off" ? item.talk?.ready : null;
+    const clip = (item.first || everySong()) && settings.commentary !== "off" ? item.talk?.ready : null;
     if (clip) {
       const t = await this.mixer.talk(clip, {});
       this.say(item.talk!.text, t.voiceStart, t.voiceEnd);
@@ -850,6 +948,7 @@ class Session {
   private async onSeek(time: number) {
     const cur = this.current;
     if (!cur || this.opening || this.stopped) return;
+    log(`Seek to ${time.toFixed(1)}s (the mixer was at ${cur.deck.positionAt(this.mixer.now).toFixed(1)}s of ${cur.item.track.title})`);
     // A seek belongs to the track TIDAL shows: anything being mixed in is dropped and planned again
     setStatus({ transition: undefined });
     await this.dropPending();
@@ -881,7 +980,383 @@ class Session {
 
   // ------------------ DJ BUTTON / REQUESTS ------------------
   private busyCutting() {
-    return !!this.cutting && Date.now() - this.cutting < 20000;
+    return this.mashing || this.mixer.now < this.mashUntil || (!!this.cutting && Date.now() - this.cutting < 20000);
+  }
+
+  // ------------------ MASHUP ------------------
+  private dropExtra(id: string) {
+    if (!this.inUse(id)) void this.mixer.unload(id);
+  }
+
+  /** Runs the vocal separator on the sound left under `job`, showing how far along it is */
+  /**
+   * A mashup of the song that's on with another, which becomes the next track. Without `query` the DJ
+   * finds the song: same vibe, same tempo, same key, and of those the one whose notes actually fit this
+   * one's bar by bar. With `query` it is the song you named, moved in tempo and pitch as far as it takes
+   * to fit. Neither song has to have a singer: who sings where the two meet decides what the mashup is
+   * (the other song's voice over this one's band, this one's voice over the other's band, or the two
+   * bands on top of each other; see MASHUPS in mixer.page.js). Voices are found and taken out by a
+   * neural network (see audio/stems.js), a few seconds of sound at a time: the mashup starts as soon as
+   * the first pieces are there, and the rest are made while it plays.
+   */
+  async mashup(query?: string) {
+    if (this.follow || this.stopped) return;
+    if (this.busyCutting() || this.pending) return setStatus({ note: "One moment, still busy with the last thing" });
+    this.mashing = true;
+    setStatus({ busy: query ? "Finding that song" : "Looking for a song that goes with this one", note: undefined });
+    let keep: string | undefined;
+    // Candidates are loaded straight away, not in turn with the queue, and one ahead of the one being tried
+    const loads = new Map<string, Promise<Loaded>>();
+    const fetch = (c: Track) => {
+      let job = loads.get(c.id);
+      if (!job) {
+        job = this.mixer.load(c.id, settings.quality, c.bpm, this.link.normalizes);
+        job.catch(() => {});
+        loads.set(c.id, job);
+      }
+      return job;
+    };
+    // The separator gets ready meanwhile (the first time, that is a download of about 40 MB)
+    const engine = prepareSeparator();
+    engine.catch(() => {});
+    try {
+      // The song has to be playing from the mixer, measured, and past any transition of its own
+      const since = Date.now();
+      const settled = () => {
+        const cur = this.current;
+        if (!cur || this.pending || this.awaiting || !cur.deck.loaded.analysed) return false;
+        const last = cur.deck.map[cur.deck.map.length - 1];
+        return !!last && last.rate === 1 && last.t <= this.mixer.now;
+      };
+      while (!this.stopped && !settled() && Date.now() - since < 30000) await new Promise((r) => setTimeout(r, 250));
+      const cur = this.current;
+      if (this.stopped) return;
+      if (!cur || !settled()) return void setStatus({ note: "Nothing to mash up yet: wait until a song is playing on its own" });
+      const track = cur.item.track;
+      const a = cur.deck.analysis;
+      if (!a.steady || !a.grid) return void setStatus({ note: "This one has no steady beat to build a mashup on" });
+      const sr = 44100;
+      const beat = a.grid.period;
+      const bar = 4 * beat;
+      const side = (an: Analysis, from: number): MashSide => ({ period: an.grid!.period, bar0: an.bars[0] ?? an.firstBeat, phrase: an.phrasePhase, body: an.introEnd, from, last: an.lastSound });
+      // (The other song is left with its own ending to play, not joined so late that it is nearly over)
+      const other = (an: Analysis): MashSide => ({ ...side(an, 0), last: Math.min(an.lastSound, an.outroStart + 4 * an.grid!.period) });
+      const here = () => cur.deck.positionAt(this.mixer.now);
+      const still = () => !this.stopped && this.current === cur && !this.pending && !this.awaiting;
+      // It takes twelve bars at the least, and about half a minute to get going
+      const enough = () => a.lastSound - here() > MASH_LEAD + 14 * bar;
+      const tooLate = "Not enough of this song left for a mashup (it takes about half a minute to get going). Try it earlier in the next one";
+      if (!enough()) return void setStatus({ note: tooLate });
+      const movedOn = () => void (this.stopped || setStatus({ note: "The song moved on before the mashup was ready" }));
+
+      let candidates: Track[];
+      if (query) {
+        const found = await findTrack(query, track.id);
+        if (!found) return void setStatus({ note: `Couldn't find "${query.trim()}"` });
+        candidates = [found];
+      } else {
+        const keys = [keyOf(track), a.key.conf > 0.02 ? { tonic: a.key.tonic, mode: a.key.mode } : undefined].filter((k): k is NonNullable<typeof k> => !!k);
+        candidates = (await mashupCandidates(track, a.grid.bpm, keys)).slice(0, 7);
+        if (!candidates.length) return void setStatus({ note: "Found nothing at this tempo and in this key that fits the vibe" });
+      }
+
+      // Voices are taken out a piece at a time (see MASHUPS in mixer.page.js): piece i of a song is
+      // STEM_PIECE samples from `base` + i pieces on
+      const tag = `m${Date.now().toString(36)}`;
+      const pieceS = STEM_PIECE / sr;
+      let jobs = 0;
+      type Stems = { name: string; what: { id?: string; key?: string }; base: number; band: boolean; voice: Map<number, number[]> };
+      /** Makes piece `i` of `s` (unless it is there already). Returns how much of each second of it is voice */
+      const pieceOf = async (s: Stems, i: number) => {
+        const had = s.voice.get(i);
+        if (had) return had;
+        const began = Date.now();
+        const job = `${tag}j${jobs++}`;
+        const start = s.base + i * STEM_PIECE;
+        // (with what is around it, for the separator to hear: see STEM_MARGIN)
+        const out = await this.mixer.stemOut(job, s.what, start - STEM_MARGIN, start + STEM_PIECE + STEM_MARGIN);
+        await separate(job);
+        const voice = (await this.mixer.stemIn(job, s.name, s.what, out.from, { skip: start - out.from, keep: STEM_PIECE, index: i, band: s.band })).voice;
+        const took = (Date.now() - began) / 1000;
+        piecesTimed = Math.min(30, piecesTimed + 1);
+        pieceSeconds += (took - pieceSeconds) / piecesTimed;
+        s.voice.set(i, voice);
+        return voice;
+      };
+      // A stretch counts as sung when the voice is a fifth of the sound or more in four of every ten seconds
+      const sung = (voice: number[]) => voice.filter((v) => v >= 0.2).length / Math.max(1, voice.length) >= 0.4;
+      const tenths = (voice: number[]) => voice.map((v) => Math.min(9, Math.round(v * 10))).join("");
+
+      // Each candidate is measured against the song on the audio itself. The ones that really fit are
+      // kept, best first.
+      type Pick = { track: Track; loaded: Loaded; quality: number };
+      let picks: Pick[] = [];
+      let why: MashFit["why"];
+      const searching = Date.now();
+      for (const [i, c] of candidates.entries()) {
+        if (!still()) return movedOn();
+        if (!enough()) break;
+        // (A good one ends the search once it has taken a while: every second spent looking is a
+        // second less of the song for the mashup)
+        if (picks[0] && Date.now() - searching > 4500) break;
+        setStatus({ busy: `Trying it with ${c.title}` });
+        let loaded: Loaded;
+        try {
+          const job = fetch(c);
+          if (candidates[i + 1]) void fetch(candidates[i + 1]);
+          loaded = await job;
+        } catch (err) {
+          warn(`Mashup: couldn't load ${c.title}`, err);
+          continue;
+        }
+        if (!still()) return movedOn();
+        const b = loaded.analysis;
+        if (!b.steady || !b.grid) {
+          log(`Mashup: ${c.title} has no steady beat`);
+          why ??= "tempo";
+          this.dropExtra(c.id);
+          continue;
+        }
+        const fit = await this.mixer.mashMatch(track.id, c.id, side(a, here() + MASH_LEAD), other(b), !!query);
+        const quality = fit.ok ? mashQuality(fit) : -1;
+        log(`Mashup: ${track.title} × ${c.title}: ${describeFit(fit)}${fit.ok ? `, quality ${quality.toFixed(2)}` : ""}`);
+        if (!fit.ok) why ??= fit.why;
+        // (A song you named is taken as it comes; one the DJ picks has to clear the bar)
+        if (fit.ok && (query || quality >= MASH_OK)) {
+          picks.push({ track: c, loaded, quality });
+          picks.sort((x, y) => y.quality - x.quality);
+          for (const dropped of picks.splice(3)) this.dropExtra(dropped.track.id);
+        } else this.dropExtra(c.id);
+        if (picks[0] && (picks[0].quality >= MASH_GREAT - 0.005 || Date.now() - searching > 4500)) break;
+      }
+      if (!still()) return movedOn();
+      if (picks.length) {
+        setStatus({ busy: "Getting the vocal separator ready" });
+        const poll = setInterval(async () => {
+          const p = await separatorProgress().catch(() => undefined);
+          if (p?.downloading !== undefined && !this.stopped) setStatus({ busy: `Getting the vocal separator (one-time download, ${p.downloading}%)` });
+        }, 700);
+        try {
+          const started = await engine;
+          log(`Vocal separator ready (${started.threads} threads, ${started.ms} ms)`);
+        } catch (err) {
+          warn("The vocal separator couldn't be started", err);
+          return void setStatus({ note: "Couldn't get the vocal separator going, so no mashup for now" });
+        } finally {
+          clearInterval(poll);
+        }
+      }
+
+      // The best of the songs that fit is the one (the next best, if it turns out there is no room for it)
+      for (const pick of picks) {
+        if (!still()) return movedOn();
+        const partner = pick.track;
+        const b = pick.loaded.analysis;
+        setStatus({ busy: `Putting it together with ${partner.title}` });
+        // Where: as soon as what has to be there by then can be. That is the other song at this one's
+        // tempo (a couple of seconds), two pieces of its voice, to hear whether it sings, and then
+        // either a start on the rest (with two voices to take out the work is only just faster than
+        // the playing, so the longer the mashup, the bigger the start it needs: reckoned here for the
+        // longest, the way `plansFor` below does it for the real one), or, if it doesn't sing, two
+        // pieces of this song and the first of its voice.
+        const step = pieceSeconds * PIECE_SLACK;
+        const longest: number[] = [];
+        for (let t = pieceS; t < 33 * bar + 1; t += pieceS) longest.push(t, t - pieceS + 2 * beat);
+        longest.push(33 * bar - pieceS + 2 * beat);
+        longest.sort((x, y) => x - y);
+        const start = longest.reduce((most, at, j) => Math.max(most, (j + 1) * step + 2 - at), 2);
+        const ahead = 3 + Math.max(2 * pieceSeconds + start, 4 * pieceSeconds + step + 2);
+        const fit = await this.mixer.mashMatch(track.id, partner.id, { ...side(a, here() + ahead), starts: 2 }, other(b), !!query, true);
+        if (!fit.ok) {
+          why = fit.why;
+          continue;
+        }
+        const voiceBars = fit.bars1;
+        const blendBars = fit.bars2;
+        const total = voiceBars + blendBars;
+        const pre = 4 * beat;
+        const ease = 2 * beat;
+        const hold = pre + total * bar;
+        const x0 = Math.round((fit.bPos - pre * fit.speed) * sr);
+        const moved = Math.abs(fit.speed - 1) > 2e-5 || Math.abs(fit.pitch - 1) > 2e-5;
+        let stretchKey: string | undefined;
+        if (moved) {
+          // (A track moved in pitch finds its way back to its own slowly, so it isn't heard doing so)
+          const glide = fit.semitones || Math.abs(fit.joins) > 0.01 ? 28 : 16;
+          stretchKey = await this.mixer.stretch(partner.id, x0, fit.speed, Math.round(hold * sr), Math.round(glide * sr), fit.pitch);
+        }
+        if (!still()) return movedOn();
+        // The other song from where it starts (unheard, a bar early) to just past where this one has
+        // gone: at this song's tempo already, so its voice comes out ready to be sung over it. And this
+        // song from just before its voice would be taken out.
+        const B: Stems = { name: `${tag}b`, what: stretchKey ? { key: stretchKey } : { id: partner.id }, base: stretchKey ? 0 : x0, band: true, voice: new Map() };
+        const countB = Math.ceil(((hold + 1) * sr) / STEM_PIECE);
+        const A: Stems = { name: `${tag}a`, what: { id: track.id }, base: Math.round((fit.aPos - ease - 0.25) * sr), band: false, voice: new Map() };
+        /** This song's pieces for a mashup that starts at `pos` of it */
+        const rangeA = (pos: number) => [Math.floor(((pos - ease - 0.25) * sr - A.base) / STEM_PIECE), Math.ceil(((pos + total * bar + 0.3) * sr - A.base) / STEM_PIECE)] as const;
+
+        // Who sings where the two meet decides what the mashup is. The other song first: its first
+        // piece and one from further on (they are pieces the mashup needs anyway, if it does)
+        setStatus({ busy: `Listening for a singer in ${partner.title}` });
+        const heardB: number[] = [];
+        for (const i of new Set([0, Math.max(1, Math.min(countB - 1, Math.floor(((pre + 0.6 * voiceBars * bar) * sr) / STEM_PIECE)))])) {
+          const voice = await pieceOf(B, i);
+          heardB.push(...(i === 0 ? voice.slice(Math.floor(pre)) : voice));
+          if (!still()) return movedOn();
+        }
+        const sings = sung(heardB);
+        let way: MashWay = sings ? "voice" : "layer";
+        let heardA: number[] | undefined;
+        if (!sings) {
+          // ...and if it doesn't, this one, the same way
+          void this.mixer.stemDrop(B.name);
+          setStatus({ busy: `Listening for a singer in ${track.title}` });
+          try {
+            const [i0, i1] = rangeA(fit.aPos);
+            heardA = [];
+            for (const i of new Set([i0, Math.max(i0 + 1, Math.floor((i0 + i1) / 2))])) heardA.push(...(await pieceOf(A, i)));
+            if (sung(heardA)) way = "carry";
+          } catch (err) {
+            warn("Couldn't listen for this song's voice: mashing the two up as they are", err);
+          }
+          if (way === "layer") void this.mixer.stemDrop(A.name);
+          if (!still()) return movedOn();
+        }
+        log(`Mashup: ${partner.title} ${sings ? "sings" : "doesn't sing"} there (voice in each second sampled, in tenths: ${tenths(heardB)})${heardA ? `, ${track.title} ${way === "carry" ? "does" : "doesn't either"} (${tenths(heardA)})` : ""}`);
+
+        // When it can start: with every piece that is still to be made in place two seconds before it
+        // is heard, made one after the other in the order they are heard, from now
+        const plansFor = (aPos: number) => {
+          const [i0, i1] = rangeA(aPos);
+          const need: { s: Stems; i: number; at: number }[] = [];
+          if (way === "voice") for (let i = 0; i < countB; i++) if (!B.voice.has(i)) need.push({ s: B, i, at: Math.max(i * pieceS, pre - ease) });
+          if (way !== "layer") for (let i = i0; i < i1; i++) if (!A.voice.has(i)) need.push({ s: A, i, at: Math.max((A.base + i * STEM_PIECE) / sr - (aPos - pre), pre - ease) });
+          need.sort((x, y) => x.at - y.at);
+          let wait = 2;
+          need.forEach((n, j) => (wait = Math.max(wait, (j + 1) * pieceSeconds * PIECE_SLACK + 2 - n.at)));
+          return { i0, i1, need, wait };
+        };
+        const reach = (pos: number) => cur.deck.timeAt(pos - pre) - this.mixer.now;
+        // (Not in time for the phrase it was fitted to? Then the next one, or the one after)
+        let aPos = fit.aPos;
+        let job = plansFor(aPos);
+        while (reach(aPos) < job.wait && aPos + 4 * bar + (total + 1) * bar <= a.lastSound) {
+          aPos += 4 * bar;
+          job = plansFor(aPos);
+        }
+        if (reach(aPos) < job.wait) return void setStatus({ note: tooLate });
+
+        const moves = `${fit.semitones ? `, ${fit.semitones > 0 ? "+" : ""}${fit.semitones} semitone${Math.abs(fit.semitones) > 1 ? "s" : ""}` : ""}, tempo ${((fit.speed - 1) * 100).toFixed(2)}%`;
+        const how =
+          (way === "voice"
+            ? `${voiceBars} bars of ${partner.title}'s voice over ${track.title}, ${blendBars} to change over`
+            : way === "carry"
+              ? `${blendBars} bars for the bands to change over under ${track.title}'s voice, which carries on over ${partner.title} for ${voiceBars}`
+              : `no singer in either: ${voiceBars} bars of ${partner.title} on top of ${track.title}'s bass, then ${blendBars} the other way round`) + moves;
+        const plan: Plan = {
+          kind: "mashup",
+          aStart: aPos - pre,
+          duration: hold,
+          bStart: x0 / sr,
+          bAt: 0,
+          swapAt: pre,
+          beats: total * 4,
+          period: beat,
+          speed: fit.speed,
+          way,
+          pre,
+          bars1: voiceBars,
+          bars2: blendBars,
+          stemsA: A.name,
+          stemsB: B.name,
+          stems: { seg: STEM_PIECE, a: { base: A.base, from: job.i0, to: job.i1 }, b: { base: B.base, from: 0, to: countB } },
+          note: how,
+        };
+        const set = await this.run(() => {
+          if (!still() || cur.deck.timeAt(plan.aStart) < this.mixer.now + 0.6) return false;
+          const segment: Segment = { kind: "more", key: "mashup", title: `Mashup: ${track.title} × ${partner.title}`, tracks: [partner], facts: {} };
+          const item: Item = { track: partner, segment, first: false, ready: pick.loaded };
+          // It goes in front of whatever was coming, and counts as the set after the one playing
+          this.items = [item, ...this.items.filter((i) => i.track.id !== partner.id)];
+          this.known.set(partner.id, item);
+          const at = this.planned.indexOf(cur.item.segment);
+          this.planned.splice(at >= 0 ? at + 1 : this.planned.length, 0, segment);
+          this.prep = { forId: partner.id, fromId: track.id, plan, stretchKey };
+          this.immediate = false;
+          this.lateVoice = undefined;
+          this.syncQueue();
+          return true;
+        });
+        if (!set) return void (still() && setStatus({ note: "Missed the moment for that mashup. Try again" }));
+        keep = partner.id;
+        const wait = Math.max(0, cur.deck.timeAt(aPos) - this.mixer.now);
+        const over = cur.deck.timeAt(plan.aStart) + hold;
+        setStatus({ busy: `Mashup with ${partner.title} in ${Math.round(wait)}s` });
+        log(`Mashup set: ${track.title} × ${partner.artists[0]?.name} - ${partner.title} in ${wait.toFixed(1)}s, ${((Date.now() - since) / 1000).toFixed(0)}s after it was asked for (${how}; ${job.need.length} pieces still to make at ${pieceSeconds.toFixed(1)}s each; ${describeFit(fit)})`);
+        setTimeout(() => !this.stopped && this.prep?.plan === plan && setStatus({ busy: `Mashup with ${partner.title} coming up` }), Math.max(0, wait - 5) * 1000);
+
+        // The rest of the pieces, in the order they are heard, while the song plays on and into the
+        // mashup itself (for as long as it is still on its way or playing)
+        let gone = 0;
+        const wanted = () => {
+          if (this.stopped || this.mixer.now > over) return false;
+          const on = this.prep?.plan === plan || this.pending?.item.track.id === partner.id || this.current?.item.track.id === partner.id;
+          if (on) gone = 0;
+          else gone ||= Date.now();
+          return on || Date.now() - gone < 4000;
+        };
+        let made = 0;
+        this.piecing = true;
+        try {
+          for (const n of job.need) {
+            if (!wanted()) break;
+            try {
+              await pieceOf(n.s, n.i);
+              made++;
+            } catch (err) {
+              warn("Mashup: a piece of the voice couldn't be made", err);
+              break;
+            }
+          }
+        } finally {
+          this.piecing = false;
+        }
+        const arrived = await this.mixer.feedState().catch(() => undefined);
+        const counts = arrived?.feeds.map((f) => `${f.name === A.name ? track.title : partner.title}: ${f.played} of ${f.wanted} in place, ${f.late} late, ${f.missed} done without, the closest ${f.spare ?? "?"}s ahead of being heard`).join("; ");
+        log(`Mashup: ${made} of ${job.need.length} pieces made after it was set, ${pieceSeconds.toFixed(1)}s a piece${counts ? ` (${counts})` : ""}`);
+        return;
+      }
+      if (!still()) return movedOn();
+
+      // Nothing came of it: say why
+      const name = candidates[0].title;
+      const note =
+        why === "ending" || !enough()
+          ? tooLate
+          : !query
+              ? "Nothing fits this one cleanly enough for a mashup. Try another song, or name one"
+              : why === "tempo"
+                ? `${name} is too far from this one in tempo to mash up`
+                : why === "room"
+                  ? `No stretch of ${name} is long enough to go with what is left of this song`
+                  : why === "tuning"
+                    ? `${name} can't be brought in tune with this one`
+                    : `${name} couldn't be mashed up with this one`;
+      setStatus({ note });
+    } catch (err) {
+      warn("Mashup failed", err);
+      setStatus({ note: "That mashup didn't work out. Try again in a moment" });
+    } finally {
+      this.mashing = false;
+      // Everything that was loaded for it and isn't the one goes again (also what was still on its way)
+      for (const [id, job] of loads) void job.then(() => id !== keep && this.dropExtra(id)).catch(() => {});
+      if (!this.stopped && !this.alt) setTimeout(() => this.prepareAlt(), 6000);
+      if (!this.stopped && this.forMashup) {
+        this.forMashup = false;
+        if (settings.commentary !== "off") void voiceState().then((v) => v.usable && !this.stopped && prepareStock());
+      }
+      if (!this.stopped && !this.prep?.plan?.pre) setStatus({ busy: undefined });
+    }
   }
 
   /** Replaces what's coming with `segment`, has the DJ introduce it over the current track, and stays with its sound */
@@ -929,7 +1404,7 @@ class Session {
         } else await this.mixer.stopVoice(0.08);
       } else if (clip) {
         // Nothing playing to mix out of (a track was already on its way out): the voice, then the new track
-        await this.mixer.duckAll(0.3);
+        await this.mixer.duckAll();
         const t = await this.mixer.talk(clip, {});
         this.say(text, t.voiceStart, t.voiceEnd);
         this.awaiting = { voiceStart: t.voiceStart, voiceEnd: t.voiceEnd };
@@ -1026,7 +1501,7 @@ class Session {
           // A word of goodbye over the music, then the music carries on in TIDAL itself
           const bye = await stockLine("signoff").catch(() => null);
           if (bye) {
-            await mixer.duckAll(0.3);
+            await mixer.duckAll();
             const t = await mixer.talk(bye.clip, {});
             setStatus({ talking: true, caption: bye.text });
             await new Promise((r) => setTimeout(r, Math.max(0, t.voiceEnd - mixer.now) * 1000 + 100));
@@ -1070,7 +1545,7 @@ export const markUnloaded = () => (unloaded = true);
 export const isActive = () => !!session || starting;
 
 /** Starts the full DJ, or (mode "follow") transitions only. The DJ takes the place of a transitions-only session */
-export const startSession = async (mode: "dj" | "follow" = "dj") => {
+export const startSession = async (mode: "dj" | "follow" = "dj", forMashup = false) => {
   while (stopping) await stopping;
   if (starting || unloaded) return;
   if (session) {
@@ -1084,6 +1559,7 @@ export const startSession = async (mode: "dj" | "follow" = "dj") => {
   }
   starting = true;
   const s = new Session(mode === "follow");
+  s.forMashup = forMashup;
   session = s;
   try {
     await s.start();
@@ -1136,6 +1612,11 @@ export const setTransitionOnly = (on: boolean) => {
   applyTransitionOnly();
 };
 
+/** Mashes the playing song up with another: one you name, or one the DJ finds. Starts the DJ if it isn't on */
+export const mashup = async (query?: string) => {
+  if (!session || session.follow) await startSession("dj", true);
+  await session?.mashup(query?.trim() || undefined);
+};
 export const switchUp = () => session?.switchUp();
 export const ask = (text: string) => session?.ask(text);
 export const skip = () => session?.skip();

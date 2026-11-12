@@ -2,6 +2,7 @@
 // thread) or directly on a page. Two jobs:
 //   analyze: where the beats, bars and phrases are, how long the intro and outro last, tempo and key
 //   stretch: bring a track to another tempo for a beatmatched blend (varispeed, plus sparse joins if needed)
+//   profile: the notes and the drum hits of a track in detail, for putting two tracks on top of each other
 const DSP = (() => {
   "use strict";
 
@@ -345,7 +346,7 @@ const DSP = (() => {
    * A steady grid (period + phase) over a stretch of the track, from the tracked beats and then
    * sharpened against the onset envelope itself. `resid` says how well real beats sit on it.
    */
-  const fitGrid = (beatFrames, env, fps, fromSec, toSec, lowEnv) => {
+  const fitGrid = (beatFrames, env, fps, fromSec, toSec) => {
     const sel = [];
     for (let i = 0; i < beatFrames.length; i++) {
       const s = beatFrames[i] / fps;
@@ -573,11 +574,11 @@ const DSP = (() => {
       out.bpm = 60 / out.period;
       return out;
     };
-    const whole = toGrid(fitGrid(beatFrames, env, fps, secFrame(firstSound) / fps, secFrame(lastSound) / fps, lowEnv));
+    const whole = toGrid(fitGrid(beatFrames, env, fps, secFrame(firstSound) / fps, secFrame(lastSound) / fps));
     const headEnd = Math.min(lastSound, firstSound + 70);
     const tailStart = Math.max(firstSound, lastSound - 80);
-    const head = toGrid(fitGrid(beatFrames, env, fps, secFrame(firstSound) / fps, secFrame(headEnd) / fps, lowEnv));
-    const tail = toGrid(fitGrid(beatFrames, env, fps, secFrame(tailStart) / fps, secFrame(lastSound) / fps, lowEnv));
+    const head = toGrid(fitGrid(beatFrames, env, fps, secFrame(firstSound) / fps, secFrame(headEnd) / fps));
+    const tail = toGrid(fitGrid(beatFrames, env, fps, secFrame(tailStart) / fps, secFrame(lastSound) / fps));
     const steady = !!whole && whole.resid < 0.02 && whole.inlierShare > 0.6;
     // An intro or outro without a kick drum has only off-beat hi-hats to lock onto, which puts that
     // section's grid half a beat out. The track as a whole knows better: when its tempo is steady, the
@@ -786,11 +787,13 @@ const DSP = (() => {
   const MAX_VARISPEED = 1.02;
   const TAPS = 48;
   const PHASES = 512;
-  let sincTable;
+  const sincTables = new Map();
   // Windowed-sinc interpolation table (Kaiser, about 80 dB): row p holds the weights for reading
-  // p/PHASES of a sample past an input sample
-  const sinc = () => {
-    if (sincTable) return sincTable;
+  // p/PHASES of a sample past an input sample. `fastest`: the highest speed it will be read at.
+  const sinc = (fastest = MAX_VARISPEED) => {
+    const cutoff = 1 / Math.max(MAX_VARISPEED, Math.ceil(fastest * 100) / 100); // playing faster squeezes the spectrum up: nothing may fold back
+    const known = sincTables.get(cutoff);
+    if (known) return known;
     const table = new Float32Array((PHASES + 1) * TAPS);
     const beta = 8;
     const i0 = (x) => {
@@ -803,7 +806,6 @@ const DSP = (() => {
       return sum;
     };
     const norm = i0(beta);
-    const cutoff = 1 / MAX_VARISPEED; // playing faster squeezes the spectrum up: nothing may fold back
     const half = TAPS / 2;
     for (let ph = 0; ph <= PHASES; ph++) {
       const frac = ph / PHASES;
@@ -818,7 +820,8 @@ const DSP = (() => {
       }
       for (let j = 0; j < TAPS; j++) table[ph * TAPS + j] /= sum;
     }
-    return (sincTable = table);
+    sincTables.set(cutoff, table);
+    return table;
   };
 
   /**
@@ -835,10 +838,14 @@ const DSP = (() => {
    * (The earlier version overlapped two slightly offset copies of the track all the time, which is what a
    * phaser does, and it sounded like one.)
    *
+   * `pitch` (optional) sets how much of the speed is plain resampling, which is the part that moves the
+   * pitch: 1.0595 is a semitone up whatever the tempo does, and the joins make up the difference between
+   * the two (the bass may stray 1.5% from it before it is joined). It glides back to 1 with the speed.
+   *
    * Returns the shifted audio plus the exact point to continue from in the untouched track:
    * the sample after out[spliceOut - 1] is channels[spliceIn], so the two join sample for sample.
    */
-  const stretch = (channels, sr, x0, speed, holdOut, glideOut) => {
+  const stretch = (channels, sr, x0, speed, holdOut, glideOut, pitch) => {
     const nCh = channels.length;
     const len = channels[0].length;
     holdOut = Math.max(0, Math.round(holdOut));
@@ -850,7 +857,7 @@ const DSP = (() => {
       const u = Math.min(t - holdOut, glideOut);
       return speed * holdOut + (glideOut ? speed * u + ((1 - speed) * u * u) / (2 * glideOut) : 0) + Math.max(0, t - T);
     };
-    const dir = speed > 1 ? 1 : -1;
+    const resampleAt = pitch ? (t) => (t <= holdOut ? pitch : t >= T ? 1 : pitch + ((1 - pitch) * (t - holdOut)) / glideOut) : null;
     const STEP = 64;
 
     /**
@@ -861,8 +868,13 @@ const DSP = (() => {
       // How much of the wanted speed varispeed doesn't cover (0 for small differences)
       const excess = (t) => {
         const v = speedAt(t);
-        return v - Math.min(limit, Math.max(1 / limit, v));
+        if (!resampleAt) return v - Math.min(limit, Math.max(1 / limit, v));
+        // With a set pitch: resampled at that pitch (give or take `limit`), the rest is for the joins
+        const p = resampleAt(t);
+        const e = v - p * Math.min(limit, Math.max(1 / limit, v / p));
+        return Math.abs(e) < 1e-9 ? 0 : e;
       };
+      const dir = excess(0) >= 0 ? 1 : -1;
       const jumps = []; // { t: output sample, delta: input samples (+ skips ahead, - repeats) }
       if (excess(0) === 0 || T <= LX) return { jumps, excess, LX };
       const mono = new Float32Array(len);
@@ -956,7 +968,7 @@ const DSP = (() => {
       }
     };
 
-    const table = sinc();
+    const table = sinc(pitch ? Math.max(1, pitch) * 1.0147 : MAX_VARISPEED);
     const half = TAPS / 2;
     const out = [];
     for (let c = 0; c < nCh; c++) out.push(new Float32Array(T));
@@ -1002,9 +1014,9 @@ const DSP = (() => {
     };
 
     const within = (v, limit) => v <= limit && v >= 1 / limit;
-    if (within(speed, MAX_VARISPEED)) {
+    if (pitch ? Math.abs(speed - pitch) < 1e-9 : within(speed, MAX_VARISPEED)) {
       // Varispeed alone
-      const plan = planJoins(channels, MAX_VARISPEED, 0, 0);
+      const plan = planJoins(channels, pitch ? 1 : MAX_VARISPEED, 0, 0);
       const ptr = pointers(plan);
       const spliceIn = Math.round(ptr[T]);
       landOn(ptr, plan, spliceIn, 16384);
@@ -1065,23 +1077,186 @@ const DSP = (() => {
         highs.push(high);
       }
     }
-    const highPlan = planJoins(highs, MAX_VARISPEED, Math.round(0.0025 * sr), 768);
+    const highPlan = planJoins(highs, pitch ? 1 : MAX_VARISPEED, Math.round(0.0025 * sr), 768);
     const highPtr = pointers(highPlan);
     const spliceIn = Math.round(highPtr[T]);
     landOn(highPtr, highPlan, spliceIn, 16384);
     render(highs, highPtr, highPlan);
     // The bass: varispeed alone up to 3.5%; beyond that, joins a whole wave long with a long crossfade
-    const lowPlan = planJoins(lows, 1.035, Math.round(0.012 * sr), 2048);
+    const lowPlan = planJoins(lows, pitch ? 1.0147 : 1.035, Math.round(0.012 * sr), 2048);
     const lowPtr = pointers(lowPlan);
     landOn(lowPtr, lowPlan, spliceIn, 4 * sr);
     render(lows, lowPtr, lowPlan);
     return { out, total: T, spliceOut: T, spliceIn, x0, speed, holdOut, glideOut, joins: highPlan.jumps.length, bassJoins: lowPlan.jumps.length };
   };
 
-  return { analyze, stretch, makeFFT };
+  // ------------------ NOTES AND DRUMS IN DETAIL ------------------
+  /**
+   * What a mashup needs to know about a track, frame by frame: which notes its bass plays and which notes
+   * everything above the bass plays (twelve pitch classes each), how it is tuned, and where its drums hit.
+   * x: mono samples at `sr` (22050 expected).
+   *
+   * The notes come from the peaks of a long-window spectrum (0.74 s: enough to tell bass notes a semitone
+   * apart), each placed by its interpolated frequency. Only peaks count, so a drum hit, which fills the
+   * spectrum evenly, adds next to nothing. The tuning is how far those peaks sit from concert pitch on
+   * average, in cents: a track made from a sped-up sample can be a quarter tone out, and two tracks only
+   * sound in tune together when that is known.
+   */
+  const profile = (x, sr) => {
+    // The notes are all below 2.1 kHz: a quarter of the samples carry them (and cost a quarter to look at)
+    const D = 4;
+    const xd = new Float32Array(Math.floor(x.length / D));
+    {
+      const taps = 48;
+      const fc = 2300 / sr;
+      const h = new Float32Array(taps);
+      let sum = 0;
+      for (let k = 0; k < taps; k++) {
+        const d = k - (taps - 1) / 2;
+        h[k] = (Math.abs(d) < 1e-9 ? 2 * fc : Math.sin(2 * Math.PI * fc * d) / (Math.PI * d)) * (0.5 - 0.5 * Math.cos((2 * Math.PI * (k + 0.5)) / taps));
+        sum += h[k];
+      }
+      for (let k = 0; k < taps; k++) h[k] /= sum;
+      for (let n = 0; n < xd.length; n++) {
+        const o = n * D - taps / 2;
+        let v = 0;
+        if (o >= 0 && o + taps <= x.length) for (let k = 0; k < taps; k++) v += h[k] * x[o + k];
+        xd[n] = v;
+      }
+    }
+    const srd = sr / D;
+    const N = 4096;
+    const H = 1024;
+    const frames = Math.max(0, Math.floor((xd.length - N) / H) + 1);
+    const fft = makeFFT(N);
+    const win = hann(N);
+    const re = new Float32Array(N);
+    const im = new Float32Array(N);
+    const binHz = srd / N;
+    const kLo = Math.max(2, Math.floor(38 / binHz));
+    const kSplit = Math.round(230 / binHz);
+    const kHi = Math.min(N / 2 - 2, Math.ceil(2100 / binHz));
+    const mag = new Float32Array(kHi + 2);
+    const eBass = new Float32Array(frames);
+    const eTop = new Float32Array(frames);
+    const found = [];
+    let tx = 0;
+    let ty = 0;
+    let tw = 0;
+    for (let t = 0; t < frames; t++) {
+      const o = t * H;
+      for (let i = 0; i < N; i++) {
+        re[i] = xd[o + i] * win[i];
+        im[i] = 0;
+      }
+      fft(re, im);
+      let maxB = 0;
+      let maxT = 0;
+      let sb = 0;
+      let st = 0;
+      for (let k = kLo - 1; k <= kHi + 1; k++) {
+        const m = Math.sqrt(re[k] * re[k] + im[k] * im[k]);
+        mag[k] = m;
+        if (k < kSplit) {
+          sb += m * m;
+          if (m > maxB) maxB = m;
+        } else {
+          st += m * m;
+          if (m > maxT) maxT = m;
+        }
+      }
+      eBass[t] = sb;
+      eTop[t] = st;
+      const list = [];
+      for (let k = kLo; k <= kHi; k++) {
+        const m = mag[k];
+        if (!(m > mag[k - 1] && m >= mag[k + 1])) continue;
+        const low = k < kSplit;
+        if (m < (low ? maxB : maxT) * 0.08) continue;
+        // The peak's real frequency lies between bins: a parabola through the three around it
+        const a = Math.log(mag[k - 1] + 1e-12);
+        const b = Math.log(m + 1e-12);
+        const c = Math.log(mag[k + 1] + 1e-12);
+        const d = Math.max(-0.5, Math.min(0.5, (0.5 * (a - c)) / (a - 2 * b + c || 1)));
+        const midi = 69 + 12 * Math.log2(((k + d) * binHz) / 440);
+        const w = Math.sqrt(m);
+        list.push(midi, w, low ? 0 : 1);
+        // The tuning is read off the notes that stand out in their frame (a drum hit leaves many small
+        // peaks at no pitch in particular, which would only blur it)
+        if (!low && m >= maxT * 0.35) {
+          const angle = 2 * Math.PI * (midi - Math.round(midi));
+          tx += m * Math.cos(angle);
+          ty += m * Math.sin(angle);
+          tw += m;
+        }
+      }
+      found.push(list);
+    }
+    const tuning = tw ? (Math.atan2(ty, tx) / (2 * Math.PI)) * 100 : 0;
+    const clarity = tw ? Math.hypot(tx, ty) / tw : 0;
+    const bass = new Float32Array(frames * 12);
+    const top = new Float32Array(frames * 12);
+    for (let t = 0; t < frames; t++) {
+      const list = found[t];
+      for (let i = 0; i < list.length; i += 3) {
+        const pc = ((Math.round(list[i] - tuning / 100) % 12) + 12) % 12;
+        (list[i + 2] ? top : bass)[t * 12 + pc] += list[i + 1];
+      }
+    }
+
+    // Drum hits: how fast the level rises, below 150 Hz (the kick) and above 1.5 kHz (claps, snares,
+    // hats). Followed in the waveform itself, smoothed over a few waves: a window short enough to place
+    // a kick is shorter than a bass note's wave, and a held bass note then looks like a string of hits.
+    const N2 = 512;
+    const H2 = 128;
+    const frames2 = Math.max(0, Math.floor((x.length - N2) / H2) + 1);
+    const low = new Float32Array(frames2);
+    const high = new Float32Array(frames2);
+    {
+      const kl = 1 - Math.exp((-2 * Math.PI * 150) / sr);
+      const ks = 1 - Math.exp((-2 * Math.PI * 22) / sr);
+      const kh = 1 - Math.exp((-2 * Math.PI * 1500) / sr);
+      const ke = 1 - Math.exp((-2 * Math.PI * 60) / sr);
+      let l1 = 0;
+      let l2 = 0;
+      let s1 = 0;
+      let s2 = 0;
+      let h1 = 0;
+      let h2 = 0;
+      let e1 = 0;
+      let e2 = 0;
+      let lowBefore = 0;
+      let highBefore = 0;
+      let t = 0;
+      for (let i = 0; i < x.length && t < frames2; i++) {
+        const v = x[i];
+        l1 += kl * (v - l1);
+        l2 += kl * (l1 - l2);
+        s1 += ks * (Math.abs(l2) - s1);
+        s2 += ks * (s1 - s2);
+        h1 += kh * (v - h1);
+        h2 += kh * (h1 - h2);
+        e1 += ke * (Math.abs(v - h2) - e1);
+        e2 += ke * (e1 - e2);
+        if (i === t * H2 + N2 / 2) {
+          // (The top end evened out a little, so one loud hit doesn't drown the pattern)
+          const top2 = Math.sqrt(e2);
+          low[t] = t && s2 > lowBefore ? s2 - lowBefore : 0;
+          high[t] = t && top2 > highBefore ? top2 - highBefore : 0;
+          lowBefore = s2;
+          highBefore = top2;
+          t++;
+        }
+      }
+    }
+    return { frames, hop: H / srd, win: N / srd, bass, top, eBass, eTop, tuning, clarity, fps: sr / H2, drumWin: N2 / sr, low, high };
+  };
+
+  return { analyze, stretch, profile, makeFFT };
 })();
 
-// In a worker: { id, type: "analyze", mono, sr, hint } or { id, type: "stretch", channels, sr, x0, speed, holdOut, glideOut }
+// In a worker: { id, type: "analyze", mono, sr, hint }, { id, type: "stretch", channels, sr, x0, speed, holdOut, glideOut, pitch }
+// or { id, type: "profile", mono, sr }
 if (typeof self !== "undefined" && typeof window === "undefined" && typeof postMessage === "function") {
   self.onmessage = (e) => {
     const m = e.data;
@@ -1090,11 +1265,14 @@ if (typeof self !== "undefined" && typeof window === "undefined" && typeof postM
         const result = DSP.analyze(m.mono, m.sr, m.hint);
         postMessage({ id: m.id, result });
       } else if (m.type === "stretch") {
-        const result = DSP.stretch(m.channels, m.sr, m.x0, m.speed, m.holdOut, m.glideOut);
+        const result = DSP.stretch(m.channels, m.sr, m.x0, m.speed, m.holdOut, m.glideOut, m.pitch);
         postMessage(
           { id: m.id, result },
           result.out.map((c) => c.buffer),
         );
+      } else if (m.type === "profile") {
+        const result = DSP.profile(m.mono, m.sr);
+        postMessage({ id: m.id, result }, [result.bass.buffer, result.top.buffer, result.eBass.buffer, result.eTop.buffer, result.low.buffer, result.high.buffer]);
       }
     } catch (err) {
       postMessage({ id: m.id, error: String((err && err.stack) || err) });

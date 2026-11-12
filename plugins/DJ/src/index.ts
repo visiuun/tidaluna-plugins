@@ -1,5 +1,6 @@
 import type { LunaUnload } from "@luna/core";
 import { closeAnyMixer } from "./audio/mixer";
+import { closeSeparator } from "./audio/stems";
 import { stopRequests } from "./brain";
 import { flushLogNow, log, trace } from "./log";
 import { applyTransitionOnly, markUnloaded, stopSession } from "./session";
@@ -34,6 +35,7 @@ unloads.add(() => {
   resetVoiceQueue();
   stopRequests();
   stopVoiceEngine().catch(() => {});
+  closeSeparator();
   flushLogNow();
 });
 
