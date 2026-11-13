@@ -246,7 +246,7 @@ export class Mixer {
   }
   /** How the pieces of a mashup under way have been arriving */
   feedState() {
-    return this.call<{ feeds: { name: string; wanted: number; played: number; late: number; missed: number; /** the least time a piece arrived before it was heard, seconds */ spare: number | null }[] }>("feedState", {});
+    return this.call<{ /** what each block of the last mashup was, in the order they were played */ arrangement?: string[]; feeds: { name: string; wanted: number; played: number; late: number; missed: number; /** the least time a piece arrived before it was heard, seconds */ spare: number | null }[] }>("feedState", {});
   }
   /** How track `b` would best go on top of track `a` (both loaded), and how good a mashup that makes */
   mashMatch(a: string, b: string, A: MashSide, B: MashSide, free: boolean, exact = false) {

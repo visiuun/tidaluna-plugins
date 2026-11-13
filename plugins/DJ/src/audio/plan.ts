@@ -38,6 +38,8 @@ export type Plan = {
   //   layer: nobody sings. The incoming track plays over the outgoing one's bass for `bars1` bars, then
   //          the bass changes hands and the outgoing one leaves over `bars2`
   way?: MashWay;
+  /** For a mashup: whether each song was heard singing where they meet, before it was set (a: the playing one, b: the other) */
+  sings?: { a?: boolean; b?: boolean };
   pre?: number;
   bars1?: number;
   bars2?: number;

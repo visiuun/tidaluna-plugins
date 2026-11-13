@@ -1293,11 +1293,12 @@ class Session {
         if (reach(aPos) < job.wait) return void setStatus({ note: tooLate });
 
         const moves = `${fit.semitones ? `, ${fit.semitones > 0 ? "+" : ""}${fit.semitones} semitone${Math.abs(fit.semitones) > 1 ? "s" : ""}` : ""}, tempo ${((fit.speed - 1) * 100).toFixed(2)}%`;
+        const blockBars = total >= 24 ? 8 : 4;
         const how =
           (way === "voice"
-            ? `${voiceBars} bars of ${partner.title}'s voice over ${track.title}, ${blendBars} to change over`
+            ? `${total} bars in which the two trade places every ${blockBars}: one song's voice over the other's band, then the other way round, by who is singing`
             : way === "carry"
-              ? `${blendBars} bars for the bands to change over under ${track.title}'s voice, which carries on over ${partner.title} for ${voiceBars}`
+              ? `${total} bars in which ${track.title}'s voice moves between ${partner.title}'s band and its own every ${blockBars} (${partner.title} has no singer there)`
               : `no singer in either: ${voiceBars} bars of ${partner.title} on top of ${track.title}'s bass, then ${blendBars} the other way round`) + moves;
         const plan: Plan = {
           kind: "mashup",
@@ -1310,6 +1311,7 @@ class Session {
           period: beat,
           speed: fit.speed,
           way,
+          sings: { a: heardA ? way === "carry" : undefined, b: sings },
           voiceLevel,
           pre,
           bars1: voiceBars,
@@ -1371,6 +1373,10 @@ class Session {
         const arrived = await this.mixer.feedState().catch(() => undefined);
         const counts = arrived?.feeds.map((f) => `${f.name === A.name ? track.title : partner.title}: ${f.played} of ${f.wanted} in place, ${f.late} late, ${f.missed} done without, the closest ${f.spare ?? "?"}s ahead of being heard`).join("; ");
         log(`Mashup: ${made} of ${job.need.length} pieces made after it was set, ${pieceSeconds.toFixed(1)}s a piece${counts ? ` (${counts})` : ""}`);
+        // (how it went is known once it is over: its blocks are decided as they come up)
+        while (!this.stopped && this.mixer.now < over && wanted()) await new Promise((r) => setTimeout(r, 1000));
+        const went = (await this.mixer.feedState().catch(() => undefined))?.arrangement;
+        if (went?.length) log(`Mashup as it went (A: ${track.title}, B: ${partner.title}): ${went.join("; ")}; then B on its own`);
         return;
       }
       if (!still()) return movedOn();
