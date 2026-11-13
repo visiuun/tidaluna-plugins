@@ -1,7 +1,8 @@
 // The DJ in TIDAL's interface: the DJ button in the player bar (start, then "switch it up"), a panel for
 // requests and quick settings, captions for what the DJ says, and a card on the Home page.
 import type { LunaUnload } from "@luna/core";
-import { suggestions } from "./brain";
+import { poweredByTrueTaste, suggestions } from "./brain";
+import { openTrueTastePage } from "./store.native";
 import { persona, settings, VOICES, type Commentary } from "./config";
 import { ask, getStatus, isActive, mashup, mixerClock, onStatus, setTransitionOnly, skip, startSession, stopSession, switchUp, voiceLevel, type Status } from "./session";
 
@@ -82,6 +83,11 @@ const css = `
   .${ROOT}-panel h3 small { font-size: 12px; font-weight: 500; opacity: .6; margin-left: auto; }
   .${ROOT}-status { margin: 8px 0 12px; min-height: 18px; opacity: .78; }
   .${ROOT}-status em { font-style: normal; color: #33ffee; }
+  .${ROOT}-powered { display: none; margin-top: 12px; text-align: center; font-size: 10px; letter-spacing: .4px; opacity: .45; }
+  .${ROOT}-powered.on { display: block; }
+  .${ROOT}-powered a { font-weight: 700; color: inherit; text-decoration: none; cursor: pointer; }
+  .${ROOT}-powered:has(a:hover) { opacity: .9; }
+  .${ROOT}-powered a:hover { text-decoration: underline; }
   .${ROOT}-said { margin: 0 0 12px; padding: 9px 11px; border-radius: 10px; background: rgba(255,255,255,.06); font-size: 12.5px; }
   .${ROOT}-ask { display: flex; gap: 6px; }
   .${ROOT}-ask input { flex: 1; min-width: 0; height: 34px; padding: 0 11px; border-radius: 9px; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.06); color: #fff; font: inherit; outline: none; }
@@ -232,7 +238,17 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
   for (const b of [primary, skipBtn, stopBtn]) b.type = "button";
   const spacer = el("div", "spacer");
   actions.append(primary, skipBtn, spacer, stopBtn);
-  panel.append(title, statusLine, said, askRow, chips, mashRow, voiceRow, talkRow, modeRow, actions);
+  // (shown while the DJ picks by what the TrueTaste plugin has measured of your listening)
+  const powered = el("div", `${ROOT}-powered`);
+  const poweredLink = el("a", undefined, "TrueTaste");
+  poweredLink.title = "Open TrueTaste on GitHub";
+  poweredLink.addEventListener("click", (e) => {
+    e.preventDefault();
+    openTrueTastePage().catch(() => {});
+  });
+  powered.append("Powered by ", poweredLink);
+  powered.title = "The DJ picks by what the TrueTaste plugin has measured of your listening: what you play to the end, what you skip, what you gave a thumbs up";
+  panel.append(title, statusLine, said, askRow, chips, mashRow, voiceRow, talkRow, modeRow, actions, powered);
   document.body.appendChild(panel);
 
   let open = false;
@@ -355,6 +371,7 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
     for (const c of document.querySelectorAll<HTMLElement>(`.${ROOT}-card[data-instance="${instance}"]`)) renderCard(c, s);
     button.title = s.phase === "off" ? "Start the DJ" : follow ? "Transitions only is on: what you play is mixed together. Click to start the DJ" : s.phase === "starting" ? "The DJ is getting ready" : "DJ: switch it up";
     more.style.display = "";
+    powered.classList.toggle("on", poweredByTrueTaste() && !follow);
     const p = persona();
     titleVoice.textContent = p.name;
     captionWho.textContent = `DJ ${p.name}`;

@@ -37,6 +37,12 @@ const writeAtomic = async (file: string, data: Uint8Array) => {
   await rename(tmp, file).catch(() => rm(tmp, { force: true }));
 };
 
+// ------------------ LINKS ------------------
+/** Opens TrueTaste's page on GitHub in the browser. The address is fixed here: nothing else can be opened through this */
+export const openTrueTastePage = async () => {
+  await runtimeRequire("electron").shell.openExternal("https://github.com/visiuun/tidaluna-plugins#truetaste-visiuuntrue-taste");
+};
+
 // ------------------ JSON DOCUMENTS ------------------
 // Document names come from the page: only plain names, so nothing outside the data folder can be reached
 const docFile = (name: string) => {

@@ -346,8 +346,24 @@ const about = (s: Segment, ctx: Context, opening: boolean): string => {
         t === "chill" && `Let's settle into some ${f.genre}.`,
         t === "hype" && `${f.genre} time. You love this stuff!`,
       ]);
+    case "usual": {
+      const when = `${f.weekend ? "weekend" : "weekday"} ${f.daypart === "late night" ? "night" : f.daypart}`;
+      return one([
+        `This is what you usually play on a ${when}, going by True Taste.`,
+        `Your ${when} usual. True Taste has been keeping track.`,
+        `Around this hour on a ${f.weekend ? "weekend" : "weekday"}, you tend to play these.`,
+        `True Taste knows what you play at this time of day. Here it is.`,
+        `It's a ${when}, and this is what you play on those.`,
+        t === "dry" && `It's a ${when}. Statistically, you want these.`,
+        t === "hype" && `Your ${when} favourites! True Taste has the receipts.`,
+        t === "chill" && `The usual for a ${when}. No surprises.`,
+      ]);
+    }
     case "discovery":
       return one([
+        f.byTrueTaste && "Some new ones, ranked by what True Taste has learned about you.",
+        f.byTrueTaste && "New music now. True Taste thinks these are the ones you'll keep.",
+        f.byTrueTaste && "A few you haven't heard, picked the way True Taste has learned you like them.",
         "Now for some things you haven't heard yet. I picked these based on what you've been playing.",
         "Time for something new. None of these are in your library, but I think they'll fit right in.",
         "Let me put you on to a few new ones.",

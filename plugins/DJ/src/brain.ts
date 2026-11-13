@@ -2,10 +2,20 @@
 // from your past, one of your genres, an artist, things you haven't heard yet. The taste data is
 // TrueTaste's when that plugin is installed (read-only, from its files); otherwise the DJ reads your
 // likes, recently played and listening history from TIDAL itself.
+//
+// TrueTaste does the measuring (what you play to the end, what you skip, what you give a thumbs up or
+// down, how its own picks went); the DJ measures nothing itself and goes by what TrueTaste has found:
+//   - every pick leans away from songs you keep cutting short and artists you keep skipping, and
+//     towards songs you finish and songs you gave a thumbs up (see `songFit`, `artistFit`)
+//   - new music is ranked by the model TrueTaste has trained on how its own picks went with you
+//   - a taste you have been playing more of lately comes up more often, one you have cooled on less;
+//     and while your taste is on the move, the sets about now count for more than those about the past
+//   - "your usual": what you actually play at this hour on this kind of day
+// Without TrueTaste none of that is known, and the DJ picks as it always has.
 import * as api from "../../TrueTaste/src/api";
 import { artists, loadAll, state, tracks } from "../../TrueTaste/src/db";
 import { buildProfile, labelFor, VERSION_RE, versionText, type Profile } from "../../TrueTaste/src/profile";
-import { clusterSeeds, type Cluster } from "../../TrueTaste/src/rank";
+import { clusterSeeds, scoreCandidates, type Candidate, type Cluster } from "../../TrueTaste/src/rank";
 import genreList from "file://../../TrueTaste/assets/genres.txt";
 import { dot, normalize, normTag, tagVector } from "../../TrueTaste/src/tagspace";
 import type { Track } from "../../TrueTaste/src/types";
@@ -16,7 +26,7 @@ import { readDoc, writeDoc } from "./store.native";
 import { speakable, type Taste, type TrackFacts } from "./talk/script";
 
 export type { Track };
-export type Kind = "more" | "onRepeat" | "recentLikes" | "throwback" | "taste" | "discovery" | "artist" | "forgotten" | "mood" | "dailyMix" | "request";
+export type Kind = "more" | "onRepeat" | "recentLikes" | "throwback" | "taste" | "discovery" | "artist" | "forgotten" | "mood" | "dailyMix" | "usual" | "request";
 export type Facts = {
   month?: string;
   year?: number;
@@ -24,6 +34,10 @@ export type Facts = {
   genre?: string;
   artist?: string;
   daypart?: string;
+  /** For "your usual": the kind of day it is the usual of */
+  weekend?: boolean;
+  /** New music that was ranked by the model TrueTaste trained on how its picks went with you */
+  byTrueTaste?: boolean;
   query?: string;
   mood?: string;
   /** What TIDAL's playlist AI called what it put together for a request */
@@ -83,6 +97,9 @@ const themeAge = (key: string) => {
 // ------------------ TASTE ------------------
 let profile: Profile | undefined;
 let clusters: Cluster[] = [];
+/** What you love and what you cut short, as points in the space TrueTaste describes music in: what its ranker compares a new song against */
+let lovedPoints: { id: string; w: number; v: Float32Array }[] = [];
+let skippedPoints: { w: number; v: Float32Array }[] = [];
 let blocked: api.Blocks = { tracks: new Set(), artists: new Set() };
 const vectors = new Map<string, Float32Array | null>();
 const vectorOf = (id: string) => {
@@ -308,6 +325,8 @@ let ready: Promise<void> | undefined;
 let loadedAt = 0;
 /** TrueTaste is installed and has been keeping its data up to date: what it has gathered may be spoken of */
 let trueTaste = false;
+/** The DJ is going by what TrueTaste has measured (known once the taste has been loaded) */
+export const poweredByTrueTaste = () => trueTaste;
 /** Loads (or refreshes) everything the DJ knows about your taste */
 export const initBrain = (force = false) => {
   // (read again every hour: what TrueTaste has learned in the meantime, from what you played, skipped
@@ -349,6 +368,12 @@ const load = async () => {
     .map((id) => ({ id, w: profile!.seeds.get(id) ?? 0.1, v: vectorOf(id) }))
     .filter((p): p is { id: string; w: number; v: Float32Array } => !!p.v);
   clusters = clusterSeeds(points);
+  lovedPoints = points;
+  skippedPoints = [...profile.negatives.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 200)
+    .map(([id, w]) => ({ w, v: vectorOf(id) }))
+    .filter((p): p is { w: number; v: Float32Array } => !!p.v);
   for (const c of clusters) {
     const aw = new Map<string, number>();
     const genres = new Map<string, number>();
@@ -362,6 +387,12 @@ const load = async () => {
     c.label = labelFor(aw).split(" / ")[0] || [...genres.entries()].sort((a, b) => b[1] - a[1])[0]?.[0]?.toLowerCase() || "";
   }
   loadedAt = Date.now();
+  if (trueTaste) {
+    const skippers = [...profile.artistSkipRate.values()].filter((r) => r >= 0.5).length;
+    log(
+      `Going by TrueTaste: ${state.events.length} listens measured, ${profile.negatives.size} songs you cut short, ${skippers} artists you mostly skip, ${Object.values(state.feedback ?? {}).filter((f) => f.v === 1).length} thumbs up; its ranker has learned from ${state.trainedExamples ?? 0} of its own picks`,
+    );
+  }
   log(
     `Taste loaded in ${((Date.now() - t0) / 1000).toFixed(1)}s (${fromTrueTaste ? "from TrueTaste" : "from TIDAL"}): ${profile.seeds.size} tracks you like, ${state.events.length} tracked listens, ${state.historyMonths?.length ?? 0} history months, ${clusters.length} tastes [${clusters.map((c) => c.label || "?").join(", ")}]`,
   );
@@ -382,6 +413,30 @@ const eligible = (t: Track | undefined, allowRecent = false): t is Track => {
   return true;
 };
 
+// How well a song sits with what TrueTaste has measured of your listening (1: nothing known, or no
+// TrueTaste). By the song itself: one you keep cutting short counts for less, one you play to the end
+// and one you gave a thumbs up for more. By its artist: one whose songs you mostly skip seldom comes up.
+// What you ask for by name is never held back by this (`asked`).
+let asked = 0;
+const songFit = (id: string) => {
+  const p = profile;
+  if (!p || asked) return 1;
+  let f = 1;
+  const cut = p.negatives.get(id);
+  if (cut) f *= 1 - 0.85 * Math.min(1, cut);
+  if (state.feedback?.[id]?.v === 1) f *= 1.5;
+  const heard = listensOf(id);
+  if (heard && heard.starts >= 3) f *= 0.55 + 0.9 * (heard.whole / heard.starts);
+  return f;
+};
+const artistFit = (t: Track) => {
+  const p = profile;
+  if (!p || asked) return 1;
+  if (t.artists.some((a) => p.dislikedArtists.has(a.id))) return 0.1;
+  const rate = p.artistSkipRate.get(leadArtist(t));
+  return rate !== undefined && rate > 0.3 ? 1 - 0.75 * ((rate - 0.3) / 0.7) : 1;
+};
+
 type Weighted = { id: string; w: number };
 const shuffleWeighted = (pool: Weighted[]) => {
   // Efraimidis-Spirakis: one pass weighted sampling without replacement
@@ -394,7 +449,7 @@ const shuffleWeighted = (pool: Weighted[]) => {
 
 /** n tracks from a weighted pool: no artist twice, nothing played in the last day */
 const pick = async (pool: Weighted[], n: number, opts: { sameArtist?: boolean; exclude?: Set<string> } = {}) => {
-  const order = shuffleWeighted(pool.filter((p) => !opts.exclude?.has(p.id)));
+  const order = shuffleWeighted(pool.filter((p) => !opts.exclude?.has(p.id)).map((p) => ({ id: p.id, w: p.w * songFit(p.id) })));
   const out: Track[] = [];
   const usedArtists = new Set<string>();
   for (let i = 0; i < order.length && out.length < n; i += 12) {
@@ -404,6 +459,8 @@ const pick = async (pool: Weighted[], n: number, opts: { sameArtist?: boolean; e
       const t = tracks[id];
       if (!eligible(t)) continue;
       if (!opts.sameArtist && usedArtists.has(leadArtist(t))) continue;
+      // (an artist you mostly skip is passed over, the more surely the more you skip them; not in a set that is all theirs)
+      if (!opts.sameArtist && Math.random() > artistFit(t)) continue;
       usedArtists.add(leadArtist(t));
       out.push(t);
       if (out.length >= n) break;
@@ -569,7 +626,12 @@ const throwback: Builder = async () => {
 const taste: Builder = async () => {
   const named = clusters.filter((c) => c.label && c.members.length >= 6);
   if (!named.length) return null;
-  const options = named.map((c) => ({ c, w: Math.pow(c.weight, 0.6) * (themeAge(`taste:${c.label}`) < 4 * 3600e3 ? 0.05 : 1) }));
+  // (one you have been playing more of lately, by TrueTaste's reckoning, comes up more often; one you have cooled on, less)
+  const trend = (label: string) => {
+    const found = trueTaste ? state.lastRun?.clusters?.find((x) => x.label.split(" / ").includes(label)) : undefined;
+    return Math.max(0.5, Math.min(1.8, 1 + 3 * (found?.trend ?? 0)));
+  };
+  const options = named.map((c) => ({ c, w: Math.pow(c.weight, 0.6) * trend(c.label) * (themeAge(`taste:${c.label}`) < 4 * 3600e3 ? 0.05 : 1) }));
   const total = options.reduce((s, o) => s + o.w, 0);
   let r = Math.random() * total;
   const c = (options.find((o) => (r -= o.w) <= 0) ?? options[0]).c;
@@ -665,23 +727,31 @@ const moodSet: Builder = async () => {
 };
 
 // New music: gathered once in a while from several places, then ranked against your taste
-let discoveryPool: { at: number; ids: Weighted[] } | undefined;
+type Found = Weighted & { /** where it was found (the names TrueTaste's ranker knows its sources by) */ sources: Set<string> };
+let discoveryPool: { at: number; ids: Found[] } | undefined;
 const gatherDiscovery = async () => {
   if (discoveryPool && Date.now() - discoveryPool.at < 2 * 3600e3 && discoveryPool.ids.length > 10) return discoveryPool.ids;
   const p = profile!;
-  const found = new Map<string, number>();
-  const add = (id: string, w: number) => !p.known.has(id) && found.set(id, (found.get(id) ?? 0) + w);
+  const found = new Map<string, Found>();
+  const add = (id: string, w: number, source: string) => {
+    if (p.known.has(id)) return;
+    const f = found.get(id) ?? { id, w: 0, sources: new Set<string>() };
+    f.w += w;
+    f.sources.add(source);
+    found.set(id, f);
+  };
   // TrueTaste's own picks for today come first: they're already ranked for you
-  if (state.playlistId) for (const t of await api.playlistTracks(state.playlistId, 100).catch(() => [])) add(t.id, 2);
+  if (state.playlistId) for (const t of await api.playlistTracks(state.playlistId, 100).catch(() => [])) add(t.id, 2, "truetaste");
   const mixes = await api.myMixes().catch(() => [] as api.MixRef[]);
   for (const mix of mixes) {
     const w = /DISCOVERY/.test(mix.mixType) ? 1.2 : /NEW_RELEASE/.test(mix.mixType) ? 1 : 0;
     if (!w) continue;
-    (await api.mixItems(mix.id).catch(() => [] as string[])).forEach((id, i) => add(id, w / (1 + i / 30)));
+    const source = /DISCOVERY/.test(mix.mixType) ? "tidal-dd" : "tidal-newrel";
+    (await api.mixItems(mix.id).catch(() => [] as string[])).forEach((id, i) => add(id, w / (1 + i / 30), source));
   }
   const seeds = shuffleWeighted([...p.parts.entries()].map(([id, c]) => ({ id, w: c.now + c.fast + 0.2 * c.slow }))).slice(0, 3);
-  for (const s of seeds) (await api.similarTracks(s).catch(() => [] as string[])).forEach((id, i) => add(id, 0.9 / (1 + i / 12)));
-  const ids = [...found.entries()].map(([id, w]) => ({ id, w }));
+  for (const s of seeds) (await api.similarTracks(s).catch(() => [] as string[])).forEach((id, i) => add(id, 0.9 / (1 + i / 12), `similar:${s}`));
+  const ids = [...found.values()];
   discoveryPool = { at: Date.now(), ids };
   return ids;
 };
@@ -696,13 +766,33 @@ const discovery: Builder = async () => {
     const t = tracks[id];
     if (!eligible(t) || t.ai) return false;
     if (t.artists.some((a) => p.dislikedArtists.has(a.id) || (p.artistSkipRate.get(a.id) ?? 0) >= 0.75)) return false;
+    // (a kind of version you never play: live, acoustic, sped up...)
+    const v = versionText(t);
+    if ((VERSION_RE.live.test(v) && p.versionTaste.live < 0.02) || (VERSION_RE.acoustic.test(v) && p.versionTaste.acoustic < 0.02) || (VERSION_RE.altered.test(v) && p.versionTaste.altered < 0.02)) return false;
     return true;
   });
-  const list = await pick(
-    ok.map((id, i) => ({ id, w: 1 / (1 + i / 10) })),
-    wide(),
-  );
-  return make("discovery", "discovery", "New for you", list, {}, lastTrack);
+  // With TrueTaste there: ranked by its model, the one it has trained on how its own picks went with you
+  // (how close a song is to what you love and how far from what you skip, the artist, the tempo and
+  // how well known you like your music, each counted the way your listening has taught it to count them)
+  let weighted: Weighted[] = ok.map((id, i) => ({ id, w: 1 / (1 + i / 10) }));
+  let byTrueTaste = false;
+  if (trueTaste && lovedPoints.length >= 20) {
+    try {
+      const where = new Map(pool.map((f) => [f.id, f]));
+      const cands: Candidate[] = ok.map((id) => ({ t: tracks[id], vec: vectorOf(id), graph: where.get(id)?.w ?? 0, sources: where.get(id)?.sources ?? new Set<string>() }));
+      scoreCandidates(cands, p, lovedPoints, skippedPoints, clusters, Math.max(0, Math.min(1, settings.discovery / 100)));
+      const ranked = cands.filter((c) => Number.isFinite(c.score)).sort((a, b) => b.score! - a.score!);
+      if (ranked.length >= 5) {
+        weighted = ranked.map((c) => ({ id: c.t.id, w: c.score! * c.score! + 0.002 }));
+        byTrueTaste = (state.trainedExamples ?? 0) >= 10;
+        log(`New music ranked by TrueTaste's model (trained on ${state.trainedExamples ?? 0} of its picks): ${ranked.slice(0, 4).map((c) => `${c.t.artists[0]?.name} - ${c.t.title} ${(100 * c.score!).toFixed(0)}%`).join(", ")}; last: ${(100 * ranked[ranked.length - 1].score!).toFixed(0)}%`);
+      }
+    } catch (err) {
+      warn("Couldn't rank the new music with TrueTaste's model", err);
+    }
+  }
+  const list = await pick(weighted, wide());
+  return make("discovery", "discovery", "New for you", list, byTrueTaste ? { byTrueTaste } : {}, lastTrack);
 };
 
 let dailyMixes: { title: string; ids: string[] }[] | undefined;
@@ -724,8 +814,40 @@ const dailyMix: Builder = async () => {
   return make("dailyMix", `mix:${m.title}`, m.title, list, {}, lastTrack);
 };
 
+// What you actually play at this hour on this kind of day (a working day or the weekend), going by the
+// listens TrueTaste has measured over the last half year: the nearer the hour and the more of a song
+// you played, the more it counts
+const usual: Builder = () => usualSet();
+/** `asked`: you asked for it, so it comes even if it came not long ago */
+const usualSet = async (asked = false): Promise<Segment | null> => {
+  if (!trueTaste) return null;
+  const now = new Date();
+  const hour = now.getHours() + now.getMinutes() / 60;
+  const weekend = now.getDay() === 0 || now.getDay() === 6;
+  const key = `usual:${weekend ? "weekend" : "week"}:${Math.floor(hour / 3)}`;
+  if (!asked && themeAge(key) < 6 * 3600e3) return null;
+  const since = now.getTime() - 180 * DAY;
+  const played = new Map<string, number>();
+  for (const e of state.events) {
+    if (e.t < since || e.kind === "skip") continue;
+    const d = new Date(e.t);
+    if ((d.getDay() === 0 || d.getDay() === 6) !== weekend) continue;
+    const apart = Math.abs(d.getHours() + d.getMinutes() / 60 - hour);
+    const hours = Math.min(apart, 24 - apart);
+    if (hours > 2) continue;
+    played.set(e.id, (played.get(e.id) ?? 0) + Math.min(1, e.ratio) * (1 - hours / 3));
+  }
+  if (played.size < 25) return null;
+  const part = daypart();
+  const list = await pick(
+    [...played.entries()].map(([id, w]) => ({ id, w })),
+    wide(),
+  );
+  return make("usual", key, `Your ${weekend ? "weekend" : "weekday"} ${part} usual`, list, { daypart: part, weekend }, lastTrack);
+};
+
 type Themed = Exclude<Kind, "request" | "more">;
-const BUILDERS: Record<Themed, Builder> = { onRepeat, recentLikes, throwback, taste, discovery, artist: artistSpotlight, forgotten, mood: moodSet, dailyMix };
+const BUILDERS: Record<Themed, Builder> = { onRepeat, recentLikes, throwback, taste, discovery, artist: artistSpotlight, forgotten, mood: moodSet, dailyMix, usual };
 
 /**
  * The next set. Opens with what you've been playing lately, then moves between your past, your genres,
@@ -747,9 +869,19 @@ export const nextSegment = async (history: Segment[], avoidKind?: Kind): Promise
     mood: 0.7,
     discovery: 0.4 + 3.2 * d,
     dailyMix: 0.25 + 0.5 * d,
+    usual: 1,
   };
+  // While your taste is on the move (TrueTaste measures how far what you play now is from what you
+  // played before), the sets about now count for more and those about the past for less
+  const drift = trueTaste ? Math.max(0, Math.min(1, state.lastRun?.drift ?? 0)) : 0;
+  if (drift > 0.05) {
+    weights.onRepeat *= 1 + 0.8 * drift;
+    weights.recentLikes *= 1 + 0.6 * drift;
+    weights.throwback *= 1 - 0.5 * drift;
+    weights.forgotten *= 1 - 0.5 * drift;
+  }
   let order: Themed[];
-  if (!history.length) order = ["onRepeat", "recentLikes", "taste", "mood", "dailyMix", "discovery", "throwback", "artist", "forgotten"];
+  if (!history.length) order = ["onRepeat", "recentLikes", "taste", "mood", "dailyMix", "discovery", "throwback", "artist", "forgotten", "usual"];
   else {
     const pool = (Object.keys(weights) as Themed[]).map((k) => ({ id: k, w: weights[k] * (k === last || k === avoidKind ? 0 : recentKinds.includes(k) ? 0.35 : 1) }));
     order = shuffleWeighted(pool) as Themed[];
@@ -926,6 +1058,16 @@ const nameSet = (list: Track[], anchor: Anchor, history: Segment[]) => {
 
 /** More of the same sound: mostly music you know that sits close to it, plus some you don't */
 export const continueSegment = async (anchor: Anchor, history: Segment[]): Promise<Segment> => {
+  // (more of what was asked for is still what was asked for)
+  if (!anchor.pool) return keepGoing(anchor, history);
+  asked++;
+  try {
+    return await keepGoing(anchor, history);
+  } finally {
+    asked--;
+  }
+};
+const keepGoing = async (anchor: Anchor, history: Segment[]): Promise<Segment> => {
   await initBrain();
   const p = profile!;
   lastTrack = history[history.length - 1]?.tracks.at(-1);
@@ -1102,6 +1244,15 @@ const searchPlaylists = async (query: string) => {
 
 /** A typed request: a command, or a set built around what was asked for */
 export const request = async (text: string, current?: Track, progress?: Progress): Promise<Segment | Command | null> => {
+  // (what you ask for is what you get: your skipping habits don't hold any of it back)
+  asked++;
+  try {
+    return await answer(text, current, progress);
+  } finally {
+    asked--;
+  }
+};
+const answer = async (text: string, current?: Track, progress?: Progress): Promise<Segment | Command | null> => {
   await initBrain();
   const q = text.toLowerCase().replace(/[^\p{L}\p{N}' ]+/gu, " ").replace(/\s+/g, " ").trim();
   if (!q) return null;
@@ -1122,6 +1273,10 @@ export const request = async (text: string, current?: Track, progress?: Progress
   }
   if (/\b(new (music|stuff|songs|releases|tracks)|something new|discover\w*|haven'?t heard|never heard|surprise me|unfamiliar)\b/.test(q)) {
     const s = await discovery();
+    if (s) return { ...s, facts: { ...s.facts, query: text.trim() } };
+  }
+  if (/\b(the|my) usual\b|\bwhat i (usually|normally) (play|listen)/.test(q)) {
+    const s = await usualSet(true);
     if (s) return { ...s, facts: { ...s.facts, query: text.trim() } };
   }
   if (/\b(favou?rites?|on repeat|most played|my top|what i('| ha)?ve been (playing|listening))\b/.test(q)) {

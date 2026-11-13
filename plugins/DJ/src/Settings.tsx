@@ -1,7 +1,8 @@
 import React from "react";
 import { JINGLES, jingleStyle, settings, VOICES, type Commentary, type Jingle, type Mixing, type PluginSettings } from "./config";
+import { poweredByTrueTaste } from "./brain";
 import { getStatus, onStatus, setTransitionOnly, startSession, stopSession } from "./session";
-import { clearVoiceFiles, getDataDir } from "./store.native";
+import { clearVoiceFiles, getDataDir, openTrueTastePage } from "./store.native";
 import { prepareStock, voiceState, type VoiceState } from "./talk/voice";
 import { clearVoiceModel } from "./talk/voice.native";
 
@@ -46,6 +47,15 @@ const Overview = () => {
       <div style={{ opacity: 0.75 }}>
         Start it from the DJ button in the player bar or the card on Home. Press the button again to switch it up. The arrow next to it opens requests.
       </div>
+      {poweredByTrueTaste() && (
+        <div style={{ opacity: 0.55, marginTop: 6, fontSize: 12 }}>
+          Powered by{" "}
+          <a style={{ fontWeight: 700, color: "inherit", cursor: "pointer", textDecoration: "underline" }} title="Open TrueTaste on GitHub" onClick={() => void openTrueTastePage().catch(() => {})}>
+            TrueTaste
+          </a>
+          : the DJ picks by what it has measured of your listening.
+        </div>
+      )}
     </div>
   );
 };
@@ -116,9 +126,9 @@ export const Settings = () => {
       </LunaSelectSetting>
 
       <LunaSelectSetting title="Commentary" desc="How much the DJ talks" value={state.commentary} onChange={(e: any) => set("commentary", e.target.value as Commentary)}>
-        <LunaSelectItem value="every">Introduces every song, like a radio presenter</LunaSelectItem>
-        <LunaSelectItem value="full">Introduces every set and says why it picked it</LunaSelectItem>
-        <LunaSelectItem value="less">Less chatter: only a hello and a goodbye</LunaSelectItem>
+        <LunaSelectItem value="every">Every song, like a radio presenter</LunaSelectItem>
+        <LunaSelectItem value="full">Every set, and why it picked it</LunaSelectItem>
+        <LunaSelectItem value="less">Only a hello and a goodbye</LunaSelectItem>
         <LunaSelectItem value="off">No talking, just the mix</LunaSelectItem>
       </LunaSelectSetting>
 
@@ -130,10 +140,15 @@ export const Settings = () => {
         ))}
       </LunaSelectSetting>
 
-      <LunaSelectSetting title="Transitions" desc="How one track moves into the next" value={state.mixing} onChange={(e: any) => set("mixing", e.target.value as Mixing)}>
-        <LunaSelectItem value="auto">DJ mix: beatmatched blends where the tracks allow it, drops and crossfades where they don't</LunaSelectItem>
+      <LunaSelectSetting
+        title="Transitions"
+        desc="How one track moves into the next. DJ mix: beatmatched blends where the tracks allow it, drops and crossfades where they don't"
+        value={state.mixing}
+        onChange={(e: any) => set("mixing", e.target.value as Mixing)}
+      >
+        <LunaSelectItem value="auto">DJ mix</LunaSelectItem>
         <LunaSelectItem value="crossfade">Crossfades only</LunaSelectItem>
-        <LunaSelectItem value="none">None: one track after the other</LunaSelectItem>
+        <LunaSelectItem value="none">None: one after the other</LunaSelectItem>
       </LunaSelectSetting>
 
       <LunaNumberSetting title="Tracks per set" desc="How many tracks play between two talk breaks" min={3} max={8} value={state.setLength} onNumber={(n: number) => set("setLength", n)} />
