@@ -280,6 +280,9 @@ export const prepareStock = () => {
   for (const kind of ["switch", "request", "signoff", "hello"] as GenericKind[]) for (const text of GENERIC[kind]) speak(text, false).catch(() => {});
 };
 
+/** Who is reading the lines right now: Edge's online voices, the local one standing in for them, the local one by choice, or a cloud voice */
+export const readingNow = (): "online" | "standin" | "local" | "cloud" => (usingCloud() ? "cloud" : voiceEngine() !== "edge" ? "local" : edgeDown() ? "standin" : "online");
+
 export type VoiceState = {
   usable: boolean;
   cloud: boolean;

@@ -4,6 +4,7 @@ import type { LunaUnload } from "@luna/core";
 import { poweredByTrueTaste, suggestions } from "./brain";
 import { openTrueTastePage } from "./store.native";
 import { persona, settings, VOICES, type Commentary } from "./config";
+import { readingNow } from "./talk/voice";
 import { ask, getStatus, isActive, mashup, mixerClock, onStatus, setTransitionOnly, skip, startSession, stopSession, switchUp, voiceLevel, type Status } from "./session";
 
 const ROOT = "visiuun-dj";
@@ -101,6 +102,7 @@ const css = `
   .${ROOT}-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 14px; }
   .${ROOT}-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
   .${ROOT}-row label { opacity: .6; font-size: 12px; width: 78px; flex: none; }
+  .${ROOT}-reader { margin: 4px 0 0 86px; font-size: 10.5px; line-height: 1.3; opacity: .5; }
   .${ROOT}-row select { flex: 1; min-width: 0; max-width: 100%; text-overflow: ellipsis; height: 30px; border-radius: 8px; border: 1px solid rgba(255,255,255,.14); background: #1d1d24; color: #fff; font: inherit; font-size: 12px; padding: 0 6px; }
   .${ROOT}-mode { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.08); }
   .${ROOT}-mode div { flex: 1; min-width: 0; }
@@ -211,6 +213,9 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
     voiceSelect.appendChild(o);
   }
   voiceRow.append(el("label", undefined, "Voice"), voiceSelect);
+  // (the names in the list are the DJ's characters: who actually reads them depends on the voice engine)
+  const reader = el("div", `${ROOT}-reader`);
+  reader.title = "Change it under Voice engine in the DJ's settings";
   const talkRow = el("div", `${ROOT}-row`);
   const talkSelect = el("select");
   for (const [value, label] of [
@@ -248,7 +253,7 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
   });
   powered.append("Powered by ", poweredLink);
   powered.title = "The DJ picks by what the TrueTaste plugin has measured of your listening: what you play to the end, what you skip, what you gave a thumbs up";
-  panel.append(title, statusLine, said, askRow, chips, mashRow, voiceRow, talkRow, modeRow, actions, powered);
+  panel.append(title, statusLine, said, askRow, chips, mashRow, voiceRow, reader, talkRow, modeRow, actions, powered);
   document.body.appendChild(panel);
 
   let open = false;
@@ -374,6 +379,15 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
     powered.classList.toggle("on", poweredByTrueTaste() && !follow);
     const p = persona();
     titleVoice.textContent = p.name;
+    const by = readingNow();
+    reader.textContent =
+      by === "online"
+        ? `Read online, by Edge's ${p.edge.replace(/^[a-z]+-[A-Z]+-|(Multilingual)?Neural$/g, "")} voice`
+        : by === "standin"
+          ? "Edge's online voice isn't answering: the local voice is reading"
+          : by === "local"
+            ? "Read by the local voice, on this PC"
+            : "Read by a cloud voice (your OpenAI key)";
     captionWho.textContent = `DJ ${p.name}`;
     // Caption bubble (when the panel isn't showing the same thing)
     // What the DJ is saying, or (when it's working on something) how that's going
