@@ -86,7 +86,16 @@ const setStatus = (patch: Partial<Status>) => {
 };
 
 // ------------------ TYPES ------------------
-type Talk = { type: Moment["type"]; text: string; clip: Promise<Clip | null>; ready?: Clip | null; /** A song's own introduction: the track it was written to follow */ after?: string };
+type Talk = {
+  type: Moment["type"];
+  text: string;
+  clip: Promise<Clip | null>;
+  ready?: Clip | null;
+  /** A song's own introduction: the track it was written to follow */
+  after?: string;
+  /** Whether there is still a moment to say it at: a line that has none left by the time its turn comes isn't made */
+  wanted?: () => boolean;
+};
 type Item = {
   track: Track;
   segment: Segment;
@@ -159,7 +168,7 @@ const lineOf = (m: Moment, link: TidalLink, here?: Here) => {
 };
 const makeTalk = (m: Moment, link: TidalLink, urgent: boolean, here?: Here): Talk => {
   const text = lineOf(m, link, here);
-  const talk: Talk = { type: m.type, text, clip: speak(text, urgent) };
+  const talk: Talk = { type: m.type, text, clip: speak(text, urgent, () => talk.wanted?.() ?? true) };
   talk.clip.then((c) => (talk.ready = c)).catch(() => (talk.ready = null));
   return talk;
 };
@@ -271,7 +280,7 @@ class Session {
 
     const voice = await voiceState();
     const talkative = settings.commentary !== "off" && voice.usable;
-    if (talkative && !voice.cloud && !voice.downloaded) notify("DJ: setting up the voice (one-time download, about 330 MB). The voice joins in a few minutes");
+    if (talkative && !voice.cloud && !voice.online && !voice.downloaded) notify("DJ: setting up the voice (one-time download, about 330 MB). The voice joins in a few minutes");
     // (Started for a mashup: the voice's stock lines are made once that is under way, not while it is
     // being put together, which the same processor has to do)
     if (talkative && !this.forMashup) prepareStock();
@@ -298,8 +307,8 @@ class Session {
     if (talkative) {
       const m: Moment = { type: "open", segment, firstEver: sessionCount() === 0, sameDay: Date.now() - lastSessionAt() < 8 * 3600e3 };
       const text = lineOf(m, this.link, this.before);
-      // Only worth waiting for when it's quick (a cloud voice); otherwise a stock hello
-      const clip = voice.cloud ? await Promise.race([speak(text, true), new Promise<null>((r) => setTimeout(() => r(null), 6000))]) : null;
+      // Only worth waiting for when it's quick (an online voice); otherwise a stock hello
+      const clip = voice.quick ? await Promise.race([speak(text, true), new Promise<null>((r) => setTimeout(() => r(null), 6000))]) : null;
       said = clip ? { text, clip } : await stockLine("hello");
     }
     if (this.stopped) return;
@@ -444,6 +453,12 @@ class Session {
   }
 
   // ------------------ QUEUE ------------------
+  /** `talk` is `item`'s: wanted for as long as the item is still to come, is coming in, or is waited for after its transition began */
+  private give(item: Item, talk: Talk) {
+    item.talk = talk;
+    talk.wanted = () => !this.stopped && item.talk === talk && (this.items.includes(item) || this.pending?.item === item || this.lateVoice?.item === item);
+  }
+
   private queueSegment(segment: Segment, withTalk: boolean, talk?: Talk) {
     const prev = this.planned[this.planned.length - 1];
     this.planned.push(segment);
@@ -455,6 +470,7 @@ class Session {
           // The DJ's hello comes with the first set it brings in
           item.talk = makeTalk({ type: "open", segment, firstEver: sessionCount() <= 1, sameDay: false }, this.link, true, this.before);
         } else if (withTalk) item.talk = makeTalk({ type: "segment", segment, prev }, this.link, true, this.here());
+        if (item.talk) this.give(item, item.talk);
       }
       this.items.push(item);
       this.known.set(track.id, item);
@@ -546,7 +562,11 @@ class Session {
       const segment = await nextSegment(this.planned, playing?.kind);
       alt.segment = segment;
       alt.building = false;
-      if (settings.commentary !== "off") alt.talk = makeTalk({ type: "switch", segment }, this.link, false);
+      if (settings.commentary !== "off") {
+        const talk = makeTalk({ type: "switch", segment }, this.link, false);
+        talk.wanted = () => !this.stopped && this.alt === alt;
+        alt.talk = talk;
+      }
     } catch {
       if (this.alt === alt) this.alt = undefined;
     }
@@ -606,6 +626,7 @@ class Session {
         if (heir) {
           heir.first = true;
           heir.talk = d.talk;
+          if (d.talk) this.give(heir, d.talk);
         }
       }
       this.prep = undefined;
@@ -666,7 +687,7 @@ class Session {
       if (!this.piecing && !this.follow && everySong() && next && next.segment.key !== "mashup" && !(next.first && next.talk && !next.talk.after) && next.talk?.after !== cur.item.track.id) {
         const talk = makeTalk({ type: "track", track: next.track, prev: cur.item.track, facts: trackFacts(next.track, cur.item.track), prevFacts: trackFacts(cur.item.track) }, this.link, false, this.here(next));
         talk.after = cur.item.track.id;
-        next.talk = talk;
+        this.give(next, talk);
         if (this.prep?.forId === next.track.id) this.prep.voice = !this.immediate;
       }
       // (A song picked up mid-play is analysed after it starts: no planning until that's in)

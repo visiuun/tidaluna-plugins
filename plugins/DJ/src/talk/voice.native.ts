@@ -231,6 +231,17 @@ const closeStrays = () => {
   } catch {}
 };
 
+// Speech is prepared ahead of time, so it gives way to the mixer and to TIDAL itself. But not to everything: a page
+// nobody sees is run at the lowest priority there is, and there a game using the whole processor left a twelve-second
+// line taking over two minutes to make (one took more than six), so the DJ said nothing for four songs. One step
+// below normal is still out of the way, and the same line under the same game took 52 s. Said again before every
+// line: the priority of a page's process is Chromium's to change.
+const settle = (contents: any) => {
+  try {
+    if (!contents.isDestroyed()) os.setPriority(contents.getOSProcessId(), os.constants.priority.PRIORITY_BELOW_NORMAL);
+  } catch {}
+};
+
 const openHost = (): Host => {
   const { WebContentsView } = getElectron();
   const view = new WebContentsView({
@@ -251,10 +262,7 @@ const openHost = (): Host => {
   created.ready = Promise.race([
     (async () => {
       await contents.loadURL(PAGE_URL);
-      // Speech is prepared ahead of time, so it can wait: the mixer loading the next track can't
-      try {
-        os.setPriority(contents.getOSProcessId(), os.constants.priority.PRIORITY_LOW);
-      } catch {}
+      settle(contents);
       await contents.executeJavaScript(bootstrap);
     })(),
     died,
@@ -279,6 +287,7 @@ export const kokoroSpeak = async (text: string, voice: string, speed: number): P
   const current = (host ??= openHost());
   try {
     await withTimeout(current.ready, JOB_TIMEOUT_MS, "Starting the voice engine");
+    settle(current.view.webContents);
     const call = `window.__speak(${JSON.stringify(text)}, ${JSON.stringify(voice)}, ${Number(speed) || 1})`;
     const result = await withTimeout(Promise.race([current.view.webContents.executeJavaScript(call), current.died]), JOB_TIMEOUT_MS, "Speaking");
     lastError = undefined;

@@ -1,5 +1,5 @@
 import React from "react";
-import { JINGLES, jingleStyle, settings, VOICES, type Commentary, type Jingle, type Mixing, type PluginSettings } from "./config";
+import { JINGLES, jingleStyle, settings, voiceEngine, VOICES, type Commentary, type Jingle, type Mixing, type PluginSettings, type VoiceEngine } from "./config";
 import { poweredByTrueTaste } from "./brain";
 import { getStatus, onStatus, setTransitionOnly, startSession, stopSession } from "./session";
 import { clearVoiceFiles, getDataDir, openTrueTastePage } from "./store.native";
@@ -31,19 +31,23 @@ const Overview = () => {
       ? "Voice unavailable here: the DJ will mix without talking"
       : voice.cloud
         ? "Voice: cloud (your OpenAI key)"
-        : voice.progress !== undefined
+        : voice.online && !voice.onlineDown
+          ? "Voice: online (Edge's voices), with the local one standing by"
+          : voice.progress !== undefined
           ? `Voice: downloading the model (${voice.progress}%)`
           : !voice.downloaded
             ? "Voice: local model, downloaded the first time the DJ starts (about 330 MB, once)"
             : voice.busy
               ? "Voice: local model, preparing lines…"
               : `Voice: local model, ready${voice.error ? ` (last error: ${voice.error})` : ""}`;
+  const standIn = voice?.onlineDown ? `The online voice isn't answering (${voice.onlineDown}): the local one reads until it is tried again shortly` : undefined;
   return (
     <div style={box}>
       <div style={{ fontWeight: 600, marginBottom: 4 }}>
         {status.phase === "off" ? "The DJ is off" : status.mode === "follow" ? "Transitions only is on: what you play is mixed together" : status.busy ? `${status.busy}…` : status.segment ? `On air: ${status.segment}` : "On air"}
       </div>
       <div style={{ opacity: 0.75 }}>{voiceLine}</div>
+      {standIn && <div style={{ opacity: 0.75 }}>{standIn}</div>}
       <div style={{ opacity: 0.75 }}>
         Start it from the DJ button in the player bar or the card on Home. Press the button again to switch it up. The arrow next to it opens requests.
       </div>
@@ -125,6 +129,19 @@ export const Settings = () => {
         ))}
       </LunaSelectSetting>
 
+      <LunaSelectSetting
+        title="Voice engine"
+        desc="Who reads the DJ's lines. Online: the voices of Microsoft Edge's read aloud, which cost your PC nothing and answer in a few seconds; the text of each line is sent to Microsoft, and the local voice steps in whenever they can't be reached. On this PC: a voice model that runs here (about 330 MB, downloaded once), nothing sent anywhere, slower while a game has the processor"
+        value={voiceEngine()}
+        onChange={(e: any) => {
+          set("voiceEngine", e.target.value as VoiceEngine);
+          prepareStock();
+        }}
+      >
+        <LunaSelectItem value="edge">Online</LunaSelectItem>
+        <LunaSelectItem value="local">On this PC</LunaSelectItem>
+      </LunaSelectSetting>
+
       <LunaSelectSetting title="Commentary" desc="How much the DJ talks" value={state.commentary} onChange={(e: any) => set("commentary", e.target.value as Commentary)}>
         <LunaSelectItem value="every">Every song, like a radio presenter</LunaSelectItem>
         <LunaSelectItem value="full">Every set, and why it picked it</LunaSelectItem>
@@ -180,7 +197,7 @@ export const Settings = () => {
 
       <LunaSecureTextSetting
         title="Cloud voice (optional)"
-        desc="An OpenAI API key. With it the DJ's lines are spoken by a cloud voice, which is quicker and more expressive than the local one. Only the text of each line is sent. Leave empty to keep everything on this machine"
+        desc="An OpenAI API key. With it the DJ's lines are spoken by OpenAI's voices instead of either of the above. Only the text of each line is sent. Leave empty not to use it"
         value={state.cloudVoiceKey}
         onChange={(e: any) => set("cloudVoiceKey", String(e.target.value ?? ""))}
       />
