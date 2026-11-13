@@ -2633,6 +2633,9 @@ registerProcessor("dj-limiter", Limiter);
       const now = ctx.currentTime + 0.03;
       const level = under(now);
       for (const d of decks.values()) {
+        // (not one that is down under a line already, nor one that is being cut off this very moment)
+        if (d.ducked || d.stopAt < now + 0.3) continue;
+        d.ducked = true;
         const g = d.fader.gain;
         const v = g.value;
         holdAt(g, now);

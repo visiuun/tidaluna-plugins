@@ -186,6 +186,9 @@ class Session {
   private prep?: Prep;
   /** Start the next item as soon as it has loaded (optionally around a line being spoken) */
   private awaiting?: { voiceStart?: number; voiceEnd?: number };
+  /** The song left on, low, under a line the DJ says between two songs (see talkBetween), and what takes it away */
+  private bed?: Deck;
+  private leaving?: ReturnType<typeof setTimeout>;
   /** After the DJ button or a request: mix the next track in on the next bar line rather than at the current track's end */
   private immediate = false;
   private immediateTries = 0;
@@ -671,10 +674,8 @@ class Session {
       this.pending = { item: next, deck, swap: start };
       // Whatever was still playing underneath makes way as the new track arrives
       const old = this.current?.deck;
-      if (old && old.stopAt === Infinity) {
-        const lead = Math.max(0, start - this.mixer.now);
-        setTimeout(() => this.mixer.kill(old, 0.9), lead * 1000);
-      }
+      if (old && (old.stopAt === Infinity || old === this.bed)) this.leaveAt(old, start, 0.9);
+      this.bed = undefined;
       setStatus({ busy: undefined });
     }
 
@@ -967,17 +968,41 @@ class Session {
     this.lateVoice = undefined;
     this.talkUntil = 0;
     await this.mixer.stopVoice();
-    if (this.current) await this.mixer.kill(this.current.deck, 0.12);
     this.ensureLoading(item);
     // Skipping into a new set still gets its introduction, when the line is ready
     const clip = (item.first || everySong()) && settings.commentary !== "off" ? item.talk?.ready : null;
-    if (clip) {
-      const t = await this.mixer.talk(clip, {});
-      this.say(item.talk!.text, t.voiceStart, t.voiceEnd);
-      this.awaiting = { voiceStart: t.voiceStart, voiceEnd: t.voiceEnd };
-    } else this.awaiting = {};
+    if (clip) await this.talkBetween(clip, item.talk!.text);
+    else {
+      clearTimeout(this.leaving);
+      this.bed = undefined;
+      if (this.current) await this.mixer.kill(this.current.deck, 0.12);
+      this.awaiting = {};
+    }
     if (!item.ready) setStatus({ busy: "Loading" });
     this.syncQueue();
+  }
+
+  /**
+   * The DJ says `clip` between two songs. The song being left is not cut off for it (that was the words
+   * over nothing at all, for as long as the line lasts): it stays on, low under the voice, and leaves as
+   * the next song arrives, or after the line if that one is still loading.
+   */
+  private async talkBetween(clip: Clip, text: string) {
+    clearTimeout(this.leaving);
+    const sounding = (d: Deck) => !d.disposed && d.started && d.stopAt > this.mixer.now + 0.5;
+    const t = await this.mixer.talk(clip, [...this.mixer.decks].some(sounding) ? { t0: await this.mixer.duckAll() } : {});
+    this.say(text, t.voiceStart, t.voiceEnd);
+    this.awaiting = { voiceStart: t.voiceStart, voiceEnd: t.voiceEnd };
+    const old = this.current?.deck;
+    this.bed = old && sounding(old) ? old : undefined;
+    if (this.bed) this.leaveAt(this.bed, t.voiceEnd + 0.2, 1.5);
+  }
+  /** Has `deck` fade away at `at` (on the mixer's clock). One at a time: asked again, the earlier one is off */
+  private leaveAt(deck: Deck, at: number, fade: number) {
+    clearTimeout(this.leaving);
+    this.leaving = setTimeout(() => {
+      if (!deck.disposed && deck.stopAt > this.mixer.now) void this.mixer.kill(deck, fade);
+    }, Math.max(0, at - this.mixer.now) * 1000);
   }
 
   private async dropPending() {
@@ -1665,10 +1690,9 @@ class Session {
           this.say(text, t.voiceStart, t.voiceEnd);
         } else await this.mixer.stopVoice(0.08);
       } else if (clip) {
-        // Nothing playing to mix out of (a track was already on its way out): the voice, then the new track
-        const t = await this.mixer.talk(clip, { t0: await this.mixer.duckAll() });
-        this.say(text, t.voiceStart, t.voiceEnd);
-        this.awaiting = { voiceStart: t.voiceStart, voiceEnd: t.voiceEnd };
+        // Nothing playing to mix out of (a track was already on its way out): the voice over what is left
+        // of it, then the new track
+        await this.talkBetween(clip, text);
       } else {
         await this.mixer.stopVoice(0.08);
         this.awaiting = {};
@@ -1753,6 +1777,7 @@ class Session {
     this.stopped = true;
     clearInterval(this.timer);
     clearTimeout(this.captionTimer);
+    clearTimeout(this.leaving);
     log(`Session ended (${reason})`);
     setStatus({ phase: "stopping", busy: undefined, transition: undefined });
     const mixer = this.mixer;

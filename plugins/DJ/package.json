@@ -1,6 +1,6 @@
 {
   "name": "@visiuun/dj",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "DJ: a personal AI DJ for TIDAL. Picks music for you in themed sets, talks between them, and mixes every track into the next with real beatmatched transitions and mashups. Or just the transitions, on whatever you play",
   "author": {
     "name": "visiuun",
