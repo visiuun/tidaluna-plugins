@@ -20,6 +20,7 @@ import {
   nextSegment,
   request as brainRequest,
   sessionCount,
+  tasteNotes,
   trackFacts,
   trackInfo,
   type Anchor,
@@ -28,7 +29,7 @@ import {
 } from "./brain";
 import { persona, settings } from "./config";
 import { log, notify, warn } from "./log";
-import { lineFor, type Context, type Moment } from "./talk/script";
+import { lineFor, type Context, type Here, type Moment } from "./talk/script";
 import { prepareStock, speak, stockLine, voiceState } from "./talk/voice";
 import { TidalLink } from "./tidal";
 
@@ -139,19 +140,25 @@ const describeFit = (f: MashFit) =>
 const FOLLOW_SEGMENT: Segment = { kind: "more", key: "queue", title: "Transitions only", tracks: [], facts: {} };
 const ARM_LEAD = 5;
 
-const context = (link: TidalLink): Context => ({ name: link.firstName(), tone: persona().tone, less: settings.commentary === "less" || settings.commentary === "off" });
+const context = (link: TidalLink, here?: Here): Context => ({
+  name: link.firstName(),
+  tone: persona().tone,
+  less: settings.commentary === "less" || settings.commentary === "off",
+  dj: persona().name,
+  here: { ...here, taste: tasteNotes() },
+});
 /** The DJ introduces sets (and says why it picked them) */
 const talksSets = () => settings.commentary === "full" || settings.commentary === "every";
 /** ...and every song on its own as well, like a radio presenter */
 const everySong = () => settings.commentary === "every";
 
 /** The line for a moment (a set's introduction gets what is known about its first song to talk about) */
-const lineOf = (m: Moment, link: TidalLink) => {
+const lineOf = (m: Moment, link: TidalLink, here?: Here) => {
   if ("segment" in m && !m.facts && m.segment.tracks[0]) m.facts = trackFacts(m.segment.tracks[0]);
-  return lineFor(m, context(link));
+  return lineFor(m, context(link, here));
 };
-const makeTalk = (m: Moment, link: TidalLink, urgent: boolean): Talk => {
-  const text = lineOf(m, link);
+const makeTalk = (m: Moment, link: TidalLink, urgent: boolean, here?: Here): Talk => {
+  const text = lineOf(m, link, here);
   const talk: Talk = { type: m.type, text, clip: speak(text, urgent) };
   talk.clip.then((c) => (talk.ready = c)).catch(() => (talk.ready = null));
   return talk;
@@ -180,6 +187,14 @@ class Session {
   private anchor?: Anchor;
   private fetching = false;
   private opening = true;
+  /** For the DJ to talk about: when this session began, how many songs it has played, and how things stood when it began */
+  private readonly began = Date.now();
+  private songs = 0;
+  private readonly before = { sessions: sessionCount(), sinceLast: lastSessionAt() ? Date.now() - lastSessionAt() : undefined };
+  private here(next?: Item): Here {
+    const place = next ? { index: next.segment.tracks.indexOf(next.track), of: next.segment.tracks.length } : undefined;
+    return { ...this.before, minutes: (Date.now() - this.began) / 60e3, songs: this.songs, place: place && place.index >= 0 ? place : undefined };
+  }
   private greeted = false;
   private stopped = false;
   private lastTid?: string;
@@ -282,7 +297,7 @@ class Session {
     let said: { text: string; clip: Clip } | null = null;
     if (talkative) {
       const m: Moment = { type: "open", segment, firstEver: sessionCount() === 0, sameDay: Date.now() - lastSessionAt() < 8 * 3600e3 };
-      const text = lineOf(m, this.link);
+      const text = lineOf(m, this.link, this.before);
       // Only worth waiting for when it's quick (a cloud voice); otherwise a stock hello
       const clip = voice.cloud ? await Promise.race([speak(text, true), new Promise<null>((r) => setTimeout(() => r(null), 6000))]) : null;
       said = clip ? { text, clip } : await stockLine("hello");
@@ -438,8 +453,8 @@ class Session {
         if (talk) item.talk = talk;
         else if (!this.greeted && settings.commentary !== "off") {
           // The DJ's hello comes with the first set it brings in
-          item.talk = makeTalk({ type: "open", segment, firstEver: sessionCount() <= 1, sameDay: false }, this.link, true);
-        } else if (withTalk) item.talk = makeTalk({ type: "segment", segment, prev }, this.link, true);
+          item.talk = makeTalk({ type: "open", segment, firstEver: sessionCount() <= 1, sameDay: false }, this.link, true, this.before);
+        } else if (withTalk) item.talk = makeTalk({ type: "segment", segment, prev }, this.link, true, this.here());
       }
       this.items.push(item);
       this.known.set(track.id, item);
@@ -649,7 +664,7 @@ class Session {
       // Introducing every song: the line for the next one is written once it's certain what it follows
       // (the first song of a set has the set's introduction, which names it; a mashup needs no words)
       if (!this.piecing && !this.follow && everySong() && next && next.segment.key !== "mashup" && !(next.first && next.talk && !next.talk.after) && next.talk?.after !== cur.item.track.id) {
-        const talk = makeTalk({ type: "track", track: next.track, prev: cur.item.track, facts: trackFacts(next.track, cur.item.track) }, this.link, false);
+        const talk = makeTalk({ type: "track", track: next.track, prev: cur.item.track, facts: trackFacts(next.track, cur.item.track), prevFacts: trackFacts(cur.item.track) }, this.link, false, this.here(next));
         talk.after = cur.item.track.id;
         next.talk = talk;
         if (this.prep?.forId === next.track.id) this.prep.voice = !this.immediate;
@@ -839,6 +854,7 @@ class Session {
     if (i >= 0) this.discard(this.items.splice(0, i + 1).filter((x) => x !== p.item));
     this.prep = undefined;
     markPlayed(p.item.track.id);
+    this.songs++;
     if (previous) previous.item.ready = undefined;
     setStatus({ phase: "playing", segment: p.item.segment.title, busy: undefined });
     log(`Now playing: ${p.item.track.artists[0]?.name} - ${p.item.track.title} [${p.item.segment.title}]`);

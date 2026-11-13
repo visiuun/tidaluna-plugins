@@ -13,7 +13,7 @@ import { trackVector } from "../../TrueTaste/src/vectors";
 import { settings } from "./config";
 import { log, warn } from "./log";
 import { readDoc, writeDoc } from "./store.native";
-import { speakable, type TrackFacts } from "./talk/script";
+import { speakable, type Taste, type TrackFacts } from "./talk/script";
 
 export type { Track };
 export type Kind = "more" | "onRepeat" | "recentLikes" | "throwback" | "taste" | "discovery" | "artist" | "forgotten" | "mood" | "dailyMix" | "request";
@@ -120,20 +120,64 @@ export const ensureTracks = async (ids: string[]) => {
 export const trackInfo = (id: string): Track | undefined => tracks[id];
 
 // How often each track was played and when last, from the listens that were counted (not skips)
-let listens: { of: number; by: Map<string, { n: number; last: number }> } | undefined;
+type Listens = { n: number; last: number; /** times started, and of those heard to the end */ starts: number; whole: number; first: number; /** the first was from Your Daily Discovery */ daily: boolean };
+let listens: { of: number; by: Map<string, Listens> } | undefined;
 const listensOf = (id: string) => {
   if (!listens || listens.of !== state.events.length) {
-    const by = new Map<string, { n: number; last: number }>();
+    const by = new Map<string, Listens>();
     for (const e of state.events) {
-      if (e.kind === "skip") continue;
-      const l = by.get(e.id) ?? { n: 0, last: 0 };
-      l.n++;
-      if (e.t > l.last) l.last = e.t;
+      const l = by.get(e.id) ?? { n: 0, last: 0, starts: 0, whole: 0, first: Infinity, daily: false };
+      l.starts++;
+      if (e.kind === "complete") l.whole++;
+      if (e.t < l.first) {
+        l.first = e.t;
+        l.daily = !!e.dd;
+      }
+      if (e.kind !== "skip") {
+        l.n++;
+        if (e.t > l.last) l.last = e.t;
+      }
       by.set(e.id, l);
     }
     listens = { of: state.events.length, by };
   }
   return listens.by.get(id);
+};
+/** Which of your tastes each track belongs to, by name */
+let tasteOf: { of: Cluster[]; by: Map<string, string> } | undefined;
+const tasteLabel = (id: string) => {
+  if (!tasteOf || tasteOf.of !== clusters) {
+    const by = new Map<string, string>();
+    for (const c of clusters) if (c.label) for (const m of c.members) by.set(m.id, c.label);
+    tasteOf = { of: clusters, by };
+  }
+  return tasteOf.by.get(id);
+};
+
+/**
+ * What you like, in a few words, for the DJ to talk about: your tastes by how much of your music they
+ * are. TrueTaste's own reading of them (with which way each is going, and how far your taste has moved)
+ * when that plugin is there with data; otherwise the groups your liked tracks fall into.
+ */
+export const tasteNotes = (): Taste | undefined => {
+  const named = (label: string) => !!label && /^[\p{Script=Latin}\p{N} &'-]{3,24}$/u.test(label);
+  const run = state.lastRun;
+  if (trueTaste && run?.clusters?.length && Date.now() - run.at < 10 * DAY) {
+    // (TrueTaste names a taste by its two nearest sounds, "house / deep house": the first is the one to say)
+    const top = run.clusters
+      .map((c) => ({ label: c.label.split(" / ")[0], share: c.share, trend: c.trend }))
+      .filter((c) => named(c.label))
+      .sort((a, b) => b.share - a.share)
+      .slice(0, 3);
+    if (top.length) return { fromTrueTaste: true, listens: state.events.length, top, drift: run.drift };
+  }
+  const total = clusters.reduce((s, c) => s + c.weight, 0);
+  const top = clusters
+    .filter((c) => named(c.label))
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, 3)
+    .map((c) => ({ label: c.label, share: total ? c.weight / total : 0 }));
+  return top.length ? { fromTrueTaste: trueTaste, listens: state.events.length, top } : undefined;
 };
 
 /**
@@ -166,7 +210,41 @@ export const trackFacts = (t: Track, prev?: Track): TrackFacts => {
   const knowsArtists = Object.keys(library).length > 20;
   const fresh = !!profile && !profile.known.has(t.id);
   const prevYear = Number(prev?.album?.releaseDate?.slice(0, 4));
+  // (which version of the song it is: its title's brackets are not read out, so this is where that is said)
+  const naming = `${t.version ?? ""} ${t.title}`.toLowerCase();
+  const version = /\bremix\b|\brmx\b/.test(naming)
+    ? "remix"
+    : /\blive\b/.test(naming)
+      ? "live"
+      : /acoustic|unplugged/.test(naming)
+        ? "acoustic"
+        : /remaster/.test(naming)
+          ? "remaster"
+          : /extended/.test(naming)
+            ? "extended"
+            : /instrumental/.test(naming)
+              ? "instrumental"
+              : /sped up|speed up/.test(naming)
+                ? "sped up"
+                : /slowed/.test(naming)
+                  ? "slowed"
+                  : undefined;
+  // What TrueTaste knows about it and its artist (only when TrueTaste is there with data)
+  const tt = trueTaste && !!profile;
+  const skipRate = tt && lead ? profile!.artistSkipRate.get(lead) : undefined;
+  const found = tt ? state.recommended?.[t.id]?.at : undefined;
   return {
+    explicit: t.explicit || undefined,
+    version,
+    genre: tasteLabel(t.id),
+    thumbsUp: tt && state.feedback?.[t.id]?.v === 1,
+    foundAt: found && now - found > DAY ? found : undefined,
+    daily: tt && !!heard?.daily && heard.n >= 1,
+    finishes: tt && heard && heard.starts >= 3 ? (heard.whole === heard.starts ? "always" : heard.whole / heard.starts <= 0.34 ? "rarely" : undefined) : undefined,
+    artistSkips: skipRate === undefined ? undefined : skipRate >= 0.6 ? "often" : skipRate <= 0.05 ? "never" : undefined,
+    topArtist: tt && !!lead && (profile!.artistAffinity.get(lead) ?? 0) >= 0.7,
+    favArtist: tt && !!lead && profile!.favArtists.has(lead),
+    usualBpm: profile?.bpm && profile.bpm.std > 0 ? profile.bpm.mean : undefined,
     year,
     date: dated ? [year!, Number(released![2]) - 1, Number(released![3])] : undefined,
     album: album && album.length <= 34 && /\p{Script=Latin}{2}/u.test(album) && album.toLowerCase() !== title.toLowerCase() && !/\b(single|ep)$/i.test(album) ? album : undefined,
@@ -228,9 +306,13 @@ const lightSync = async () => {
 
 let ready: Promise<void> | undefined;
 let loadedAt = 0;
+/** TrueTaste is installed and has been keeping its data up to date: what it has gathered may be spoken of */
+let trueTaste = false;
 /** Loads (or refreshes) everything the DJ knows about your taste */
 export const initBrain = (force = false) => {
-  if (force || (loadedAt && Date.now() - loadedAt > 6 * 3600e3)) ready = undefined;
+  // (read again every hour: what TrueTaste has learned in the meantime, from what you played, skipped
+  // and gave a thumbs up or down, is then what the DJ goes by)
+  if (force || (loadedAt && Date.now() - loadedAt > 3600e3)) ready = undefined;
   return (ready ??= load().catch((err) => {
     ready = undefined;
     throw err;
@@ -245,6 +327,7 @@ const load = async () => {
   for (const [id, t] of Object.entries(ownTracks)) tracks[id] ??= t;
   memory = { ...memory, ...parse(await readDoc("memory"), {}) };
   const fromTrueTaste = !!state.librarySyncAt && Date.now() - state.librarySyncAt < 3 * DAY;
+  trueTaste = fromTrueTaste && state.events.length >= 30;
   if (!fromTrueTaste) await lightSync();
   blocked = await api.blocks().catch(() => blocked);
 
