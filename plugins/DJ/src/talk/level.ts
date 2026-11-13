@@ -55,6 +55,34 @@ const lift = (x: Float32Array, rate: number, hz: number, db: number, q: number) 
   }
 };
 
+/** Lifts everything above `hz` by `db`, as a shelf (in place): what makes a voice brighter */
+export const brighten = (x: Float32Array, rate: number, hz: number, db: number) => {
+  const A = 10 ** (db / 40);
+  const w = (2 * Math.PI * hz) / rate;
+  const cos = Math.cos(w);
+  const alpha = (Math.sin(w) / 2) * Math.SQRT2;
+  const k = 2 * Math.sqrt(A) * alpha;
+  const a0 = A + 1 - (A - 1) * cos + k;
+  const b0 = (A * (A + 1 + (A - 1) * cos + k)) / a0;
+  const b1 = (-2 * A * (A - 1 + (A + 1) * cos)) / a0;
+  const b2 = (A * (A + 1 + (A - 1) * cos - k)) / a0;
+  const a1 = (2 * (A - 1 - (A + 1) * cos)) / a0;
+  const a2 = (A + 1 - (A - 1) * cos - k) / a0;
+  let x1 = 0;
+  let x2 = 0;
+  let y1 = 0;
+  let y2 = 0;
+  for (let i = 0; i < x.length; i++) {
+    const v = x[i];
+    const y = b0 * v + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1;
+    x1 = v;
+    y2 = y1;
+    y1 = y;
+    x[i] = y;
+  }
+};
+
 /** Presses what is above `threshold` towards it by `ratio` (in place): fast to act, slow to let go, so words keep their shape */
 const press = (x: Float32Array, rate: number, threshold: number, ratio: number) => {
   const attack = Math.exp(-1 / (rate * 0.0005));

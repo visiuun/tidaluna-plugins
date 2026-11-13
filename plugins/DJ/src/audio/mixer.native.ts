@@ -107,7 +107,7 @@ const getSession = () => {
 };
 
 // ------------------ THE PAGE ------------------
-type Host = { id: number; view: any; ready: Promise<void>; died: Promise<never>; gone?: string; awake?: ReturnType<typeof setInterval> };
+type Host = { id: number; view: any; ready: Promise<void>; died: Promise<never>; gone?: string; awake?: ReturnType<typeof setInterval>; /** stops watching TIDAL's page (see followPage) */ unfollow?: () => void };
 let host: Host | undefined;
 let hostSeq = 0;
 
@@ -167,11 +167,37 @@ const keepAwake = (contents: any) => {
   } catch {}
 };
 
+// The mixer is driven from TIDAL's page. When that page goes (it reloads, or its process dies, which a
+// page holding a couple of gigabytes does now and then), nothing is left to drive the mixer or to stop
+// it, and TIDAL's own player starts again in the fresh page: two lots of music at once, until the
+// plugin is loaded again and finds the mixer it left behind. So the mixer goes when the page does.
+const followPage = (created: Host) => {
+  try {
+    const page = tidalWindow()?.webContents;
+    if (!page?.on) return;
+    const gone = () => host === created && closeHost();
+    const navigated = (details: any, _url?: string, inPlace?: boolean, mainFrame?: boolean) => {
+      if ((details?.isMainFrame ?? mainFrame) && !(details?.isSameDocument ?? inPlace)) gone();
+    };
+    page.on("render-process-gone", gone);
+    page.on("destroyed", gone);
+    page.on("did-start-navigation", navigated);
+    created.unfollow = () => {
+      try {
+        page.off("render-process-gone", gone);
+        page.off("destroyed", gone);
+        page.off("did-start-navigation", navigated);
+      } catch {}
+    };
+  } catch {}
+};
+
 const closeHost = () => {
   const current = host;
   host = undefined;
   sources.clear();
   clearInterval(current?.awake);
+  current?.unfollow?.();
   try {
     if (current) detach(current.view);
     if (current && !current.view.webContents.isDestroyed()) current.view.webContents.close();
@@ -207,6 +233,14 @@ const openHost = (pageSource: string): Host => {
     markDead(new Error(`The DJ's mixer stopped (${details.reason})`));
     if (host === created) closeHost();
   });
+  // (Closed by something other than this module: just as gone. Left as "still there", the session kept
+  // waiting for a mixer that would never answer, with TIDAL's own player muted: silence)
+  contents.once("destroyed", () => {
+    clearInterval(created.awake);
+    created.gone ??= "closed";
+    markDead(new Error("The DJ's mixer was closed"));
+    if (host === created) closeHost();
+  });
   created.ready = Promise.race([
     (async () => {
       await contents.loadURL(PAGE_URL);
@@ -218,6 +252,7 @@ const openHost = (pageSource: string): Host => {
     died,
   ]);
   created.ready.catch(() => host === created && closeHost());
+  followPage(created);
   return created;
 };
 

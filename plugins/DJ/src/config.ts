@@ -54,12 +54,15 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("DJ
 
 // The DJ's voices. `edge` is who reads it online (one of Edge's read-aloud voices), `kokoro` the local model's voice,
 // `cloud` the one used with a cloud key: the same character each time, as near as each of the three has one.
+// (`edgePitch`: Hz the online voice is raised by; `edgeBright`: decibels its top end is lifted by. Bella's online
+// voice is Edge's brightest grown-up one, raised a touch: 212 Hz, next to the local Bella's 206. Raised by 20 it
+// measured 233 Hz, which was too high.)
 // Each has its own way of talking (see talk/script.ts).
-export type Persona = { id: string; name: string; desc: string; edge: string; kokoro: string; cloud: string; tone: "warm" | "hype" | "dry" | "chill"; speed: number };
+export type Persona = { id: string; name: string; desc: string; edge: string; edgePitch?: number; edgeBright?: number; kokoro: string; cloud: string; tone: "warm" | "hype" | "dry" | "chill"; speed: number };
 export const VOICES: Persona[] = [
   { id: "nova", name: "Nova", desc: "Warm and easygoing", edge: "en-US-AvaMultilingualNeural", kokoro: "af_heart", cloud: "coral", tone: "warm", speed: 1 },
   { id: "miles", name: "Miles", desc: "Laid-back, late-night radio", edge: "en-US-AndrewMultilingualNeural", kokoro: "am_michael", cloud: "ash", tone: "chill", speed: 0.97 },
-  { id: "bella", name: "Bella", desc: "Bright and upbeat", edge: "en-US-EmmaMultilingualNeural", kokoro: "af_bella", cloud: "nova", tone: "hype", speed: 1.04 },
+  { id: "bella", name: "Bella", desc: "Bright and upbeat", edge: "en-US-AriaNeural", edgePitch: 5, edgeBright: 3, kokoro: "af_bella", cloud: "nova", tone: "hype", speed: 1.04 },
   { id: "fen", name: "Fen", desc: "Deep voice, dry humour", edge: "en-US-ChristopherNeural", kokoro: "am_fenrir", cloud: "onyx", tone: "dry", speed: 1 },
   { id: "puck", name: "Puck", desc: "Quick and playful", edge: "en-US-BrianMultilingualNeural", kokoro: "am_puck", cloud: "echo", tone: "hype", speed: 1.05 },
   { id: "emma", name: "Emma", desc: "British, calm", edge: "en-GB-SoniaNeural", kokoro: "bf_emma", cloud: "shimmer", tone: "warm", speed: 1 },

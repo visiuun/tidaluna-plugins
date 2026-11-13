@@ -1332,8 +1332,59 @@ export const GENERIC = {
   request: ["You got it.", "Good call.", "On it.", "Sure thing.", "Coming right up.", "Consider it done."],
   signoff: ["That's it from me. Catch you next time.", "I'll leave it there. See you soon.", "Signing off. Enjoy the rest of your day.", "That's my set. Until next time.", "I'm out. Thanks for listening."],
   hello: ["Hey, it's your DJ. Let's get into it.", "Your DJ here. Let's go.", "It's your DJ. Here we go.", "Your DJ, back on the decks."],
+  // Around a mashup, which takes the better part of a minute to put together: asked for one; still at it; about to start; no luck
+  mashStart: [
+    "Ooh, a mashup. Give me a moment, I'm digging for something that fits this one.",
+    "A mashup? Say less. Let me find this song a partner.",
+    "Mashup time. I need something in the same key and at the same tempo. Hang on.",
+    "Two songs at once, coming up. Let me see what goes with this one.",
+    "Alright, let's cook something up. Looking for a song that sits right on top of this.",
+    "A mashup it is. Keep listening, I'll be right back with a second song.",
+  ],
+  mashWait: [
+    "Still digging. It has to match in key and in tempo, or it's a train wreck.",
+    "Almost there. I'm pulling the vocals out of the record, and that takes a moment.",
+    "Bear with me. Good mashups don't make themselves.",
+    "Nearly got it. I'm lining the two up, beat for beat.",
+    "Hold on, still at it. This is the fiddly part.",
+  ],
+  mashHere: ["Here it comes.", "Here we go. Two songs, one beat.", "And, mashup!", "Okay. Here's the mashup.", "This is it. Turn it up.", "Ready? Here it is."],
+  mashFail: [
+    "No luck this time. Nothing fits this one cleanly enough. Try it on another song.",
+    "Couldn't make that one work, sorry. Try another song.",
+    "That one didn't come together. Ask me again on the next song.",
+  ],
 };
 export type GenericKind = keyof typeof GENERIC;
+
+/**
+ * What the DJ says once it has found the song for a mashup: which one it is, what it is going on top of,
+ * and about how long until it starts. `ours`: the song that is playing; `theirs`: the one found.
+ */
+export const mashupLine = (ours: Track, theirs: Track, seconds: number, tone: Tone): string => {
+  const title = titleOf(theirs);
+  const artist = artistOf(theirs);
+  const mine = titleOf(ours);
+  masks = [title, artist, mine].filter((x) => x.length >= 3).sort((a, b) => b.length - a.length);
+  const who = title && artist ? `${title}, by ${artist}` : title || artist || "another song";
+  const found = one(
+    tone === "hype"
+      ? [`Got one! ${who}.`, `Found it! ${who}.`, `Yes! ${who}. That's the one.`, `Oh, this will work. ${who}.`]
+      : tone === "dry"
+        ? [`Found something. ${who}.`, `Right. ${who}. That should do.`, `${who}. It'll fit, trust me.`, `Got one. ${who}.`]
+        : tone === "chill"
+          ? [`Got one. ${who}.`, `Found something nice. ${who}.`, `Here's the one. ${who}.`, `${who}. That'll sit just right.`]
+          : [`Got one. ${who}.`, `Found it. ${who}.`, `Here's the one. ${who}.`, `I've got just the thing. ${who}.`],
+  );
+  const plan = one(
+    mine
+      ? [`I'm putting it together with ${mine}.`, `It goes right on top of ${mine}.`, `That one and ${mine}, at the same time.`, `Mixing it into ${mine}, voice for voice.`]
+      : ["I'm putting the two together.", "It goes right on top of this one.", "The two of them, at the same time."],
+  );
+  const n = Math.round(seconds / 5) * 5;
+  const when = n >= 15 ? one([`About ${n} seconds.`, `Give me ${n} seconds.`, `It starts in about ${n} seconds.`, `${n} seconds, and we're in.`]) : one(["Any moment now.", "Coming right up.", "Here it comes."]);
+  return join(found, plan, when);
+};
 
 /** The full line for a moment, in the voice's manner */
 export const lineFor = (m: Moment, ctx: Context): string => {

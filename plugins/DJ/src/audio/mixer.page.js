@@ -799,14 +799,15 @@ registerProcessor("dj-limiter", Limiter);
   };
 
   // ------------------ MASHUPS ------------------
-  // A mashup is two songs made into one: for as long as it lasts they trade places, a block of bars at
-  // a time. In one block the playing song's band plays with the other song's singer over it; in the
-  // next it is the other song's band with the playing song's singer; and so on, the bass changing hands
-  // with the band each time. Which way round a block goes is decided as it comes up, by who is singing
-  // there: a voice that sings always goes over the other song's band, two that sing take turns, and
-  // where the one due has nothing to sing the band's own singer is let back in. It ends on the other
+  // A mashup is two songs made into one, for as long as they have room for (see mashMatch): for as long
+  // as it lasts they trade places, a block of eight bars at a time. In one block the playing song's band
+  // plays with the other song's singer over it; in another it is the other song's band with the playing
+  // song's singer, the bass changing hands with the band each time. Which way round a block goes is
+  // decided as it comes up, by who is singing there: a voice that sings always goes over the other
+  // song's band, two that sing take turns of two blocks each, and where nobody sings one band plays on
+  // top of the other, so that both songs are heard from the first bar to the last. It ends on the other
   // song, whole, which is the one that plays on.
-  //   - only one of the two has a singer: that voice moves between its own band and the other's
+  //   - only the playing song has a singer: the other is not taken apart at all, and plays as it is
   //   - nobody sings: the other song plays on top of this one's bass and drums, then the bass changes
   //     hands and this song is the one on top, until it leaves
   //
@@ -816,12 +817,13 @@ registerProcessor("dj-limiter", Limiter);
   // one song's notes fit the other's, bar by bar, that the drums land together, and that both are in
   // tune. That is measured here, on the audio itself.
   //
-  // Taking a voice out takes about half as long as the stretch lasts, and a mashup needs it of two songs,
-  // for as long as the mashup lasts. Done before it starts, that is a minute and more of waiting, by
-  // which time the song is nearly over. So it is done in pieces of a few seconds, and the mashup starts
-  // once the first ones are there: each piece is put in its place, to the sample, as it arrives, the
-  // work staying ahead of the playing (see the feeds, below). A piece that doesn't make it in time is
-  // done without: of the song coming in, that stretch plays whole; of the one playing, its voice stays.
+  // Taking a voice out takes about half as long as the stretch lasts, and a mashup may need it of two
+  // songs, for as long as the mashup lasts: minutes of work, by the end of which the song would be over.
+  // So it is done in pieces of a few seconds, and the mashup starts once the first ones are there: each
+  // piece is put in its place, to the sample, as it arrives, the work staying ahead of the playing (see
+  // the feeds, below). A piece that doesn't make it in time is done without: of the song coming in, that
+  // stretch plays whole; of the one playing, its voice stays. And if the work falls behind for good, the
+  // mashup is ended early, the way it would have ended anyway (see `wrapUp` in the transition).
   const arrangers = []; // the mashups under way whose blocks are still being decided (see the transition)
   let lastArrangement; // the last one, for the log
   const pcm16 = (buffer, from, n) => {
@@ -902,7 +904,7 @@ registerProcessor("dj-limiter", Limiter);
   //     parts: [{ which: "voc" | "inst", to: node }], grid: { base, seg, from, to } (piece i is `seg`
   //     samples from base + i * seg; pieces from..to are wanted), whole?: { buffer, to } (what plays
   //     instead of a piece that isn't there in time), audible: from when it is heard, end: when it is
-  //     over, played, late, missed }
+  //     over, played (the pieces that are in place), late, missed }
   let feedTimer = 0;
   const playPiece = (f, index, piece) => {
     if (f.played.has(index) || index < f.grid.from || index >= f.grid.to) return;
@@ -1001,7 +1003,7 @@ registerProcessor("dj-limiter", Limiter);
     return f;
   };
   /** How the pieces of the mashups under way have been arriving */
-  const feedState = () => ({ arrangement: lastArrangement ? lastArrangement.said.slice() : [], feeds: feeds.map((f) => ({ name: f.name, wanted: f.grid.to - f.grid.from, played: f.played.size, late: f.late, missed: f.missed, spare: f.spare === Infinity ? null : Math.round(f.spare * 10) / 10 })) });
+  const feedState = () => ({ arrangement: lastArrangement ? lastArrangement.said.slice() : [], cut: lastArrangement ? lastArrangement.cut : 0, feeds: feeds.map((f) => ({ name: f.name, wanted: f.grid.to - f.grid.from, played: f.played.size, late: f.late, missed: f.missed, spare: f.spare === Infinity ? null : Math.round(f.spare * 10) / 10 })) });
 
   const profileOf = (id) => {
     let p = profiles.get(id);
@@ -1323,40 +1325,44 @@ registerProcessor("dj-limiter", Limiter);
     const self = [own(barsA, full.ab, full.at), own(barsB, full.bb, full.bt)];
 
     const bodyBar = Math.round((B.body - bar0B) / barB);
+    // A mashup lasts as long as the two songs have room for: from a phrase line of A to where A runs out
+    // of song, with B alongside it from a phrase line of its own and something of B left to play on its
+    // own afterwards. So for every place the two could meet, the length is whatever is left of both
+    // there (in eights of bars, sixteen at the least), and the fit is taken over all of it, both ways
+    // round, since the two trade places: B's notes on A's bass, and A's notes on B's.
+    const LONGEST = 128;
+    const SHORTEST = 16;
+    const TAIL = 45; // seconds of B that are left for it alone
+    const most = Math.min(LONGEST, A.most || LONGEST);
     let best = null;
     const byWay = [];
     for (const way of ways) {
-      // B's voice over A's band for n1 bars, then n2 for the bands to change over. A longer one is worth
-      // more (see the score), up to two minutes of it; the best of them all is the one.
       let top = null;
-      for (const [n1, n2] of [[48, 16], [32, 16], [24, 8], [16, 8], [12, 4], [8, 4]]) {
-        if (A.most && n1 + n2 > A.most) continue;
-        for (let ai = 0; ai < startsA.length; ai++) {
-          const i = startsA[ai];
-          // (A has to last through it, with a bar to spare)
-          if (A.bar0 + (i + n1 + n2 + 1) * barA > A.last) continue;
-          for (let j = 0; j + n1 + n2 < barsB.length; j++) {
-            if ((((j - B.phrase) % 4) + 4) % 4 !== 0) continue;
-            // (B carries on alone afterwards: it should have a good while left to be itself, a minute at
-            // the least, half of which it needs to find its way back to its own tempo)
-            if (bar0B + (j + n1 + n2) * barB + 60 > B.last) break;
-            // (B starts a bar early, unheard, so it needs that bar)
-            if (bar0B + j * barB < barB + 0.1) continue;
-            // (What has to fit is what is heard together: B's notes on A's bass, while B sings over A)
-            const s1 = half(i, j, n1, way.k, true);
-            const s2 = 0;
-            if (s1 === null || !barsB[j + n1 + n2 - 1] || !barsA[i + n1 + n2 - 1]) continue;
-            // The sooner the better (in this song, and in the other, which then has more left to play
-            // afterwards); a longer mashup is worth a good deal (32 bars more make up for 0.06 less
-            // of a fit: a mashup is there to be listened to, and half a minute of it is over before it
-            // has begun); so is coming in where one of the other song's sections starts (every eight
-            // or sixteen bars from where its intro ends)
-            const fit = s1;
-            const fromBody = j - bodyBar;
-            const section = fromBody >= 0 && fromBody % 16 === 0 ? 0.02 : fromBody >= 0 && fromBody % 8 === 0 ? 0.01 : 0;
-            const score = fit - 0.012 * ai - 0.0006 * j + section + 0.002 * (n1 + n2) - 0.03 * Math.abs(way.k) - 1.2 * Math.abs(way.joins) - 0.004 * Math.max(0, Math.abs(way.off) - 5);
-            if (!top || score > top.score) top = { score, fit, s1, s2, i, j, n1, n2, way };
-          }
+      for (let ai = 0; ai < startsA.length; ai++) {
+        const i = startsA[ai];
+        // (A has to last through it, with a bar to spare)
+        const roomA = Math.min(barsA.length - i, Math.floor((A.last - A.bar0) / barA - i - 1 + 1e-6));
+        if (roomA < SHORTEST) continue;
+        for (let j = 0; j < barsB.length; j++) {
+          if ((((j - B.phrase) % 4) + 4) % 4 !== 0) continue;
+          // (B starts a bar early, unheard, so it needs that bar)
+          if (bar0B + j * barB < barB + 0.1) continue;
+          const roomB = Math.min(barsB.length - j, Math.floor((B.last - TAIL - bar0B) / barB - j + 1e-6));
+          if (roomB < SHORTEST) break;
+          const n = Math.floor(Math.min(roomA, roomB, most) / 8) * 8;
+          if (n < SHORTEST) continue;
+          const s1 = half(i, j, n, way.k, true);
+          const s2 = half(i, j, n, way.k, false);
+          if (s1 === null || s2 === null) continue;
+          const fit = (s1 + s2) / 2;
+          // Length comes first (32 bars more make up for 0.1 less of a fit: a mashup is there to be
+          // listened to); then the sooner the better, in this song and in the other; and coming in
+          // where one of the other song's sections starts (every eight or sixteen bars from where
+          // its intro ends) rather than inside its intro, where there is rarely anyone singing yet
+          const fromBody = j - bodyBar;
+          const section = fromBody < 0 ? -0.015 : fromBody % 16 === 0 ? 0.02 : fromBody % 8 === 0 ? 0.01 : 0;
+          const score = fit + 0.003 * n - 0.012 * ai - 0.0006 * j + section - 0.03 * Math.abs(way.k) - 1.2 * Math.abs(way.joins) - 0.004 * Math.max(0, Math.abs(way.off) - 5);
+          if (!top || score > top.score) top = { score, fit, s1, s2, i, j, n, way };
         }
       }
       if (top) {
@@ -1371,7 +1377,7 @@ registerProcessor("dj-limiter", Limiter);
     // What that fit is worth against the other eleven keys B could have been in: a real match stands out
     const others = [];
     for (let k = 1; k < 12; k++) {
-      others.push(half(best.i, best.j, best.n1, best.way.k + k, true));
+      others.push((half(best.i, best.j, best.n, best.way.k + k, true) + half(best.i, best.j, best.n, best.way.k + k, false)) / 2);
     }
     others.sort((x, y) => x - y);
     const median = (others[5] + others[4]) / 2;
@@ -1380,7 +1386,7 @@ registerProcessor("dj-limiter", Limiter);
     // Drums on drums across it
     let rhythm = 0;
     {
-      const n = best.n1 + best.n2;
+      const n = best.n;
       for (let x = 0; x < n; x++) rhythm += 0.5 * stepFit(barsA[best.i + x].kick, barsB[best.j + x].kick) + 0.5 * stepFit(barsA[best.i + x].snap, barsB[best.j + x].snap);
       rhythm /= n;
     }
@@ -1390,11 +1396,13 @@ registerProcessor("dj-limiter", Limiter);
     const aPos = A.bar0 + best.i * barA;
     let bPos = bar0B + best.j * barB;
     let speed = R;
-    const span = (best.n1 + best.n2) * barA;
+    const span = best.n * barA;
     const lags = [];
     try {
       const W = Math.min(14, span / 2);
-      for (const off of [0, (span - W) / 2, span - W]) {
+      // (a long one is measured in five places: over minutes, a hundredth of a percent of tempo is heard)
+      const places = best.n >= 32 ? [0, (span - W) / 4, (span - W) / 2, (3 * (span - W)) / 4, span - W] : [0, (span - W) / 2, span - W];
+      for (const off of places) {
         // (Where the fine measurement finds nothing to go by, the quick one still may)
         const lag = (exact ? drumLag(ta.buffer, aPos + off, tb.buffer, bPos + off * R, R, W) : null) ?? quickLag(pa, aPos + off, pb, bPos + off * R, R, W);
         if (lag !== null) lags.push({ t: off + W / 2, lag });
@@ -1438,8 +1446,9 @@ registerProcessor("dj-limiter", Limiter);
       joins: way.joins === 0 ? 0 : speed / way.pitch - 1,
       speed,
       off: way.off,
-      bars1: best.n1,
-      bars2: best.n2,
+      // (the whole of it, and how much of that is its way out: see the transition)
+      bars1: best.n - (best.n >= 48 ? 16 : 8),
+      bars2: best.n >= 48 ? 16 : 8,
       aPos,
       bPos,
       shift,
@@ -2181,8 +2190,8 @@ registerProcessor("dj-limiter", Limiter);
             g.connect(to);
             return g;
           });
-          addFeed({ name: plan.stemsA, deck: a, frameOf: (s) => zero + s, parts: gains.map((g) => ({ which: "voc", to: g })), grid: { seg: grid.seg, ...grid.a }, audible: T1 - ease, end: until });
-          return gains.map((g) => g.gain);
+          const feed = addFeed({ name: plan.stemsA, deck: a, frameOf: (s) => zero + s, parts: gains.map((g) => ({ which: "voc", to: g })), grid: { seg: grid.seg, ...grid.a }, audible: T1 - ease, end: until });
+          return { feed, levels: gains.map((g) => g.gain) };
         };
         /** The other song as it is (through its tempo-shifted lead-in if it has one), unheard until its fader says so */
         const whole = () => {
@@ -2226,19 +2235,19 @@ registerProcessor("dj-limiter", Limiter);
           stopSources(a, T3);
           return { swap: T1, end: T3, bStart: t0, first: T1, mid: T2 };
         }
-        // A singer in one or both: the two songs trade places, a block of bars at a time. In each block
-        // one song's band plays and the voice over it is the other song's; in the next it is the other
-        // way round. Which way round a block goes is decided just before it, by who is actually singing
-        // there (see `decide`): a voice that sings goes over the other song's band; where both sing
-        // they take turns; where the voice due is silent, the band's own singer comes back, so no block
-        // is left empty. The last block is on the other song's band, and by its end that song is
-        // whole and on its own.
+        // A singer in one or both: the two songs trade places, a block of eight bars at a time. In each
+        // block one song's band plays and the voice over it is the other song's. Which way round a block
+        // goes is decided just before it, by who is actually singing there (see `decide`): a voice that
+        // sings goes over the other song's band; where both sing they take turns, sixteen bars each;
+        // where nobody sings, the other song's band plays on top of this one's, so that there is
+        // always something of both to hear, from the first bar on. The last block is on the other
+        // song's band, and by its end that song is whole and on its own.
         //   way "voice": both songs' voices have been taken out; "carry": only the playing song's (the
         //   other has no singer there, and plays as it is)
         const both = way !== "carry";
         const total = plan.bars1 + plan.bars2;
         const Tend = T1 + total * bar;
-        const per = total >= 24 ? 8 : 4;
+        const per = total >= 16 ? 8 : 4;
         const blocks = Math.max(2, Math.round(total / per));
         const D = 2 * beat;
         const ta = tracks.get(a.trackId);
@@ -2246,10 +2255,28 @@ registerProcessor("dj-limiter", Limiter);
         const SUNG = 0.15;
         const VOICE_OVER_BAND = 0.55;
         const UNDER_A_VOICE = 0.85; // a band with the other song's singer over it sits a little lower
+        const ON_TOP = 0.8; // a band on top of the other song's (without its own bass)
+        // A voice taken out of a record has some of the record's kick and bass left in it. Over its own
+        // band that is where it belongs (voice and band add up to the song); over the other song's it
+        // would be a second, fainter kick under the first, so there the voice is kept to where a voice is
+        const VOICE_FROM = 90;
+        const OPEN = 10;
+        const voiceFilter = (to) => {
+          const f = ctx.createBiquadFilter();
+          f.type = "highpass";
+          f.frequency.value = OPEN;
+          f.Q.value = 0.7;
+          f.connect(to);
+          return f;
+        };
 
         // The playing song is split where it stands: its voice out of the deck (which is then its band)
         // and back in past the fader, where it has a level of its own
-        const [out, back] = ownVoice([a.low, a.post], Tend);
+        const backFilter = voiceFilter(a.post);
+        const {
+          feed: feedA,
+          levels: [out, back],
+        } = ownVoice([a.low, backFilter], Tend);
         out.setValueAtTime(0, T1 - ease);
         out.linearRampToValueAtTime(-1, T1);
         const zeroA = Math.round(a.map[a.map.length - 1].t * sr) - Math.round(a.map[a.map.length - 1].pos * sr);
@@ -2258,16 +2285,19 @@ registerProcessor("dj-limiter", Limiter);
         // fader (both silent until their turn, and started together a bar early); or, with no singer,
         // the song as it is
         let vox;
+        let voxFilter;
+        let feedB;
         let startB = 0;
         if (both) {
           vox = ctx.createGain();
           vox.gain.value = 0;
-          vox.connect(b.post);
+          voxFilter = voiceFilter(b.post);
+          vox.connect(voxFilter);
           // (They arrive piece by piece; a piece that isn't there in time plays as the song itself)
           const L = (grid.b.to - grid.b.from) * grid.seg;
           const tEnd = (first + L) / sr;
           startB = grid.b.base + grid.b.from * grid.seg;
-          addFeed({
+          feedB = addFeed({
             name: plan.stemsB,
             deck: b,
             frameOf: (s) => first + (s - startB),
@@ -2302,9 +2332,10 @@ registerProcessor("dj-limiter", Limiter);
         // (the band that is out has no bass: it gets it when it comes in, in one move, as in a blend)
         b.low.gain.setValueAtTime(BASS_CUT_DB, t0);
 
-        // What is known of a song's voice around a moment: of the seconds of it that have been taken
-        // out so far between two seconds before and six after, how many are sung (the voice is SUNG of
-        // the sound or more), and how loud the voice is where it is
+        // What is known of a song's voice in the block that starts at T: of the seconds of it that have
+        // been taken out so far, from a second before to three quarters of the way through, how many are
+        // sung (the voice is SUNG of the sound or more), and how loud the voice is where it is
+        const reach = per * bar * 0.75;
         const heardOf = (name, frameOf, T) => {
           const set = stemSets.get(name);
           let known = 0;
@@ -2316,7 +2347,7 @@ registerProcessor("dj-limiter", Limiter);
               for (let j = 0; j < p.share.length; j++) {
                 if (p.share[j] >= SUNG) levels.push(p.level[j]);
                 const at = frameOf(p.from + j * sr) / sr;
-                if (at < T - 2 || at > T + 6) continue;
+                if (at < T - 1 || at > T + reach) continue;
                 known++;
                 if (p.share[j] >= SUNG) sung++;
               }
@@ -2329,11 +2360,23 @@ registerProcessor("dj-limiter", Limiter);
         const hintB = plan.sings ? plan.sings.b : undefined;
         /** Whether a song sings around T: by what has been heard of it there, or, of too little, by what was heard of it before the mashup was set */
         const sings = (h, hint) => (h.known >= 3 ? h.sung / h.known >= 0.35 : hint !== false);
-        /** How far a voice is brought up over the other song's band: until it is a little over half as loud as that song at full level, by 12 dB at the most */
-        const liftOf = (level, own, other) => (level > 0 && own && other ? Math.max(1, Math.min(4, (VOICE_OVER_BAND * other.loud * other.gain) / (level * own.gain))) : 1.5);
+        /** How far a voice is brought up over the other song's band: until it is a little over half as loud as that song at full level, by 9 dB at the most */
+        const liftOf = (level, own, other) => (level > 0 && own && other ? Math.max(1, Math.min(2.8, (VOICE_OVER_BAND * other.loud * other.gain) / (level * own.gain))) : 1.5);
+        /**
+         * Up to when (on the clock) a feed's pieces are in place without a gap, from T on. The pieces are
+         * made while the mashup plays, a little faster than they are used (see the session): if that ever
+         * stops being so, this is where it shows.
+         */
+        const coverOf = (f, sampleAt, T) => {
+          const g = f.grid;
+          let i = Math.max(g.from, Math.floor((sampleAt(Math.round(T * sr)) - g.base) / g.seg));
+          while (i < g.to && f.played.has(i)) i++;
+          return i >= g.to ? Infinity : f.frameOf(g.base + i * g.seg) / sr;
+        };
 
-        // Where everything stands (the gains as they were last sent), and the moves from one block to the next
-        const now = { fa: 1, fb: 0, va: 0, vb: 0, band: "a" };
+        // Where everything stands (the gains as they were last sent, and what each voice is kept to),
+        // and the moves from one block to the next
+        const now = { fa: 1, fb: 0, va: 0, vb: 0, ha: OPEN, hb: OPEN, band: "a" };
         const said = [];
         const move = (param, from, to, T, span) => {
           if (Math.abs(from - to) < 1e-4) return;
@@ -2347,7 +2390,11 @@ registerProcessor("dj-limiter", Limiter);
           move(a.fader.gain, now.fa, next.fa, T, span);
           move(b.fader.gain, now.fb, next.fb, T, span);
           move(back, now.va, next.va, T, span);
-          if (vox) move(vox.gain, now.vb, next.vb, T, span);
+          move(backFilter.frequency, now.ha, next.ha, T, span);
+          if (vox) {
+            move(vox.gain, now.vb, next.vb, T, span);
+            move(voxFilter.frequency, now.hb, next.hb, T, span);
+          }
           if (next.band !== now.band) {
             // The bass changes hands in one move, just before the bar line
             const from = Math.max(T - Math.min(0.09, beat * 0.2), ctx.currentTime + 0.02);
@@ -2360,60 +2407,92 @@ registerProcessor("dj-limiter", Limiter);
           }
           Object.assign(now, next);
         };
+        const WHOLE_B = { band: "b", fa: 0, fb: 1, va: 0, vb: 1, ha: OPEN, hb: OPEN };
         let lifted = 1;
+        let held = 0; // for how many blocks the band has been the one it is
+        let over = false;
+        /**
+         * The pieces have stopped arriving in time (something else took the processor): rather than
+         * play on with voices missing, the mashup ends here, the way it would have ended anyway. The
+         * bass changes hands on the bar line at T, and over the two bars after it the other song
+         * becomes whole.
+         */
+        const wrapUp = (T, k) => {
+          over = true;
+          const end = T + 2 * bar;
+          if (now.band !== "b") go(T, { ...now, band: "b" });
+          go(end, WHOLE_B, 2 * bar);
+          said.push(`cut short after ${k * per} of ${total} bars (the voices weren't ready in time)`);
+          arrangement.end = end;
+          arrangement.cut = end;
+          feedA.end = end;
+          try {
+            b.post.gain.cancelScheduledValues(end);
+            b.post.gain.setValueAtTime(0.9, end);
+            b.post.gain.linearRampToValueAtTime(1, end + ROOM_BACK);
+          } catch {}
+          stopSources(a, end + 0.1);
+        };
         /** Block k: which band, and whose voice over it */
         const decide = (k) => {
+          if (over) return;
           const T = T1 + k * per * bar;
           const last = k === blocks - 1;
+          // (a song that had no singer when the mashup was set is not waited for: its pieces are only made when there is time)
+          if (k > 0 && !last && Math.min(hintA === false ? Infinity : coverOf(feedA, (f) => f - zeroA, T), feedB ? coverOf(feedB, (f) => f - first + startB, T) : Infinity) < T + 1.5) return wrapUp(T, k);
           const ha = heardOf(plan.stemsA, (s) => zeroA + s, T);
           const hb = both ? heardOf(plan.stemsB, (s) => first + (s - startB), T) : { known: 0, sung: 0, level: 0 };
           const sa = sings(ha, hintA);
           const sb = both && sings(hb, hintB);
           let band;
           if (last) band = "b";
-          else if (sa && sb) band = k === 0 ? "a" : now.band === "a" ? "b" : "a";
+          // (both sing: the other song's voice first, then turns of two blocks each)
+          else if (sa && sb) band = k === 0 ? "a" : held >= 2 ? (now.band === "a" ? "b" : "a") : now.band;
           else if (sb) band = "a";
-          // (only this song sings: its voice goes over the other's band first, then back to its own, and so on)
-          else if (sa) band = both || k % 2 === 0 ? "b" : "a";
+          else if (sa) band = "b";
           else band = now.band;
-          const next = { band, fa: 0, fb: 0, va: 0, vb: 0 };
+          held = band === now.band ? held + 1 : 1;
+          const next = { band, fa: 0, fb: 0, va: 0, vb: 0, ha: OPEN, hb: OPEN };
           let what;
-          if (band === "a") {
-            if (sb) {
-              // the other song's singer over this song's band
-              const lift = liftOf(hb.level || plan.voiceLevel || 0, tb, ta);
-              lifted = Math.max(lifted, lift);
-              next.vb = lift;
-              next.fa = UNDER_A_VOICE;
-              what = "B's voice over A's band";
-            } else {
-              next.va = 1;
-              next.fa = 1;
-              what = "A as it is";
-            }
-          } else if (sa) {
+          if (band === "a" && sb) {
+            // the other song's singer over this song's band
+            const lift = liftOf(hb.level || plan.voiceLevel || 0, tb, ta);
+            lifted = Math.max(lifted, lift);
+            next.vb = lift;
+            next.hb = VOICE_FROM;
+            next.fa = UNDER_A_VOICE;
+            what = "B's voice over A's band";
+          } else if (band === "b" && sa) {
             // this song's singer over the other song's band
             const lift = liftOf(ha.level, ta, tb);
             lifted = Math.max(lifted, lift);
             next.va = lift;
+            next.ha = VOICE_FROM;
             next.fb = UNDER_A_VOICE;
             what = "A's voice over B's band";
+          } else if (band === "a") {
+            // nobody sings here: this song as it is, and the other one's band on top of it
+            next.fa = 1;
+            next.va = 1;
+            next.fb = ON_TOP;
+            what = "B's band on top of A";
           } else {
-            next.vb = 1;
+            // ...or the other song as it is, with this one's band on top of it (quieter in the last
+            // block, where it is on its way out)
             next.fb = 1;
-            what = "B as it is";
+            next.vb = 1;
+            next.fa = last ? ON_TOP * 0.8 : ON_TOP;
+            what = "A's band on top of B";
           }
           go(T, next);
           said.push(`${per} bars ${what}`);
-          if (last) {
-            // ...and by the end the other song is whole: this song's singer leaves over the last two
-            // bars as its own comes back
-            go(Tend, { band: "b", fa: 0, fb: 1, va: 0, vb: 1 }, 2 * bar);
-          }
+          // ...and by the end the other song is whole: this song leaves as the other's own singer comes
+          // back, over the last two bars (its band, where that is all that is left of it, over the last four)
+          if (last) go(Tend, WHOLE_B, (next.va ? 2 : 4) * bar);
         };
-        decide(0);
         // (the blocks after the first are decided as they come up: see watchFeeds)
-        const arrangement = { k: 1, blocks, at: (k) => T1 + k * per * bar - D - 0.5, decide, said, deck: b, end: Tend };
+        const arrangement = { k: 1, blocks, at: (k) => T1 + k * per * bar - D - 0.5, decide, said, deck: b, end: Tend, cut: 0 };
+        decide(0);
         arrangers.push(arrangement);
         lastArrangement = arrangement;
         if (!feedTimer) feedTimer = setInterval(watchFeeds, 150);
@@ -2421,7 +2500,7 @@ registerProcessor("dj-limiter", Limiter);
         makeRoom(a, b, T1 - ease, 2 * bar, Tend, 0.9);
         stopSources(a, Tend);
         // (for the log: how far the first voice was brought up, and over what)
-        const levels = ta && tb && plan.voiceLevel > 0 && now.vb > 0 ? { voice: plan.voiceLevel * tb.gain * now.vb * 0.9, band: ta.loud * ta.gain * UNDER_A_VOICE * 0.9 } : undefined;
+        const levels = ta && tb && plan.voiceLevel > 0 && now.vb > 0 && now.fa < 1 ? { voice: plan.voiceLevel * tb.gain * now.vb * 0.9, band: ta.loud * ta.gain * UNDER_A_VOICE * 0.9 } : undefined;
         return { swap: T1, end: Tend, bStart: t0, first: T1 - ease, mid: T1 + (total * bar) / 2, lift: lifted, levels, blocks, per };
       }
       if (plan.kind === "fade") {

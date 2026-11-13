@@ -9,7 +9,7 @@
 import type { Clip } from "../audio/mixer";
 import { persona, settings, voiceEngine, type Persona } from "../config";
 import { log, warn } from "../log";
-import { carry } from "./level";
+import { brighten, carry } from "./level";
 import { readVoice, writeVoice } from "../store.native";
 import { GENERIC, type GenericKind } from "./script";
 import { edgeSpeak } from "./edge.native";
@@ -27,7 +27,9 @@ const STYLE: Record<Persona["tone"], string> = {
 type Engine = "cloud" | "edge" | "local";
 const ENGINE_NAME: Record<Engine, string> = { cloud: "cloud", edge: "online", local: "local" };
 const keyFor = (text: string, p: Persona, engine: Engine) =>
-  engine === "cloud" ? `cloud|${p.cloud}|${p.tone}|${text}` : engine === "edge" ? `edge|${p.edge}|${p.speed}|${text}` : `kokoro|${p.kokoro}|${p.speed}|${text}`;
+  engine === "cloud" ? `cloud|${p.cloud}|${p.tone}|${text}` : engine === "edge" ? `edge|${p.edge}${p.edgePitch ? `|${p.edgePitch}Hz` : ""}|${p.speed}|${text}` : `kokoro|${p.kokoro}|${p.speed}|${text}`;
+/** How far a voice's top end is lifted (dB) as this engine reads it */
+const shine = (p: Persona, engine: Engine) => (engine === "edge" ? (p.edgeBright ?? 0) : 0);
 const usingCloud = () => settings.cloudVoiceKey.trim().length > 20;
 /** Who reads the lines, in the order they are asked */
 const engines = (): Engine[] => (usingCloud() ? ["cloud"] : voiceEngine() === "edge" ? ["edge", "local"] : ["local"]);
@@ -63,7 +65,7 @@ const mp3ToPcm = async (base64: string) => {
   return toBase64(bytes);
 };
 
-const fromPcm = (base64: string, rate: number, key: string): Clip => {
+const fromPcm = (base64: string, rate: number, key: string, bright = 0): Clip => {
   const bin = atob(base64);
   const n = bin.length >> 1;
   const samples = new Float32Array(n);
@@ -71,11 +73,11 @@ const fromPcm = (base64: string, rate: number, key: string): Clip => {
     const v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
     samples[i] = (v >= 0x8000 ? v - 0x10000 : v) / 32768;
   }
-  return polish(samples, rate, key);
+  return polish(samples, rate, key, bright);
 };
 
-/** Trims silence, makes the line carry over music at the level every line has (see level.ts) and softens the edges */
-const polish = (x: Float32Array, rate: number, key: string): Clip => {
+/** Trims silence, makes the line carry over music at the level every line has (see level.ts) and softens the edges. `bright`: decibels its top end is lifted by first */
+const polish = (x: Float32Array, rate: number, key: string, bright = 0): Clip => {
   const thresh = 0.012;
   let a = 0;
   while (a < x.length && Math.abs(x[a]) < thresh) a++;
@@ -85,6 +87,7 @@ const polish = (x: Float32Array, rate: number, key: string): Clip => {
   b = Math.min(x.length - 1, b + Math.round(rate * 0.08));
   const n = Math.max(1, b - a + 1);
   const y = x.subarray(a, a + n);
+  if (bright) brighten(y, rate, 4200, bright);
   carry(y, rate);
   const bytes = new Uint8Array(n * 2);
   const edge = Math.min(Math.round(rate * 0.01), n >> 1);
@@ -124,7 +127,7 @@ let lastFailure: string | undefined;
 const read = async (engine: Engine, job: Job): Promise<{ pcm: string; rate: number }> => {
   if (engine === "cloud") return cloudSpeak(settings.cloudVoiceKey.trim(), job.text, job.p.cloud, STYLE[job.p.tone]);
   if (engine === "local") return kokoroSpeak(job.text, job.p.kokoro, job.p.speed);
-  return { pcm: await mp3ToPcm((await edgeSpeak(job.text, job.p.edge, job.p.speed)).mp3), rate: RATE };
+  return { pcm: await mp3ToPcm((await edgeSpeak(job.text, job.p.edge, job.p.speed, job.p.edgePitch ?? 0)).mp3), rate: RATE };
 };
 
 const generate = async (job: Job): Promise<Clip | null> => {
@@ -137,11 +140,11 @@ const generate = async (job: Job): Promise<Clip | null> => {
       // (standing in for another: it may have read this very line before)
       if (i > 0) {
         const stored = await readVoice(key).catch(() => null);
-        if (stored) return fromPcm(stored, RATE, key);
+        if (stored) return fromPcm(stored, RATE, key, shine(job.p, engine));
       }
       const t0 = Date.now();
       const r = await read(engine, job);
-      const buffer = fromPcm(r.pcm, r.rate || RATE, key);
+      const buffer = fromPcm(r.pcm, r.rate || RATE, key, shine(job.p, engine));
       if (buffer.duration < 0.25) throw new Error("the voice returned no audio");
       writeVoice(key, r.pcm).catch(() => {});
       lastFailure = undefined;
@@ -227,7 +230,7 @@ export const speak = (text: string, urgent = true, wanted?: () => boolean): Prom
     const stored = await readVoice(key).catch(() => null);
     if (stored) {
       try {
-        return fromPcm(stored, RATE, key);
+        return fromPcm(stored, RATE, key, shine(p, order[0]));
       } catch {}
     }
     return new Promise<Clip | null>((resolve) => {
@@ -257,7 +260,7 @@ export const speakIfReady = async (text: string): Promise<Clip | null> => {
     const stored = await readVoice(key).catch(() => null);
     if (!stored) continue;
     try {
-      const buffer = fromPcm(stored, RATE, key);
+      const buffer = fromPcm(stored, RATE, key, shine(p, engine));
       memory.set(key, buffer);
       return buffer;
     } catch {}
@@ -277,7 +280,7 @@ export const stockLine = async (kind: GenericKind): Promise<{ text: string; clip
 
 /** Prepares the stock lines for the current voice in the background (a few minutes of light work, once per voice) */
 export const prepareStock = () => {
-  for (const kind of ["switch", "request", "signoff", "hello"] as GenericKind[]) for (const text of GENERIC[kind]) speak(text, false).catch(() => {});
+  for (const kind of ["switch", "request", "signoff", "hello", "mashStart", "mashHere", "mashWait", "mashFail"] as GenericKind[]) for (const text of GENERIC[kind]) speak(text, false).catch(() => {});
 };
 
 /** Who is reading the lines right now: Edge's online voices, the local one standing in for them, the local one by choice, or a cloud voice */

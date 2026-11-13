@@ -236,9 +236,10 @@ const frame = (op: number, payload: Buffer) => {
   return Buffer.concat([head, mask, body]);
 };
 
-const ask = (text: string, voice: string, rate: number) =>
+const ask = (text: string, voice: string, rate: number, pitch = 0) =>
   new Promise<Buffer>((resolve, reject) => {
     const percent = Math.round((rate - 1) * 100);
+    const hz = Math.round(Math.max(-60, Math.min(60, Number(pitch) || 0)));
     const key = randomBytes(16).toString("base64");
     const token = edgeToken(Date.now() / 1000 + ahead);
     const req = request(`https://${HOST}/edge/v1?TrustedClientToken=${CLIENT}&ConnectionId=${id()}&Sec-MS-GEC=${token}&Sec-MS-GEC-Version=2-${EDGE}`, {
@@ -363,7 +364,7 @@ const ask = (text: string, voice: string, rate: number) =>
           Buffer.from(
             `X-RequestId:${id()}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${stamp()}Z\r\nPath:ssml\r\n\r\n` +
               `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'><voice name='${voice}'>` +
-              `<prosody pitch='+0Hz' rate='${percent >= 0 ? "+" : ""}${percent}%' volume='+0%'>${forSpeech(text)}</prosody></voice></speak>`,
+              `<prosody pitch='${hz >= 0 ? "+" : ""}${hz}Hz' rate='${percent >= 0 ? "+" : ""}${percent}%' volume='+0%'>${forSpeech(text)}</prosody></voice></speak>`,
           ),
         ),
       );
@@ -373,10 +374,10 @@ const ask = (text: string, voice: string, rate: number) =>
   });
 
 // ------------------ API (called from the page) ------------------
-/** `text` read by one of Edge's voices at `rate` times its usual pace, as an MP3 file in base64. Throws whenever that can't be had */
-export const edgeSpeak = async (text: string, voice: string, rate: number): Promise<{ mp3: string }> => {
+/** `text` read by one of Edge's voices at `rate` times its usual pace and `pitch` Hz above (or below) its own pitch, as an MP3 file in base64. Throws whenever that can't be had */
+export const edgeSpeak = async (text: string, voice: string, rate: number, pitch = 0): Promise<{ mp3: string }> => {
   try {
-    return { mp3: (await ask(text, voice, rate)).toString("base64") };
+    return { mp3: (await ask(text, voice, rate, pitch)).toString("base64") };
   } catch (err) {
     if (err instanceof Declined) throw err;
     if (err instanceof Refused) {
@@ -390,6 +391,6 @@ export const edgeSpeak = async (text: string, voice: string, rate: number): Prom
       // The connection itself gave out (dropped half way, no answer): that happens now and then, and usually not twice
       await new Promise((r) => setTimeout(r, 600));
     }
-    return { mp3: (await ask(text, voice, rate)).toString("base64") };
+    return { mp3: (await ask(text, voice, rate, pitch)).toString("base64") };
   }
 };

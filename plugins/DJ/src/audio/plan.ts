@@ -30,13 +30,14 @@ export type Plan = {
   fadeOutFrom?: number; // seconds after the start when the outgoing track starts to leave
   // Drops
   move?: Move;
-  // Mashups (see mixer.page.js). What one is depends on who sings (`way`):
-  //   voice: from `pre` seconds after the start the incoming track's voice sings over the outgoing track's
-  //          band for `bars1` bars; over the next `bars2` the incoming track's band takes over
-  //   carry: only the outgoing track sings. The bands change over first (`bars2`), and its voice carries
-  //          on over the incoming track's band for `bars1` bars
-  //   layer: nobody sings. The incoming track plays over the outgoing one's bass for `bars1` bars, then
-  //          the bass changes hands and the outgoing one leaves over `bars2`
+  // Mashups (see mixer.page.js). The two tracks meet `pre` seconds after the start and play together for
+  // `bars1` + `bars2` bars. What has been taken out of them says what one can be (`way`):
+  //   voice: the incoming track's voice (and the outgoing one's, when it sings). The two trade places in
+  //          blocks of eight bars, by who is singing: one's voice over the other's band
+  //   carry: only the outgoing track's voice (the incoming one has no singer): it goes over the incoming
+  //          track's band where it sings, and the two bands play together where it doesn't
+  //   layer: nothing (nobody sings). The incoming track plays over the outgoing one's bass for `bars1`
+  //          bars, then the bass changes hands and the outgoing one leaves over `bars2`
   way?: MashWay;
   /** For a mashup: whether each song was heard singing where they meet, before it was set (a: the playing one, b: the other) */
   sings?: { a?: boolean; b?: boolean };

@@ -246,7 +246,7 @@ export class Mixer {
   }
   /** How the pieces of a mashup under way have been arriving */
   feedState() {
-    return this.call<{ /** what each block of the last mashup was, in the order they were played */ arrangement?: string[]; feeds: { name: string; wanted: number; played: number; late: number; missed: number; /** the least time a piece arrived before it was heard, seconds */ spare: number | null }[] }>("feedState", {});
+    return this.call<{ /** what each block of the last mashup was, in the order they were played */ arrangement?: string[]; /** when the mixer ended the last mashup early, if it had to (on its clock; 0: it didn't) */ cut?: number; feeds: { name: string; wanted: number; played: number; late: number; missed: number; /** the least time a piece arrived before it was heard, seconds */ spare: number | null }[] }>("feedState", {});
   }
   /** How track `b` would best go on top of track `a` (both loaded), and how good a mashup that makes */
   mashMatch(a: string, b: string, A: MashSide, B: MashSide, free: boolean, exact = false) {
@@ -316,10 +316,10 @@ export class Mixer {
   stopVoice(fade = 0.12) {
     return this.call("stopVoice", { fade }).catch(() => {});
   }
-  /** A line over the music, now or at `at`: the music eases down under it, the line starts a moment into that, and the music comes back after it */
-  async aside(clip: Clip, at?: number) {
+  /** A line over the music, now or at `at`: the music eases down under it, the line starts a moment into that, and the music comes back after it. `withJingle`: false for a line that goes without the DJ's jingle before it */
+  async aside(clip: Clip, at?: number, withJingle = true) {
     await this.ensureClip(clip);
-    const jingle = this.jingle();
+    const jingle = withJingle ? this.jingle() : {};
     const dip = await this.call<{ voiceAt: number }>("dipMusic", { seconds: clip.duration + 0.2, at, ...jingle });
     return this.spoke(await this.call<Spoken>("talk", { clip: clip.key, t0: dip.voiceAt, ...jingle }));
   }
