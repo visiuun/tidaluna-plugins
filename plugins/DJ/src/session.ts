@@ -29,7 +29,7 @@ import {
 } from "./brain";
 import { persona, settings } from "./config";
 import { log, notify, warn } from "./log";
-import { GENERIC, lineFor, mashupLine, type Context, type GenericKind, type Here, type Moment } from "./talk/script";
+import { lineFor, mashupLine, stockLines, type Context, type GenericKind, type Here, type Moment } from "./talk/script";
 import { prepareStock, speak, stockLine, voiceState } from "./talk/voice";
 import { TidalLink } from "./tidal";
 
@@ -1074,7 +1074,8 @@ class Session {
       if (typeof line === "string") {
         said = await stockLine(line);
         if (!said && voice.quick) {
-          const text = GENERIC[line][Math.floor(Math.random() * GENERIC[line].length)];
+          const own = stockLines(line, persona().tone);
+          const text = own[Math.floor(Math.random() * own.length)];
           const clip = await within(speak(text, true), 6000);
           if (clip) said = { text, clip };
         }

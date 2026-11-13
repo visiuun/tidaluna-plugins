@@ -11,7 +11,7 @@ import { persona, settings, voiceEngine, type Persona } from "../config";
 import { log, warn } from "../log";
 import { brighten, carry } from "./level";
 import { readVoice, writeVoice } from "../store.native";
-import { GENERIC, type GenericKind } from "./script";
+import { stockLines, type GenericKind } from "./script";
 import { edgeSpeak } from "./edge.native";
 import { cloudSpeak, kokoroSpeak, voiceStatus } from "./voice.native";
 
@@ -193,7 +193,7 @@ const work = async () => {
       }
       const online = job.engines[0] === "edge" && !edgeDown();
       job.resolve(await generate(job));
-      // (the stock lines of a voice are a couple of dozen at once: not all in one breath, of a service that is someone else's)
+      // (the stock lines of a voice are several dozen at once: not all in one breath, of a service that is someone else's)
       if (online && !job.urgent && queue.length) await new Promise((r) => setTimeout(r, 700));
     }
   } finally {
@@ -270,7 +270,7 @@ export const speakIfReady = async (text: string): Promise<Clip | null> => {
 
 /** One of the stock lines of a kind, if any has been prepared for the current voice */
 export const stockLine = async (kind: GenericKind): Promise<{ text: string; clip: Clip } | null> => {
-  const options = [...GENERIC[kind]].sort(() => Math.random() - 0.5);
+  const options = stockLines(kind, persona().tone).sort(() => Math.random() - 0.5);
   for (const text of options) {
     const clip = await speakIfReady(text);
     if (clip) return { text, clip };
@@ -280,7 +280,7 @@ export const stockLine = async (kind: GenericKind): Promise<{ text: string; clip
 
 /** Prepares the stock lines for the current voice in the background (a few minutes of light work, once per voice) */
 export const prepareStock = () => {
-  for (const kind of ["switch", "request", "signoff", "hello", "mashStart", "mashHere", "mashWait", "mashFail"] as GenericKind[]) for (const text of GENERIC[kind]) speak(text, false).catch(() => {});
+  for (const kind of ["switch", "request", "signoff", "hello", "mashStart", "mashHere", "mashWait", "mashFail"] as GenericKind[]) for (const text of stockLines(kind, persona().tone)) speak(text, false).catch(() => {});
 };
 
 /** Who is reading the lines right now: Edge's online voices, the local one standing in for them, the local one by choice, or a cloud voice */
