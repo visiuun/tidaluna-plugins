@@ -1,0 +1,52 @@
+Vis's Luna Plugins (tidaluna-plugins)
+Copyright (C) 2026 visiuun
+https://github.com/visiuun/tidaluna-plugins
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License, version 3, as published by
+the Free Software Foundation.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+The full text of the license is in the LICENSE file. If it is missing, see
+<https://www.gnu.org/licenses/agpl-3.0.html>.
+
+
+Additional terms: author attribution
+------------------------------------
+
+Under section 7(b) of the GNU Affero General Public License, version 3, the
+following author attribution must be preserved.
+
+If you convey this work, or a work based on it (a fork, a modified plugin, a
+plugin that reuses code from this repository), you must:
+
+  1. keep this NOTICE file, unchanged, alongside the LICENSE file;
+  2. keep the credit "visiuun" together with a link to
+     https://github.com/visiuun/tidaluna-plugins in the README (or equivalent
+     documentation) of your work, and in the description or "about" text that
+     your plugin shows to its users;
+  3. say clearly that your version is modified, and not present it as the
+     original or as solely your own work.
+
+You are welcome to add your own name next to the credit. You may not remove
+it or replace it.
+
+
+Origin
+------
+
+The repository layout, build configuration and release workflow derive from
+luna-template by Inrixia (https://github.com/Inrixia/luna-template), which is
+licensed under the GNU Affero General Public License, version 3.
+
+
+Third-party components
+----------------------
+
+Libraries bundled into the built plugins, and models and other data the
+plugins download when they run, remain under their own licenses. This NOTICE
+and the LICENSE file apply to the code in this repository written by its
+author and contributors.

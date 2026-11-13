@@ -105,4 +105,13 @@ corepack prepare pnpm@latest --activate
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+Copyright (C) 2026 visiuun. Licensed under the [GNU Affero General Public License, version 3](LICENSE), with the attribution terms in [NOTICE](NOTICE).
+
+In short:
+
+- **You can** use the plugins for anything, read the code, change it, and share it.
+- **You must** keep the credit: "visiuun" and a link to this repository stay in your README and in your plugin's description, and your version says it is modified.
+- **You must** share alike: if you distribute a changed version, or build on this code, your source has to be public under the same license.
+- **You can't** make it closed source, put it under another license, or pass it off as your own.
+
+The summary is not the license: the [LICENSE](LICENSE) and [NOTICE](NOTICE) files are. Versions released before this change were under the MIT License and stay so. Bundled libraries and downloaded models keep their own licenses.
