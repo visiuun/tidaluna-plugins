@@ -12,7 +12,7 @@ A collection of plugins for **[TidaLuna](https://github.com/Inrixia/TidaLuna)**.
    ```text
    https://github.com/visiuun/tidaluna-plugins/releases/download/latest/store.json
    ```
-4. Press Enter to load **Vis's Luna Plugins**, then click **Install** on the plugins you want (e.g. `@visiuun/dj`, `@visiuun/true-taste`, `@visiuun/3d-cover`, `@visiuun/tidal-genres`, `@visiuun/quick-queue`).
+4. Press Enter to load **Vis's Luna Plugins**, then click **Install** on the plugins you want (e.g. `@visiuun/dj`, `@visiuun/true-taste`, `@visiuun/3d-cover`, `@visiuun/tidal-genres`, `@visiuun/quick-queue`, `@visiuun/optimizer`).
 
 ---
 
@@ -68,6 +68,17 @@ Turns the now playing cover into a 2.5D parallax scene that moves with TIDAL's c
 - Settings: model (Small/Base), depth shift, focal plane, edge anti-smear, break out of frame, AI lighting and its strength, preload next cover, fallback mouse smoothing, invert direction, clear depth cache, clear downloaded model.
 
 ---
+
+### Optimizer (`@visiuun/optimizer`)
+
+Nothing is animated or drawn while nobody can see it. TIDAL keeps its window fully awake in the background, so minimised, or behind a game, TIDAL and every plugin go on drawing every frame of every animation, visualiser and 3D cover. The Optimizer stops that, for TIDAL itself and for every plugin, and starts it again the moment the window shows.
+
+- **Knows when the window is really out of sight:** minimised, hidden, or completely covered by another window (a full-screen game, say). A window on a second monitor that you can see is left alone.
+- **While it is out of sight:** animation frames are held (what was asked to be drawn is drawn once when the window is back), looping animations stand still, videos without sound are paused, and the page says it is hidden, the way a background tab does, so TIDAL and plugins that ask can leave their own work undone. The DJ skips its cover art transitions and 3D Cover doesn't generate covers then.
+- **What it never touches:** the music, timers, and videos with sound. Playback, scrobbling, the DJ's mixing and anything that keeps time carry on.
+- **For plugin authors:** `document.hidden` and the `visibilitychange` event work as they do in a browser while the Optimizer is on; `window.lunaOptimizer` (`{ visible, onChange(cb) }`) and the `optimizer:visibility` window event are there as well.
+- Measured with TIDAL behind another window and some ninety plugins loaded: the page went from about 7.5% of a processor core to 1.3%, and the graphics process from 8.2% to 2.8%.
+- Settings: each of the four measures can be switched off on its own; the page shows how often and for how long things were paused.
 
 ## Local Development
 

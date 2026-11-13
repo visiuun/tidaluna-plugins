@@ -128,10 +128,20 @@ const coverOf = async (item?: MediaItem) => {
 let trackAbort = new AbortController();
 let trackSeq = 0;
 
+// Nothing is generated while TIDAL's window can't be seen (the page says so when it is minimised; with
+// the Optimizer plugin, also when it is behind a game or another window): a depth map for a cover nobody
+// can hover is work for nothing. The playing cover's is made when the window is back.
 const generate = (cover: Cover, signal: AbortSignal, context: string) =>
-  buildDepth(cover, signal)
-    .then((depth) => prebuildBackground(cover, depth, signal))
-    .catch((err) => isAbort(err) || trace.err.withContext(context)(err));
+  document.hidden
+    ? Promise.resolve()
+    : buildDepth(cover, signal)
+        .then((depth) => prebuildBackground(cover, depth, signal))
+        .catch((err) => isAbort(err) || trace.err.withContext(context)(err));
+const onSeenAgain = () => {
+  if (!document.hidden && playingCover) generate(playingCover, trackAbort.signal, "back on screen");
+};
+document.addEventListener("visibilitychange", onSeenAgain);
+unloads.add(() => document.removeEventListener("visibilitychange", onSeenAgain));
 
 // The background layer takes a few ms of main-thread work: do it while idle so hovering only uploads it
 const prebuildBackground = (cover: Cover, depth: DepthMap, signal: AbortSignal) =>

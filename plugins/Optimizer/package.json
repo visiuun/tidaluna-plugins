@@ -1,0 +1,12 @@
+{
+  "name": "@visiuun/optimizer",
+  "version": "1.0.0",
+  "description": "Optimizer: stops TIDAL and every plugin from animating and rendering while the window can't be seen (minimised, or behind a game or another window), and starts them again the moment it can",
+  "author": {
+    "name": "visiuun",
+    "url": "https://github.com/visiuun/tidaluna-plugins",
+    "avatarUrl": "http://hanabot.xyz/lookup?api=avatar&id=636585243846901802&size=512"
+  },
+  "main": "src/index.ts",
+  "type": "module"
+}

@@ -636,6 +636,10 @@ const styleFor = (tr: CoverTransition) => {
 
 const begin = async (tr: CoverTransition) => {
   const mine = ++seq;
+  // Nobody is looking while TIDAL's window can't be seen (the page says so when it is minimised; with
+  // the Optimizer plugin, also when it is behind a game or another window): no covers are fetched and
+  // nothing is drawn then
+  if (document.hidden) return;
   try {
     const bigShown = findTargets().some((f) => f.big);
     const res = bigShown ? 1280 : 320;
@@ -685,7 +689,11 @@ export const mountCoverFx = (unloads: Set<LunaUnload>) => {
     if (settings.coverFx === false) return;
     void begin(tr);
   });
+  // (one that is under way when the window goes out of sight is let go of)
+  const onHidden = () => document.hidden && abort();
+  document.addEventListener("visibilitychange", onHidden);
   unloads.add(() => {
+    document.removeEventListener("visibilitychange", onHidden);
     off();
     seq++;
     finish();
