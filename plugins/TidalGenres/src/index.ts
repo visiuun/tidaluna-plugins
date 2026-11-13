@@ -1,5 +1,6 @@
 import { LunaUnload, Tracer } from "@luna/core";
 import { settings } from "./Settings";
+import { cachedGenres, flushCaches, getGenres, type GenreRequest } from "./genres";
 
 export { Settings } from "./Settings";
 
@@ -229,54 +230,8 @@ unloads.add(() => {
   genreContainer.remove();
 });
 
-// 3. Persistent Cache & Rate-Limited Genre Fetching
-const genreCache = new Map<string, string[]>();
-const pendingRequests = new Map<string, Promise<string[]>>();
-const CACHE_STORAGE_KEY = "tidal_genres_cache_v1";
-
-function loadPersistentCache() {
-  try {
-    const raw = localStorage.getItem(CACHE_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      for (const [k, v] of Object.entries(parsed)) {
-        if (Array.isArray(v)) {
-          genreCache.set(k, v);
-        }
-      }
-    }
-  } catch {}
-}
-loadPersistentCache();
-
-function saveToPersistentCache(key: string, genres: string[]) {
-  try {
-    const raw = localStorage.getItem(CACHE_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    parsed[key] = genres;
-    const keys = Object.keys(parsed);
-    if (keys.length > 1500) {
-      delete parsed[keys[0]];
-    }
-    localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(parsed));
-  } catch {}
-}
-
-interface QueueTask {
-  artist: string;
-  track: string;
-  key: string;
-  badge?: HTMLElement | null;
-  isPlayer?: boolean;
-  resolve: (res: string[]) => void;
-  reject: (err: any) => void;
-}
-
-const fetchQueue: QueueTask[] = [];
-let isQueueRunning = false;
-
-let itunesCooldownUntil = 0;
-let lastFmCooldownUntil = 0;
+// 3. Genre lookups (TIDAL's own genres + the artists' Last.fm genre tags, see genres.ts)
+unloads.add(flushCaches);
 
 function isElementVisible(el: HTMLElement | null): boolean {
   if (!el || !el.isConnected) return false;
@@ -285,140 +240,12 @@ function isElementVisible(el: HTMLElement | null): boolean {
   return rect.top < windowHeight + 150 && rect.bottom > -150;
 }
 
-async function executeNetworkFetch(artist: string, track: string): Promise<string[]> {
-  let genres: string[] = [];
-  const artistParts = artist.toLowerCase().split(/,|&|feat\.|ft\./g).map((s) => s.trim());
+const splitArtists = (artist: string) =>
+  artist
+    .split(/,|&|feat\.|ft\./gi)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-  // 1. Try Last.fm
-  if (Date.now() >= lastFmCooldownUntil) {
-    try {
-      const lfmUrl = `https://ws.audioscrobbler.com/2.0/?method=track.gettoptags&artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}&api_key=b25b959554ed76058ac220b7b2e0a026&format=json`;
-      const res = await fetch(lfmUrl);
-      if (res.status === 429) {
-        lastFmCooldownUntil = Date.now() + 30000;
-      } else if (res.ok) {
-        const data = await res.json();
-        if (data?.toptags?.tag && Array.isArray(data.toptags.tag)) {
-          genres = data.toptags.tag
-            .map((t: { name: string }) => t.name)
-            .filter((name: string) => {
-              const lower = name.toLowerCase();
-              return (
-                !/^\d{4}$/.test(lower) &&
-                !/seen live|favorites|favourite|tracks i own|loved/i.test(lower) &&
-                !artistParts.some((part) => part.length > 2 && lower.includes(part))
-              );
-            })
-            .slice(0, 3);
-        }
-      }
-    } catch (e) {}
-  }
-
-  // 2. Fallback to iTunes only if Last.fm found nothing and iTunes is not in cooldown
-  if (genres.length === 0 && Date.now() >= itunesCooldownUntil) {
-    try {
-      const cleanArtist = artistParts[0] || artist;
-      const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(cleanArtist + " " + track)}&entity=song&limit=1`;
-      const res = await fetch(itunesUrl);
-      if (res.status === 403 || res.status === 429) {
-        itunesCooldownUntil = Date.now() + 60000;
-      } else if (res.ok) {
-        const data = await res.json();
-        if (data?.results?.[0]?.primaryGenreName) {
-          genres.push(data.results[0].primaryGenreName);
-        }
-      }
-    } catch (e) {}
-  }
-
-  return genres.map((g) => g.charAt(0).toUpperCase() + g.slice(1));
-}
-
-async function runQueue() {
-  if (isQueueRunning) return;
-  isQueueRunning = true;
-
-  while (fetchQueue.length > 0) {
-    const task = fetchQueue.shift();
-    if (!task) break;
-
-    // Skip fetching if the row has already scrolled off-screen
-    if (!task.isPlayer && task.badge && !isElementVisible(task.badge)) {
-      pendingRequests.delete(task.key);
-      task.resolve([]);
-      continue;
-    }
-
-    if (genreCache.has(task.key)) {
-      task.resolve(genreCache.get(task.key)!);
-      continue;
-    }
-
-    try {
-      const genres = await executeNetworkFetch(task.artist, task.track);
-      genreCache.set(task.key, genres);
-      saveToPersistentCache(task.key, genres);
-      task.resolve(genres);
-    } catch (e) {
-      task.resolve([]);
-    }
-
-    // Paced interval (850ms) to stay within safe API limits
-    await new Promise((r) => setTimeout(r, 850));
-  }
-
-  isQueueRunning = false;
-}
-
-function queueFetch(
-  artist: string,
-  track: string,
-  key: string,
-  highPriority = false,
-  badge?: HTMLElement | null
-): Promise<string[]> {
-  return new Promise((resolve, reject) => {
-    const task: QueueTask = {
-      artist,
-      track,
-      key,
-      badge,
-      isPlayer: highPriority,
-      resolve,
-      reject,
-    };
-    if (highPriority) {
-      fetchQueue.unshift(task);
-    } else {
-      fetchQueue.push(task);
-    }
-    runQueue();
-  });
-}
-
-async function fetchGenres(
-  artist: string,
-  track: string,
-  highPriority = false,
-  badge?: HTMLElement | null
-): Promise<string[]> {
-  const cacheKey = `${artist} - ${track}`.toLowerCase();
-  if (genreCache.has(cacheKey)) return genreCache.get(cacheKey)!;
-
-  if (pendingRequests.has(cacheKey)) {
-    return pendingRequests.get(cacheKey)!;
-  }
-
-  const promise = queueFetch(artist, track, cacheKey, highPriority, badge).finally(() => {
-    pendingRequests.delete(cacheKey);
-  });
-
-  pendingRequests.set(cacheKey, promise);
-  return promise;
-}
-
-// 4. Dynamic Quality Color Extraction
 function getQualityStyleColors(): { bg: string; border: string; text: string } {
   const badgeContainer = document.querySelector('div[class*="_qualityBadgeContainer_"]');
   const badgeLink = badgeContainer?.querySelector('a[data-test*="quality-badge"]');
@@ -784,16 +611,23 @@ function loadGenreForRow(row: HTMLElement) {
   badge.dataset.trackId = trackId;
   badge.dataset.trackKey = trackKey;
 
-  const cached = genreCache.get(trackKey);
+  const req: GenreRequest = {
+    id: /^\d+$/.test(trackId) ? trackId : undefined,
+    artists: splitArtists(artist),
+    stillWanted: () => !!badge && isElementVisible(badge) && badge.dataset.trackKey === trackKey,
+  };
+  const cached = cachedGenres(req);
   if (cached) {
     badge.dataset.loaded = "true";
     renderTracklistBadge(badge, cached);
     return;
   }
 
-  fetchGenres(artist, track, false, badge).then((genres) => {
+  getGenres(req).then((genres) => {
     if (!badge || !badge.isConnected) return;
     if (badge.dataset.trackKey !== trackKey) return;
+    // Cut short because the row scrolled away: try again when it's back on screen
+    if (!genres.length && !isElementVisible(badge)) return;
     badge.dataset.loaded = "true";
     renderTracklistBadge(badge, genres);
   });
@@ -889,12 +723,20 @@ async function updateForCurrentSong() {
 
   if (!title || !artist) return;
 
-  const currentKey = `${artist} - ${title}`;
+  // The track link in the player bar carries TIDAL's id; the playing product is the fallback
+  const product = window.luna.lib?.redux.store.getState().playbackControls?.mediaProduct;
+  const id =
+    /\/track\/(\d+)/.exec(titleEl?.getAttribute("href") ?? "")?.[1] ??
+    (product?.productType === "track" && product.productId ? String(product.productId) : undefined);
+
+  const currentKey = `${id ?? ""}|${artist} - ${title}`;
   if (currentKey === lastSong) return;
   lastSong = currentKey;
 
   mountBadge();
-  lastGenres = await fetchGenres(artist, title, true);
+  const genres = await getGenres({ id, artists: splitArtists(artist) });
+  if (lastSong !== currentKey) return; // the song changed while this one was looked up
+  lastGenres = genres;
   renderBadges();
 }
 
