@@ -18,7 +18,7 @@
 
   let ctx, music, voice, voiceHp, master, outMeter, voiceMeter;
   let volume = 1;
-  const tracks = new Map(); // id → { buffer, gain }
+  const tracks = new Map(); // id → { buffer, gain, loud, duration } (see TRACKS AT REST: `buffer` brings the audio back if it was put aside)
   const stretches = new Map(); // key → { buffer, x0, speed, holdOut, spliceOut, spliceIn }
   const profiles = new Map(); // track id → its notes and drum hits in detail (see dsp.js), for mashups
   const stemSets = new Map(); // name → { id, pieces: index → { from, n, voc, inst } }: stretches of a track as its voice and the rest (for mashups)
@@ -284,6 +284,110 @@ registerProcessor("dj-limiter", Limiter);
     return Math.sqrt(s / (powers.length - half));
   };
 
+  // ------------------ TRACKS AT REST ------------------
+  // A decoded track is 20 MB a minute: four bytes for every sample, where the file had two. The song that
+  // comes next is decoded as soon as the one before it starts (it is analysed, and the way into it worked
+  // out), and then lies there untouched for minutes. A track nothing has asked for in a while, and that
+  // isn't on a deck, is therefore put aside as the 16-bit numbers it was decoded from, half the size, and
+  // made into samples again the moment anything asks for it (a tenth of a second for a long song).
+  //
+  // Bit for bit: each sample is written as its 16-bit number only if turning that number back gives
+  // exactly the sample that was there (the same sum the browser's decoder does: a negative number over
+  // 32768, a positive one times 1/32767). One sample that doesn't come back the same (24-bit audio, a
+  // lossy file, anything that was worked on) and the track stays as it is, for good. What plays is what
+  // would have played.
+  const REST_AFTER = 20000;
+  const POSITIVE = Math.fround(1 / 32767);
+  const moment = () => new Promise((r) => setTimeout(r, 0));
+  const track = (id, buffer, gain) => ({
+    id,
+    gain,
+    loud: loudness(buffer),
+    duration: buffer.duration,
+    /** When it was last asked for */
+    used: performance.now(),
+    audio: buffer,
+    /** Put aside: { channels: Int16Array[], rate } */
+    rest: null,
+    /** Not 16-bit audio: never put aside */
+    asIs: false,
+    packing: false,
+    get buffer() {
+      this.used = performance.now();
+      if (!this.audio && this.rest) {
+        const { channels, rate } = this.rest;
+        const n = channels[0].length;
+        const buffer = ctx.createBuffer(channels.length, n, rate);
+        for (let c = 0; c < channels.length; c++) {
+          const from = channels[c];
+          const to = buffer.getChannelData(c);
+          for (let i = 0; i < n; i++) {
+            const v = from[i];
+            to[i] = v < 0 ? v / 32768 : v * POSITIVE;
+          }
+        }
+        this.audio = buffer;
+        this.rest = null;
+      }
+      return this.audio;
+    },
+  });
+  /** Nothing is using this track's audio, and nothing has asked for it in a while */
+  const atRest = (t) => {
+    if (performance.now() - t.used < REST_AFTER || feeds.length || arrangers.length) return false;
+    for (const d of decks.values()) if (d.trackId === t.id) return false;
+    for (const set of stemSets.values()) if (set.id === t.id) return false;
+    return true;
+  };
+  /** Puts a track's audio aside as 16-bit numbers, a little at a time so that nothing else here waits for it */
+  const putAside = async (t) => {
+    const buffer = t.audio;
+    if (!buffer || t.asIs || t.packing || !atRest(t)) return;
+    t.packing = true;
+    try {
+      const n = buffer.length;
+      const channels = [];
+      for (let c = 0; c < buffer.numberOfChannels; c++) {
+        const from = buffer.getChannelData(c);
+        const to = new Int16Array(n);
+        for (let i = 0; i < n; ) {
+          const end = Math.min(n, i + 1000000);
+          for (; i < end; i++) {
+            const x = from[i];
+            const v = x < 0 ? Math.round(x * 32768) : Math.round(x * 32767);
+            // (the 16-bit number has to give back exactly this sample, or the track isn't touched)
+            if (!(v >= -32768 && v <= 32767) || Math.fround(v < 0 ? v / 32768 : v * POSITIVE) !== x) {
+              t.asIs = true;
+              return;
+            }
+            to[i] = v;
+          }
+          await moment();
+          // (asked for meanwhile: it stays as it is)
+          if (t.audio !== buffer || tracks.get(t.id) !== t || !atRest(t)) return;
+        }
+        channels.push(to);
+      }
+      t.rest = { channels, rate: buffer.sampleRate };
+      t.audio = null;
+    } finally {
+      t.packing = false;
+    }
+  };
+  let resting = 0;
+  const restTracks = () => {
+    for (const t of tracks.values()) if (t.audio && !t.asIs && !t.packing && atRest(t)) void putAside(t).catch(() => {});
+  };
+  /** Before an operation runs: the tracks it names have their audio back, so that nothing it then times waits for that */
+  const wake = (method, args) => {
+    if (method === "unload" || !args) return;
+    for (const v of Object.values(args)) {
+      if (typeof v !== "string") continue;
+      const t = tracks.get(v);
+      if (t) void t.buffer;
+    }
+  };
+
   /** Fetches (through the host, which decrypts), decodes and, unless already known, analyses a track */
   const load = async ({ id, url, gain, hintBpm, analyse }) => {
     const t0 = performance.now();
@@ -301,7 +405,8 @@ registerProcessor("dj-limiter", Limiter);
     const t2 = performance.now();
     let analysis;
     if (analyse) analysis = await analyseBuffer(buffer, hintBpm);
-    tracks.set(id, { buffer, gain, loud: loudness(buffer) });
+    tracks.set(id, track(id, buffer, gain));
+    if (!resting) resting = setInterval(restTracks, 5000);
     return { duration: buffer.duration, analysis, ms: { fetch: Math.round(t1 - t0), decode: Math.round(t2 - t1), analyse: Math.round(performance.now() - t2) } };
   };
 
@@ -382,12 +487,27 @@ registerProcessor("dj-limiter", Limiter);
     return deck;
   };
   const getDeck = (id, trackId) => decks.get(id) || makeDeck(id, trackId);
+  // A deck's sources were kept until the deck itself was closed, at the end of its song, and each holds
+  // the audio it played: the tempo-shifted lead-in (some 15 MB), and after a mashup every separated piece
+  // of the song that carries on (voice and band, for as long as the mashup lasted). One that has finished
+  // is let go of at once.
+  const keep = (deck, s) => {
+    deck.sources.push(s);
+    s.onended = () => {
+      const i = deck.sources.indexOf(s);
+      if (i >= 0) deck.sources.splice(i, 1);
+      try {
+        s.disconnect();
+        s.buffer = null;
+      } catch {}
+    };
+    return s;
+  };
   const source = (deck, buffer) => {
     const s = ctx.createBufferSource();
     s.buffer = buffer;
     s.connect(deck.low);
-    deck.sources.push(s);
-    return s;
+    return keep(deck, s);
   };
   // Every start lands exactly on a sample, in time and in the track. A source started between two
   // samples is not just late by a fraction of one: the browser then works every sample of it out from
@@ -832,7 +952,10 @@ registerProcessor("dj-limiter", Limiter);
   // stretch plays whole; of the one playing, its voice stays. And if the work falls behind for good, the
   // mashup is ended early, the way it would have ended anyway (see `wrapUp` in the transition).
   const arrangers = []; // the mashups under way whose blocks are still being decided (see the transition)
-  let lastArrangement; // the last one, for the log
+  // What the last one did, for the log: { said, cut }. Only that: the arrangement itself reaches, through
+  // what it decides with, the whole of both songs and the tempo-shifted copy, and kept here it kept them
+  // all after the mashup was over and the songs were unloaded (150 MB and more, until the next mashup).
+  let lastArrangement;
   const pcm16 = (buffer, from, n) => {
     const l = buffer.getChannelData(0);
     const r = buffer.getChannelData(buffer.numberOfChannels > 1 ? 1 : 0);
@@ -937,7 +1060,7 @@ registerProcessor("dj-limiter", Limiter);
       const s = ctx.createBufferSource();
       s.buffer = buffer;
       s.connect(part.to);
-      f.deck.sources.push(s);
+      keep(f.deck, s);
       s.start(frame / sr, offset / sr);
       if (f.deck.stopAt < Infinity) {
         try {
@@ -986,7 +1109,7 @@ registerProcessor("dj-limiter", Limiter);
           const s = ctx.createBufferSource();
           s.buffer = f.whole.buffer;
           s.connect(f.whole.to);
-          f.deck.sources.push(s);
+          keep(f.deck, s);
           s.start(frame / sr, (from + offset) / sr, (f.grid.seg - offset) / sr);
           if (f.deck.stopAt < Infinity) {
             try {
@@ -2446,7 +2569,7 @@ registerProcessor("dj-limiter", Limiter);
           go(end, WHOLE_B, 2 * bar);
           said.push(`cut short after ${k * per} of ${total} bars (the voices weren't ready in time)`);
           arrangement.end = end;
-          arrangement.cut = end;
+          arrangement.told.cut = end;
           feedA.end = end;
           try {
             b.post.gain.cancelScheduledValues(end);
@@ -2513,10 +2636,10 @@ registerProcessor("dj-limiter", Limiter);
           if (last) go(Tend, WHOLE_B, (next.va ? 2 : 4) * bar);
         };
         // (the blocks after the first are decided as they come up: see watchFeeds)
-        const arrangement = { k: 1, blocks, at: (k) => T1 + k * per * bar - D - 0.5, decide, said, deck: b, other: a, end: Tend, cut: 0 };
+        const arrangement = { k: 1, blocks, at: (k) => T1 + k * per * bar - D - 0.5, decide, said, deck: b, other: a, end: Tend, told: { said, cut: 0 } };
         decide(0);
         arrangers.push(arrangement);
-        lastArrangement = arrangement;
+        lastArrangement = arrangement.told;
         if (!feedTimer) feedTimer = setInterval(watchFeeds, 150);
 
         makeRoom(a, b, T1 - ease, 2 * bar, Tend, 0.9);
@@ -2689,13 +2812,15 @@ registerProcessor("dj-limiter", Limiter);
       // (how loud it is set, 0-1: the page that comes back doesn't know your volume yet, this still does)
       volume,
       decks: [...decks.values()].map((d) => ({ ref: d.id, track: d.trackId })),
-      tracks: [...tracks.entries()].map(([id, t]) => ({ id, duration: t.buffer.duration })),
+      // (resting: its audio is put aside at half the size, see TRACKS AT REST)
+      tracks: [...tracks.entries()].map(([id, t]) => ({ id, duration: t.duration, resting: !t.audio })),
     }),
   };
 
   window.__mixer = {
     call: async (method, args) => {
       try {
+        wake(method, args);
         const result = await ops[method](args || {});
         const deckInfo = {};
         for (const d of decks.values()) deckInfo[d.id] = { map: d.map, stopAt: d.stopAt === Infinity ? null : d.stopAt, gain: d.fader.gain.value };
