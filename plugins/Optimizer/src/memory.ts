@@ -11,8 +11,9 @@
 //   - past the limit, if cleaning didn't help, it is reloaded: at once if it is about to die or nobody
 //     is looking, otherwise when you have left it alone for two minutes. What was playing comes back
 //     (see recover.ts), and with the DJ plugin the music doesn't stop at all.
-// The same cleaning is done when TIDAL has been out of sight for a minute, where nobody sees the pause.
-import { cleanDisk, cleanMemory, diskUsage, heapUsage, musicCarries, reloadPage, sample } from "./guard.native";
+// The same cleaning is done when TIDAL has been out of sight for a minute, where nobody sees the pause,
+// and then the memory TIDAL holds but isn't using is handed back to Windows (see handBack).
+import { canHandBack, cleanDisk, cleanMemory, diskUsage, handBack, heapUsage, musicCarries, reloadPage, sample } from "./guard.native";
 import { note, settings, status, statusChanged } from "./state";
 
 const CHECK_MS = 15000;
@@ -22,6 +23,8 @@ const CLEAN_GAP = 5 * 60000;
 const RECLEAN_GAP = 45000;
 const HIDDEN_AFTER = 60000;
 const HIDDEN_GAP = 10 * 60000;
+/** Out of sight, memory is handed back again this often: what TIDAL has taken back meanwhile and left lying */
+const TRIM_EVERY = 10 * 60000;
 /** Not twice within this: a page that is full again straight after a reload is not helped by another */
 const RELOAD_GAP = 10 * 60000;
 const IDLE_MS = 2 * 60000;
@@ -57,7 +60,7 @@ export const clean = async (why: string) => {
 export const check = async () => {
   if (unloaded) return;
   try {
-    const s = await sample();
+    const s = await sample(navigator.hardwareConcurrency || 1);
     status.sample = s;
     status.guardProblem = "";
     status.heapLimit = heapCeiling();
@@ -123,15 +126,38 @@ export const check = async () => {
   }
 };
 
+// ------------------ BACK TO WINDOWS ------------------
+/** Memory can be handed back here (Windows, and Luna allows it). Not known until asked */
+let canTrim: boolean | undefined;
+/** Hands the memory TIDAL isn't using back to Windows now. `why`: for the record */
+export const trim = async (why: string) => {
+  const r = await handBack();
+  status.trimmed = { at: Date.now(), before: r.before, after: r.after };
+  log(`Memory handed back to Windows (${why}): ${r.before} MB in memory before, ${r.after} MB after, ${r.processes} processes asked`);
+  statusChanged();
+  return r;
+};
+
 // ------------------ OUT OF SIGHT ------------------
 let hiddenTimer: ReturnType<typeof setTimeout> | undefined;
+let trimTimer: ReturnType<typeof setInterval> | undefined;
+let unseen = false;
 /** Told when TIDAL's window goes out of sight and comes back (see index.ts) */
 export const seenChanged = (hidden: boolean) => {
+  unseen = hidden;
   clearTimeout(hiddenTimer);
+  clearInterval(trimTimer);
   if (!hidden || unloaded) return;
-  hiddenTimer = setTimeout(() => {
-    if (unloaded || !settings.cleanHidden || Date.now() - lastClean < HIDDEN_GAP) return;
-    clean("TIDAL was out of sight").catch(() => {});
+  const handOver = () => {
+    if (unloaded || !unseen || !settings.trim || !canTrim) return;
+    trim("TIDAL was out of sight").catch((err) => log(`Memory couldn't be handed back: ${String((err as Error)?.message ?? err)}`));
+  };
+  hiddenTimer = setTimeout(async () => {
+    if (unloaded) return;
+    // (first what the page no longer needs at all, then what it isn't using)
+    if (settings.cleanHidden && Date.now() - lastClean >= HIDDEN_GAP) await clean("TIDAL was out of sight").catch(() => {});
+    handOver();
+    trimTimer = setInterval(handOver, TRIM_EVERY);
   }, HIDDEN_AFTER);
 };
 
@@ -165,6 +191,8 @@ export const startGuard = (opts: { notify: (msg: string) => void; log: (msg: str
   const touched = () => (lastTouch = Date.now());
   const events = ["pointerdown", "keydown", "wheel"] as const;
   for (const e of events) window.addEventListener(e, touched, { capture: true, passive: true });
+  // (asked now, while you are there: Luna asks once whether this plugin may start a program)
+  if (settings.trim) void askTrim();
   const first = setTimeout(check, 4000);
   const timer = setInterval(check, CHECK_MS);
   const disk = setTimeout(checkDisk, 30000);
@@ -177,5 +205,13 @@ export const startGuard = (opts: { notify: (msg: string) => void; log: (msg: str
     clearTimeout(disk);
     clearInterval(diskTimer);
     clearTimeout(hiddenTimer);
+    clearInterval(trimTimer);
   };
+};
+/** Finds out whether memory can be handed back here (this is where Luna asks its question) */
+export const askTrim = async () => {
+  canTrim = await canHandBack().catch(() => false);
+  status.canTrim = canTrim;
+  statusChanged();
+  return canTrim;
 };

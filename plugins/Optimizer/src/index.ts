@@ -1,7 +1,8 @@
 // Optimizer: keeps TIDAL light, and keeps it going.
 //
 // Besides what is below, which is this file's own business:
-//   - a memory guard that cleans TIDAL's page as it fills up and reloads it before it dies (memory.ts)
+//   - a memory guard that cleans TIDAL's page as it fills up and reloads it before it dies, and memory
+//     handed back to Windows while TIDAL is out of sight (memory.ts)
 //   - what was playing put back on after the page died, froze or was reloaded (recover.ts)
 //   - a measurement of which scripts the page spends its time in (scripts.ts)
 //   - TIDAL's processes, their memory and what is on disk, on the settings page (Settings.tsx)
@@ -13,6 +14,9 @@
 // game, TIDAL and every plugin go on drawing every frame of every animation, visualiser and 3D cover.
 // This plugin finds out when the window can't actually be seen and, for as long as that lasts:
 //
+//   - doesn't render the page at all: the browser skips its contents, and has everything where it was
+//     when the window is back (TIDAL's progress bar alone kept the whole window being redrawn at the
+//     screen's rate)
 //   - holds animation frames: what was asked to be drawn waits, and is drawn once when the window is back
 //   - pauses CSS animations, and endless animations made in script
 //   - pauses decoration that is a video (animated covers and the like: muted, with no sound of its own), and plays it
@@ -22,9 +26,16 @@
 //
 // Timers and the music are left alone: playback, scrobbling and anything that keeps time carry on.
 //
+// And while the window can be seen, nothing is drawn more often than it needs to be: scripts get no
+// more frames a second than the frame limit (60), and animations that run by themselves move in steps
+// (see frames.ts and animations.ts).
+//
 // Other plugins can go by it without depending on it: `document.hidden` and the "visibilitychange" event
 // are the standard way, and `window.lunaOptimizer` ({ visible, onChange(cb) }) is there as well.
 import { LunaUnload, Tracer } from "@luna/core";
+import { installAnimations, tuneAll } from "./animations";
+import { holdFrames, installFrames, measureScreen, releaseFrames, setScreenRate } from "./frames";
+import { screenRate } from "./guard.native";
 import { seenChanged, startGuard } from "./memory";
 import { startRecovery } from "./recover";
 import { installTimers, removeTimers, setSlowing } from "./scripts";
@@ -33,7 +44,7 @@ import { startWatching, stopWatching, visibilityAfter } from "./watch.native";
 
 export { Settings } from "./Settings";
 // (what the settings page shows and does, for whoever wants to look or ask from outside it)
-export { check, clean, checkDisk } from "./memory";
+export { check, clean, checkDisk, trim } from "./memory";
 export { measure } from "./scripts";
 export { settings, status } from "./state";
 export const { trace } = Tracer("[Optimizer]");
@@ -43,46 +54,40 @@ export const unloads = new Set<LunaUnload>();
 const SETTLE_MS = 1500;
 
 // ------------------ ANIMATION FRAMES ------------------
-const realRequest = window.requestAnimationFrame;
-const realCancel = window.cancelAnimationFrame;
-const held = new Map<number, FrameRequestCallback>();
-let heldId = -1;
-let holding = false;
-const request = (cb: FrameRequestCallback): number => {
-  if (!holding) return realRequest.call(window, cb);
-  // (ids below zero: the browser's own are above it)
-  const id = heldId--;
-  held.set(id, cb);
-  status.framesHeld++;
-  return id;
-};
-const cancel = (id: number) => {
-  if (!held.delete(id)) realCancel.call(window, id);
-};
-const release = () => {
-  holding = false;
-  if (!held.size) return;
-  const waiting = [...held.values()];
-  held.clear();
-  realRequest.call(window, (t) => {
-    for (const cb of waiting) {
-      try {
-        cb(t);
-      } catch (err) {
-        // (as the browser would: reported, and the others still run)
-        setTimeout(() => {
-          throw err;
-        });
-      }
-    }
-  });
-};
-window.requestAnimationFrame = request;
-window.cancelAnimationFrame = cancel;
+// Held while out of sight, and no more of them than the frame limit while in sight (see frames.ts);
+// animations that run by themselves are moved in steps (see animations.ts).
+unloads.add(installFrames());
+unloads.add(installAnimations());
+/** The screen's rate, asked of the system: now, and when the window is back (it may be on another screen by then). Measured from the frames where it can't be asked */
+const askScreen = () =>
+  screenRate()
+    .then((hz) => {
+      setScreenRate(hz);
+      if (!hz) measureScreen();
+      tuneAll();
+    })
+    .catch(() => measureScreen());
+askScreen();
+
+// ------------------ NOT DRAWN AT ALL ------------------
+// Holding frames and pausing animations was not the end of it. With all of that on, and TIDAL behind
+// another window, the page was still at 42% of a processor core and the graphics process at 55%: the
+// window was being put together and shown 180 times a second (the screen's rate), for nobody. What kept
+// it going is an animation that is left to run because it keeps time: TIDAL's progress bar. And an
+// animation that is running makes the browser redraw, whether or not anything can be seen.
+//
+// So while the window is out of sight the page's contents are not rendered at all: the browser is told
+// to skip them (content-visibility), which it does without forgetting anything. The layout is still
+// there to be asked about (a script that measures an element gets its answer), scrolling stays where it
+// is, lyrics go on scrolling, animations keep their time and are where they should be when the window
+// is back. Measured over the same seven seconds: the page at 5%, the graphics process at 1%.
+const UNSEEN = "data-optimizer-unseen";
+const unseenStyle = document.createElement("style");
+unseenStyle.textContent = `html[${UNSEEN}] body { content-visibility: hidden !important; }`;
+document.head.appendChild(unseenStyle);
 unloads.add(() => {
-  release();
-  if (window.requestAnimationFrame === request) window.requestAnimationFrame = realRequest;
-  if (window.cancelAnimationFrame === cancel) window.cancelAnimationFrame = realCancel;
+  document.documentElement.removeAttribute(UNSEEN);
+  unseenStyle.remove();
 });
 
 // ------------------ CSS ANIMATIONS ------------------
@@ -204,7 +209,8 @@ const apply = (hide: boolean) => {
     status.pauses++;
     status.pausedSince = Date.now();
     if (settings.pageVisibility) say(true);
-    if (settings.frames) holding = true;
+    if (settings.frames) holdFrames();
+    if (settings.render) document.documentElement.setAttribute(UNSEEN, "");
     if (settings.css) {
       document.documentElement.setAttribute(ATTR, "");
       pauseLoops();
@@ -219,11 +225,15 @@ const apply = (hide: boolean) => {
     status.pausedMs += Date.now() - status.pausedSince;
     status.pausedSince = 0;
     clearInterval(sweep);
+    document.documentElement.removeAttribute(UNSEEN);
     document.documentElement.removeAttribute(ATTR);
     resumeLoops();
     resumeVideos();
     say(false);
-    release();
+    releaseFrames();
+    // (the window may be on another screen by now; and what started while it was away is looked at)
+    if (alive) askScreen();
+    tuneAll();
   }
   for (const cb of listeners) {
     try {

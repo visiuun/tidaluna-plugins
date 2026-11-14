@@ -128,17 +128,27 @@ const coverOf = async (item?: MediaItem) => {
 let trackAbort = new AbortController();
 let trackSeq = 0;
 
-// Nothing is generated while TIDAL's window can't be seen (the page says so when it is minimised; with
-// the Optimizer plugin, also when it is behind a game or another window): a depth map for a cover nobody
-// can hover is work for nothing. The playing cover's is made when the window is back.
-const generate = (cover: Cover, signal: AbortSignal, context: string) =>
-  document.hidden
-    ? Promise.resolve()
-    : buildDepth(cover, signal)
-        .then((depth) => prebuildBackground(cover, depth, signal))
-        .catch((err) => isAbort(err) || trace.err.withContext(context)(err));
+// Nothing is generated for a cover nobody can hover: not while TIDAL's window can't be seen (the page
+// says so when it is minimised; with the Optimizer plugin, also when it is behind a game or another
+// window), and not while the now playing view, the only place the big cover is, isn't open. Making one
+// starts the depth engine, a process of its own with the AI model in it: seconds of processor and some
+// 250 MB each time, which used to be spent on every song whether or not the cover was on the screen.
+// The playing cover's is made when the window is back or the view is opened (see checkPointer).
+const coverOnPage = () => {
+  for (const img of document.querySelectorAll<HTMLImageElement>(PLAYER_COVER)) if (img.isConnected && img.offsetWidth > 0) return true;
+  return false;
+};
+/** The playing cover whose depth map has been asked for (so that it is asked for once) */
+let generatedFor = "";
+const generate = (cover: Cover, signal: AbortSignal, context: string) => {
+  if (document.hidden || !coverOnPage()) return Promise.resolve();
+  if (cover.id === playingCover?.id) generatedFor = cover.id;
+  return buildDepth(cover, signal)
+    .then((depth) => prebuildBackground(cover, depth, signal))
+    .catch((err) => isAbort(err) || trace.err.withContext(context)(err));
+};
 const onSeenAgain = () => {
-  if (!document.hidden && playingCover) generate(playingCover, trackAbort.signal, "back on screen");
+  if (!document.hidden && playingCover && generatedFor !== playingCover.id) generate(playingCover, trackAbort.signal, "back on screen");
 };
 document.addEventListener("visibilitychange", onSeenAgain);
 unloads.add(() => document.removeEventListener("visibilitychange", onSeenAgain));
@@ -483,6 +493,8 @@ const checkPointer = () => {
   const img = getPlayerCover();
   if (active && active.img !== img) teardown();
   if (!img) return;
+  // (the now playing view is open, and the playing cover's depth map was left unmade while it wasn't)
+  if (playingCover && generatedFor !== playingCover.id) generate(playingCover, trackAbort.signal, "cover on screen");
 
   const r = hoverRect(img);
   if (!inside(r, pointer.x, pointer.y)) return leave();

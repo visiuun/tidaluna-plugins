@@ -20,7 +20,13 @@ unloads.add(() => {
   dynamicStyle.remove();
 });
 
+// Written once for each position, not every time the badge is looked at: that is on every change anywhere
+// on the page, and while lyrics scroll that was nine times a second, each one making the browser work out
+// the styles of the whole page again.
+let styledFor = "";
 function updateLayoutOverrides() {
+  if (styledFor === settings.position && dynamicStyle.isConnected) return;
+  styledFor = settings.position;
   const scrollKeyframes = `
     @keyframes tidal-genres-scroll {
       0%, 20% {
@@ -684,8 +690,16 @@ unloads.add(() => {
 });
 
 // 8. Observers & Listeners
+// The page changes many times a second (lyrics, the clock): the badge is put back at once when it has
+// been taken off the page, and otherwise looked at a moment later, once for all the changes together.
+let mountTimer: ReturnType<typeof setTimeout> | undefined;
 const mountObserver = new MutationObserver(() => {
-  mountBadge();
+  if (!genreContainer.isConnected) mountBadge();
+  else
+    mountTimer ??= setTimeout(() => {
+      mountTimer = undefined;
+      mountBadge();
+    }, 500);
   scheduleTracklistUpdate();
 });
 mountObserver.observe(document.body, { childList: true, subtree: true });
@@ -694,6 +708,7 @@ scheduleTracklistUpdate();
 
 unloads.add(() => {
   mountObserver.disconnect();
+  clearTimeout(mountTimer);
 });
 
 // 9. Live Settings Listener

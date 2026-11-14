@@ -1,7 +1,8 @@
 // Runs in the Electron main process: what the Optimizer does from outside TIDAL's page.
 //
 //   - reads how much memory and processor each of TIDAL's processes is using
-//   - has TIDAL's page give back memory it no longer needs, and clears caches on disk
+//   - has TIDAL's page give back memory it no longer needs, hands what TIDAL isn't using back to
+//     Windows, and clears caches on disk
 //   - measures which scripts the page spends its time in
 //   - notices when the page dies, hangs or is reloaded, and remembers what was playing, so that the page
 //     that comes back can carry on from there (a page can't remember that itself: it is gone)
@@ -78,20 +79,40 @@ const shelf = (): Shelf => {
 const djShelf = (): { live?: boolean; carriedAt?: number } => getElectron()?.app?.[Symbol.for("visiuun.dj.shelf")] ?? {};
 
 // ------------------ PROCESSES ------------------
-export type ProcessRow = { pid: number; what: string; memory: number; cpu: number; page?: boolean };
-export type Sample = { rows: ProcessRow[]; page: number; total: number; cpu: number };
+export type ProcessRow = {
+  pid: number;
+  what: string;
+  /** MB that are its own */
+  memory: number;
+  /** MB it has in memory right now (what it holds but isn't touching, Windows may have put aside) */
+  ram: number;
+  /** % of one processor core */
+  cpu: number;
+  page?: boolean;
+};
+export type Sample = { rows: ProcessRow[]; page: number; total: number; ram: number; cpu: number };
 const nameOf = (contents: any): string => {
   const url = String(contents.getURL?.() ?? "");
   if (/desktop\.tidal\.com|listen\.tidal\.com/.test(url)) return "TIDAL's page";
   if (url.startsWith("https://dj-mixer.invalid")) return "DJ: mixer";
   if (url.startsWith("https://dj-stems.invalid")) return "DJ: vocal separator";
+  if (url.startsWith("https://3d-cover-engine.invalid")) return "3D Cover: depth engine";
   if (url.includes("optimizer-sentinel")) return "Optimizer: window watch";
   if (url.startsWith("devtools:")) return "Developer tools";
   const title = String(contents.getTitle?.() ?? "").trim();
   return title ? `Page: ${title.slice(0, 40)}` : "A plugin's page";
 };
-/** Every process of TIDAL's: what it is, the memory that is its own (MB) and how much of one processor core it is using (%) */
-export const sample = async (): Promise<Sample> => {
+// Processor time each process had used at the last look, to tell how much it has used since. (Electron's
+// own figure for "now" is a share of all the processor's cores together: on sixteen cores, a process
+// that keeps one of them fully busy reads 6%. What is shown here is the share of one core.)
+let usedBefore = new Map<number, number>();
+let lookedAt = 0;
+/**
+ * Every process of TIDAL's: what it is, the memory that is its own (MB), how much it has in memory right
+ * now, and how much of one processor core it has been using since the last look (%). `cores`: how many
+ * the processor has, for the first look.
+ */
+export const sample = async (cores = 1): Promise<Sample> => {
   const electron = getElectron();
   if (!electron) throw new Error("Electron isn't available here");
   const pages = new Map<number, string>();
@@ -106,19 +127,61 @@ export const sample = async (): Promise<Sample> => {
       if (name === "TIDAL's page") pagePid = pid;
     }
   } catch {}
+  const now = Date.now();
+  const seconds = (now - lookedAt) / 1000;
+  const used = new Map<number, number>();
   const rows: ProcessRow[] = [];
   for (const m of electron.app.getAppMetrics()) {
     const kb = m.memory?.privateBytes ?? m.memory?.workingSetSize ?? 0;
     const what =
       m.type === "Browser" ? "TIDAL itself" : m.type === "GPU" ? "Graphics" : m.type === "Tab" ? (pages.get(m.pid) ?? "A page") : m.name || m.serviceName || String(m.type);
-    rows.push({ pid: m.pid, what, memory: Math.round(kb / 1024), cpu: Math.round((m.cpu?.percentCPUUsage ?? 0) * 10) / 10, page: m.pid === pagePid || undefined });
+    const total = Number(m.cpu?.cumulativeCPUUsage);
+    const before = usedBefore.get(m.pid);
+    let cpu = (m.cpu?.percentCPUUsage ?? 0) * Math.max(1, cores);
+    if (Number.isFinite(total)) {
+      used.set(m.pid, total);
+      if (before !== undefined && seconds >= 1 && seconds < 120) cpu = (Math.max(0, total - before) / seconds) * 100;
+    }
+    rows.push({ pid: m.pid, what, memory: Math.round(kb / 1024), ram: Math.round((m.memory?.workingSetSize ?? 0) / 1024), cpu: Math.round(cpu * 10) / 10, page: m.pid === pagePid || undefined });
+  }
+  // (asked twice within a second: the figures of the look before stand)
+  if (seconds >= 1) {
+    usedBefore = used;
+    lookedAt = now;
   }
   rows.sort((a, b) => b.memory - a.memory);
   const page = rows.find((r) => r.page)?.memory ?? 0;
   if (page) shelf().memory = page;
-  return { rows, page, total: rows.reduce((s, r) => s + r.memory, 0), cpu: Math.round(rows.reduce((s, r) => s + r.cpu, 0) * 10) / 10 };
+  return { rows, page, total: rows.reduce((s, r) => s + r.memory, 0), ram: rows.reduce((s, r) => s + r.ram, 0), cpu: Math.round(rows.reduce((s, r) => s + r.cpu, 0) * 10) / 10 };
 };
-const pageMemory = async () => (await sample().catch(() => undefined))?.page ?? 0;
+/** What all of TIDAL's processes have in memory right now, MB (no processor figures: those are for the regular look) */
+const inMemory = (): number => {
+  try {
+    let kb = 0;
+    for (const m of getElectron().app.getAppMetrics()) kb += m.memory?.workingSetSize ?? 0;
+    return Math.round(kb / 1024);
+  } catch {
+    return 0;
+  }
+};
+const pageMemory = async (): Promise<number> => {
+  try {
+    const pid = tidalPage()?.getOSProcessId();
+    for (const m of getElectron().app.getAppMetrics()) if (m.pid === pid) return Math.round((m.memory?.privateBytes ?? m.memory?.workingSetSize ?? 0) / 1024);
+  } catch {}
+  return 0;
+};
+
+/** How many frames a second the screen TIDAL's window is on shows (0: not known) */
+export const screenRate = async (): Promise<number> => {
+  try {
+    const electron = getElectron();
+    const win = tidalWindow();
+    return Number(electron.screen.getDisplayMatching(win.getBounds()).displayFrequency) || 0;
+  } catch {
+    return 0;
+  }
+};
 
 // ------------------ THE PAGE'S DEBUGGER ------------------
 // Chromium's own tools for a page (collect garbage, give memory back, profile) are reached through its
@@ -178,6 +241,92 @@ export const cleanMemory = async (): Promise<Cleaned> => {
 export const heapUsage = async (): Promise<number> => {
   const r = await withDebugger((send) => send("Runtime.getHeapUsage"));
   return Math.round((r?.usedSize ?? 0) / MB);
+};
+
+// ------------------ BACK TO WINDOWS ------------------
+// What a process holds and what it has in memory (RAM) are two things. A page that holds 900 MB has most
+// of it lying in memory untouched: Windows only takes that out when memory runs short, and until then it
+// counts against TIDAL in the Task Manager and is not there for anything else. Windows can be asked to
+// take it out now: each process lets go of what it has in memory and takes back, as it goes along, only
+// what it really uses. Nothing is lost or closed, and what is needed again is back in an instant.
+// Tried on TIDAL out of sight: 3071 MB in memory before, 1068 MB two seconds later, 1368 MB after
+// forty-five (the page was still being drawn then, which it no longer is).
+//
+// Never asked of what makes the sound: TIDAL itself (its player is in it), the audio service, the DJ's
+// pages, any page that is playing. A stutter is not worth any amount of memory.
+//
+// There is no way to ask this from here, so a PowerShell line does it (it sets each process's
+// working-set limits to what they already are, which makes Windows trim it). Luna asks you once whether
+// this plugin may start programs.
+let childProcess: any | null | undefined;
+const starter = (): any | null => {
+  if (childProcess !== undefined) return childProcess;
+  try {
+    childProcess = runtimeRequire("child_process");
+  } catch {
+    childProcess = null;
+  }
+  return childProcess;
+};
+const onWindows = path.sep === "\\";
+/**
+ * Whether memory can be handed back here: on Windows, and Luna lets this plugin start a program. Asked
+ * when the plugin loads, so that Luna's question comes then and not while you are away.
+ */
+export const canHandBack = async (): Promise<boolean> => onWindows && !!getElectron() && !!starter();
+export type HandedBack = { before: number; after: number; processes: number };
+/**
+ * Hands the memory TIDAL's processes aren't using back to Windows. Returns what all of TIDAL had in
+ * memory before and after (MB), and how many processes were asked.
+ */
+export const handBack = async (): Promise<HandedBack> => {
+  const electron = getElectron();
+  const cp = onWindows ? starter() : null;
+  if (!electron || !cp) throw new Error("not possible here");
+  const leave = new Set<number>();
+  for (const c of electron.webContents.getAllWebContents()) {
+    try {
+      if (c.isDestroyed()) continue;
+      if (c.isCurrentlyAudible() || /^https:\/\/dj-/.test(c.getURL())) leave.add(c.getOSProcessId());
+    } catch {}
+  }
+  const pids: number[] = [];
+  for (const m of electron.app.getAppMetrics()) {
+    const pid = Number(m.pid);
+    if (!Number.isInteger(pid) || pid <= 0 || leave.has(pid)) continue;
+    if (m.type === "Browser" || /audio/i.test(`${m.name ?? ""} ${m.serviceName ?? ""}`)) continue;
+    pids.push(pid);
+  }
+  const before = inMemory();
+  if (pids.length) {
+    const script = `foreach($i in ${pids.join(",")}){try{$p=[Diagnostics.Process]::GetProcessById($i);$p.MaxWorkingSet=$p.MaxWorkingSet}catch{}}`;
+    const exe = path.join(String((process as any).env?.SystemRoot || "C:\\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    await new Promise<void>((resolve, reject) => {
+      let child: any;
+      try {
+        child = cp.spawn(exe, ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, stdio: "ignore" });
+      } catch (err) {
+        return reject(err);
+      }
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {}
+        resolve();
+      }, 20000);
+      child.on("error", (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.on("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+  // (the system takes a moment to count it)
+  await new Promise((r) => setTimeout(r, 1500));
+  return { before, after: inMemory(), processes: pids.length };
 };
 
 // ------------------ DISK ------------------

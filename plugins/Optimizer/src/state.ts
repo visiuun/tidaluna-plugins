@@ -3,6 +3,10 @@ import type { Disk, Sample } from "./guard.native";
 
 export type Note = { at: number; text: string };
 export type PluginSettings = {
+  /** Don't render the page at all while it can't be seen */
+  render: boolean;
+  /** In sight: scripts draw at most this many times a second, and animations move in steps (0: as often as the screen shows a frame) */
+  frameLimit: number;
   /** Hold animation frames (what nearly every animation, visualiser and 3D effect draws with) */
   frames: boolean;
   /** Pause CSS animations */
@@ -19,6 +23,8 @@ export type PluginSettings = {
   guardReload: boolean;
   /** Collect the page's garbage when it has been out of sight for a minute */
   cleanHidden: boolean;
+  /** Hand the memory TIDAL isn't using back to Windows while it is out of sight */
+  trim: boolean;
   /** Clear TIDAL's cache on disk when it passes this many MB (0: never by itself) */
   cacheLimit: number;
   /** After the page died or was reloaded: put what was playing back on, where it was */
@@ -32,6 +38,8 @@ export type PluginSettings = {
   lastReload: number;
 };
 const DEFAULTS: PluginSettings = {
+  render: true,
+  frameLimit: 60,
   frames: true,
   css: true,
   videos: true,
@@ -40,6 +48,7 @@ const DEFAULTS: PluginSettings = {
   guardLimit: 1500,
   guardReload: true,
   cleanHidden: true,
+  trim: true,
   cacheLimit: 1024,
   recover: true,
   unfreeze: true,
@@ -67,6 +76,10 @@ export const status = {
   framesHeld: 0,
   videosPaused: 0,
   timersSkipped: 0,
+  /** In sight: frames of the screen that scripts were not given, animations that were given steps, and the screen's rate (0: not known yet) */
+  framesSpared: 0,
+  animationsStepped: 0,
+  screenRate: 0,
   /** TIDAL's processes at the last look, the page's script memory (MB, and its ceiling), and what is on disk */
   sample: undefined as Sample | undefined,
   heap: 0,
@@ -80,6 +93,10 @@ export const status = {
   guardProblem: "",
   /** The last cleaning of the page's memory: when, and MB before and after */
   cleaned: undefined as { at: number; before: number; after: number; why: string } | undefined,
+  /** The last time memory was handed back to Windows: when, and what all of TIDAL had in memory before and after, MB */
+  trimmed: undefined as { at: number; before: number; after: number } | undefined,
+  /** Whether that can be done here (undefined: not asked yet) */
+  canTrim: undefined as boolean | undefined,
 };
 const listeners = new Set<() => void>();
 export const onStatus = (cb: () => void) => {

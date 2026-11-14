@@ -1,8 +1,8 @@
 // Runs in the Electron main process. Hosts the depth model in a hidden page with its own renderer
 // process, instead of in TIDAL's. TIDAL is a 32-bit app, so its page can only use ~2-4 GB, and the
 // model's WebAssembly memory only ever grows: running it inside TIDAL's page eventually crashed
-// TIDAL with "out of memory". Here it gets a process of its own that is closed whenever it goes
-// idle (or after a batch of covers), which hands all of its memory back.
+// TIDAL with "out of memory". Here it gets a process of its own that is closed seconds after its
+// last cover (or after a batch of covers), which hands all of its memory back.
 import { cachedBytes, type Wire, toWire } from "./fetch.native";
 import { CPU_ATTEMPTS, GPU_ATTEMPTS, TRANSFORMERS_URL, engineSource } from "./engine";
 
@@ -24,8 +24,12 @@ const getElectron = () => {
 const HOST = "3d-cover-engine.invalid";
 const PAGE_URL = `https://${HOST}/`;
 const PARTITION = "visiuun-3d-cover-engine"; // not "persist:", nothing is written to disk
-// Its own memory, so it can stay up between tracks (a fresh start costs ~5s); recycled after a long run anyway
-const IDLE_MS = 5 * 60_000;
+// Closed as soon as it has nothing to do. It used to stay up for five minutes after a cover, which is
+// longer than a song lasts: with a cover made per song it never closed, and held some 250 MB (and the
+// model in the graphics card's memory) all evening for a tenth of a second of work per song. A fresh
+// start costs about five seconds, which nobody waits for: covers are made ahead of time, and every one
+// made is on disk. The few seconds are for covers that come in a row (the next song's, a skip).
+const IDLE_MS = 8_000;
 const MAX_JOBS = 50;
 const JOB_TIMEOUT_MS = 180_000;
 
