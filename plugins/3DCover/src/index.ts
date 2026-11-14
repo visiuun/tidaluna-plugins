@@ -218,11 +218,23 @@ const preloadNext = async () => {
   if (cover && !signal.aborted) generate(cover, signal, "preload next");
 };
 
+// Where the song is, from the player that is active now: Luna's PlayState.currentTime keeps hold of the
+// first player it found, and stands still once TIDAL has changed to its other one (it has two)
+let playerModule: { activePlayer?: { currentTime?: number } } | undefined;
+const livePosition = (): number => {
+  try {
+    playerModule ??= (window as any).luna?.core?.findModuleByProperty?.((key: unknown, value: unknown) => key === "activePlayer" && typeof value === "object" && value !== null && "currentTime" in (value as object)) ?? undefined;
+    const t = Number(playerModule?.activePlayer?.currentTime);
+    if (Number.isFinite(t)) return t;
+  } catch {}
+  return lib?.PlayState.currentTime ?? 0;
+};
+
 const preloadTimer = setInterval(() => {
   const duration = currentItem?.duration;
   // Right after a song changes, the player can still report the previous song's position
   if (!settings.preloadNext || !duration || !lib?.PlayState.playing || performance.now() - trackStart < 3000) return;
-  const position = lib.PlayState.currentTime;
+  const position = livePosition();
   const remaining = (duration - position) * 1000;
   if (position <= duration && remaining <= Math.max(PRELOAD_LEAD_MS, lastGenerateMs + 1000)) preloadNext();
 }, 1000);

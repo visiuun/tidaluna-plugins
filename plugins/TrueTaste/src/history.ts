@@ -11,6 +11,21 @@ const SKIP_MS = 30000;
 type Current = { id: string; artists: string[]; start: number; duration: number; listened: number; lastPos: number; dd: boolean };
 let current: Current | null = null;
 
+// Where the song is, from the player that is active now. Luna's PlayState.currentTime keeps hold of the
+// player it found first, and TIDAL has two (its own, and a web player it changes to for some songs):
+// after a change that figure stands still, and every song then looked as if none of it had been heard.
+type PlayerModule = { activePlayer?: { currentTime?: number } };
+let playerModule: PlayerModule | undefined;
+const position = (): number => {
+  try {
+    playerModule ??=
+      ((window as any).luna.core.findModuleByProperty((key: unknown, value: unknown) => key === "activePlayer" && typeof value === "object" && value !== null && "currentTime" in (value as object)) as PlayerModule | undefined) ?? undefined;
+    const t = Number(playerModule?.activePlayer?.currentTime);
+    if (Number.isFinite(t)) return t;
+  } catch {}
+  return lib().PlayState.currentTime;
+};
+
 const trackListeners = new Set<(id: string | null) => void>();
 /** Called with the new track id whenever playback moves to another track */
 export const onTrackChange = (fn: (id: string | null) => void) => {
@@ -83,7 +98,7 @@ const poll = () => {
   if (!current) return;
   const ps = lib().PlayState;
   if (!ps.playing) return;
-  const pos = ps.currentTime;
+  const pos = position();
   const delta = pos - current.lastPos;
   // Only count real playback: seeks and stalls show up as jumps
   if (delta > 0 && delta < (POLL_MS / 1000) * 2.5) current.listened += delta;
@@ -100,7 +115,7 @@ export const startTracking = (unloads: Set<LunaUnload>) => {
       return;
     }
     const artists = (item.tidalItem.artists ?? (item.tidalItem.artist ? [item.tidalItem.artist] : [])).map((a) => String(a.id));
-    current = { id: String(item.id), artists, start: Date.now(), duration: item.duration ?? 0, listened: 0, lastPos: PlayState.currentTime, dd: fromOurPlaylist() };
+    current = { id: String(item.id), artists, start: Date.now(), duration: item.duration ?? 0, listened: 0, lastPos: position(), dd: fromOurPlaylist() };
     for (const fn of trackListeners) fn(current.id);
   };
 

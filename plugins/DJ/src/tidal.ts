@@ -9,7 +9,7 @@ const core = () => window.luna.core!;
 const state = () => lib().redux.store.getState();
 const actions = () => lib().redux.actions as Record<string, (payload?: any) => unknown>;
 
-type Player = { volume: number; updateVolumeLevel?: () => void; name?: string };
+type Player = { volume: number; currentTime?: number; updateVolumeLevel?: () => void; name?: string };
 type PlayerModule = { activePlayer?: Player };
 let playerModule: PlayerModule | undefined;
 const activePlayer = () => {
@@ -224,7 +224,12 @@ export class TidalLink {
   private posAt = 0;
   private posTimer?: ReturnType<typeof setInterval>;
   private notePosition() {
-    const v = lib().PlayState.currentTime;
+    // From the player that is active now. Luna's PlayState.currentTime keeps hold of the player it found
+    // first, and TIDAL has two (its own, and a web player it changes to for some songs): after a change
+    // that figure stands still. The DJ then took TIDAL to be far from the music and moved it there again
+    // every few seconds, stalling it for an instant each time (the play button flickered).
+    const live = Number(activePlayer()?.currentTime);
+    const v = Number.isFinite(live) ? live : lib().PlayState.currentTime;
     if (v !== this.posValue) {
       this.posValue = v;
       this.posAt = performance.now();
