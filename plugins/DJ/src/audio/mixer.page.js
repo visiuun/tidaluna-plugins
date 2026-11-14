@@ -504,15 +504,22 @@ registerProcessor("dj-limiter", Limiter);
     deck.fader.gain.linearRampToValueAtTime(0, when + fade);
     stopSources(deck, when + fade);
   };
+  /**
+   * Cuts a deck off, over `fade`. Both its fader and its way out go down: a voice taken out for a mashup
+   * joins the deck after the fader (see the transition). And a mashup the deck is part of is over: none
+   * of its blocks to come is decided any more, which would move the faders of both its songs again.
+   */
   const killDeck = (deck, fade) => {
-    const g = deck.fader.gain;
     const now = ctx.currentTime;
-    try {
-      const v = g.value;
-      g.cancelScheduledValues(now);
-      g.setValueAtTime(v, now);
-      g.linearRampToValueAtTime(0, now + fade);
-    } catch {}
+    for (const g of [deck.fader.gain, deck.post.gain]) {
+      try {
+        const v = g.value;
+        g.cancelScheduledValues(now);
+        g.setValueAtTime(v, now);
+        g.linearRampToValueAtTime(0, now + fade);
+      } catch {}
+    }
+    for (let k = arrangers.length - 1; k >= 0; k--) if (arrangers[k].deck === deck || arrangers[k].other === deck) arrangers.splice(k, 1);
     stopSources(deck, now + fade);
   };
   const disposeDeck = (deck) => {
@@ -958,7 +965,7 @@ registerProcessor("dj-limiter", Limiter);
     for (let k = feeds.length - 1; k >= 0; k--) {
       const f = feeds[k];
       const set = stemSets.get(f.name);
-      if (now > f.end + 1 || decks.get(f.deck.id) !== f.deck) {
+      if (now > f.end + 1 || decks.get(f.deck.id) !== f.deck || f.deck.stopAt <= now) {
         feeds.splice(k, 1);
         stemSets.delete(f.name);
         continue;
@@ -981,6 +988,11 @@ registerProcessor("dj-limiter", Limiter);
           s.connect(f.whole.to);
           f.deck.sources.push(s);
           s.start(frame / sr, (from + offset) / sr, (f.grid.seg - offset) / sr);
+          if (f.deck.stopAt < Infinity) {
+            try {
+              s.stop(f.deck.stopAt + 0.03);
+            } catch {}
+          }
         }
       }
       // (What has been heard is let go of: a piece is some megabytes)
@@ -2501,7 +2513,7 @@ registerProcessor("dj-limiter", Limiter);
           if (last) go(Tend, WHOLE_B, (next.va ? 2 : 4) * bar);
         };
         // (the blocks after the first are decided as they come up: see watchFeeds)
-        const arrangement = { k: 1, blocks, at: (k) => T1 + k * per * bar - D - 0.5, decide, said, deck: b, end: Tend, cut: 0 };
+        const arrangement = { k: 1, blocks, at: (k) => T1 + k * per * bar - D - 0.5, decide, said, deck: b, other: a, end: Tend, cut: 0 };
         decide(0);
         arrangers.push(arrangement);
         lastArrangement = arrangement;
@@ -2637,16 +2649,24 @@ registerProcessor("dj-limiter", Limiter);
       if (musicMoves.length > 8) musicMoves = musicMoves.slice(-8);
       return { voiceAt: t + lead };
     },
-    /** Everything down under the voice from now on (a goodbye, or a line with nothing to mix out of). Returns when the line should start */
+    /**
+     * Everything down under the voice from now on (a goodbye, or a line with nothing to mix out of). Returns
+     * when the line should start. Each deck goes down on its way out, after its fader: that takes a voice
+     * taken out for a mashup with it (which joins the deck there). Its fader stays where it has got to (a
+     * song that was on its way out stops leaving: it is what is under the line), and a mashup under way
+     * is no longer arranged, which would move the faders again.
+     */
     duckAll: async ({ jingle, tonic, minor, sure, cents }) => {
       if (jingle) await jingleIn(jingle, tonic, minor, sure, cents).catch(() => null);
       const now = ctx.currentTime + 0.03;
       const level = under(now);
+      arrangers.length = 0;
       for (const d of decks.values()) {
         // (not one that is down under a line already, nor one that is being cut off this very moment)
         if (d.ducked || d.stopAt < now + 0.3) continue;
         d.ducked = true;
-        const g = d.fader.gain;
+        holdAt(d.fader.gain, now);
+        const g = d.post.gain;
         const v = g.value;
         holdAt(g, now);
         g.setValueAtTime(v, now);

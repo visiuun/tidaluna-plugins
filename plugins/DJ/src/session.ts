@@ -186,7 +186,7 @@ class Session {
   private prep?: Prep;
   /** Start the next item as soon as it has loaded (optionally around a line being spoken) */
   private awaiting?: { voiceStart?: number; voiceEnd?: number };
-  /** The song left on, low, under a line the DJ says between two songs (see talkBetween), and what takes it away */
+  /** The song left on, low, under a line the DJ says between two songs (see talkBetween), and what takes it (and anything else still on) away */
   private bed?: Deck;
   private leaving?: ReturnType<typeof setTimeout>;
   /** After the DJ button or a request: mix the next track in on the next bar line rather than at the current track's end */
@@ -673,8 +673,7 @@ class Session {
         voiceEnd !== undefined && voiceStart !== undefined && now < voiceEnd ? await this.mixer.bringIn(deck, pos, Math.max(0, a.introEnd - pos), voiceStart, voiceEnd) : await this.mixer.startAlone(deck, pos);
       this.pending = { item: next, deck, swap: start };
       // Whatever was still playing underneath makes way as the new track arrives
-      const old = this.current?.deck;
-      if (old && (old.stopAt === Infinity || old === this.bed)) this.leaveAt(old, start, 0.9);
+      this.leaveAt(start, 0.9, deck);
       this.bed = undefined;
       setStatus({ busy: undefined });
     }
@@ -967,6 +966,8 @@ class Session {
     this.immediate = false;
     this.lateVoice = undefined;
     this.talkUntil = 0;
+    // (a mashup that was playing ends here)
+    this.mashUntil = 0;
     await this.mixer.stopVoice();
     this.ensureLoading(item);
     // Skipping into a new set still gets its introduction, when the line is ready
@@ -975,7 +976,7 @@ class Session {
     else {
       clearTimeout(this.leaving);
       this.bed = undefined;
-      if (this.current) await this.mixer.kill(this.current.deck, 0.12);
+      await this.silence(0.12);
       this.awaiting = {};
     }
     if (!item.ready) setStatus({ busy: "Loading" });
@@ -985,23 +986,40 @@ class Session {
   /**
    * The DJ says `clip` between two songs. The song being left is not cut off for it (that was the words
    * over nothing at all, for as long as the line lasts): it stays on, low under the voice, and leaves as
-   * the next song arrives, or after the line if that one is still loading.
+   * the next song arrives, or after the line if that one is still loading. That one song only: anything
+   * else that is on goes at once (see silence).
    */
   private async talkBetween(clip: Clip, text: string) {
     clearTimeout(this.leaving);
-    const sounding = (d: Deck) => !d.disposed && d.started && d.stopAt > this.mixer.now + 0.5;
-    const t = await this.mixer.talk(clip, [...this.mixer.decks].some(sounding) ? { t0: await this.mixer.duckAll() } : {});
+    const now = this.mixer.now;
+    const old = this.current?.deck;
+    const bed = old && !old.disposed && old.started && old.stopAt > now + 0.5 ? old : undefined;
+    await this.silence(0.25, bed);
+    const t = await this.mixer.talk(clip, bed ? { t0: await this.mixer.duckAll() } : {});
     this.say(text, t.voiceStart, t.voiceEnd);
     this.awaiting = { voiceStart: t.voiceStart, voiceEnd: t.voiceEnd };
-    const old = this.current?.deck;
-    this.bed = old && sounding(old) ? old : undefined;
-    if (this.bed) this.leaveAt(this.bed, t.voiceEnd + 0.2, 1.5);
+    this.bed = bed;
+    if (bed) this.leaveAt(t.voiceEnd + 0.2, 1.5);
   }
-  /** Has `deck` fade away at `at` (on the mixer's clock). One at a time: asked again, the earlier one is off */
-  private leaveAt(deck: Deck, at: number, fade: number) {
+  /**
+   * Cuts off every deck but `keep`, over `fade`. The song the DJ is on is not always the only one sounding:
+   * the one before it plays on under it to the end of its mix, and through a whole mashup (minutes of it).
+   * Leaving the song therefore means stopping all of them, or the old one carries on over what comes next.
+   */
+  private async silence(fade: number, keep?: Deck) {
+    const now = this.mixer.now;
+    await Promise.all([...this.mixer.decks].filter((d) => d !== keep && !d.disposed && d.stopAt > now + fade).map((d) => this.mixer.kill(d, fade)));
+  }
+  /**
+   * Has every deck there is now, but `keep`, fade away at `at` (on the mixer's clock). One at a time: asked
+   * again, the earlier one is off. (Decks made after this was asked are not its business.)
+   */
+  private leaveAt(at: number, fade: number, keep?: Deck) {
     clearTimeout(this.leaving);
+    const going = [...this.mixer.decks].filter((d) => d !== keep);
     this.leaving = setTimeout(() => {
-      if (!deck.disposed && deck.stopAt > this.mixer.now) void this.mixer.kill(deck, fade);
+      const now = this.mixer.now;
+      for (const d of going) if (!d.disposed && d.stopAt > now + fade) void this.mixer.kill(d, fade);
     }, Math.max(0, at - this.mixer.now) * 1000);
   }
 
@@ -1023,9 +1041,13 @@ class Session {
     await this.dropPending();
     this.prep = undefined;
     this.awaiting = undefined;
+    this.bed = undefined;
+    this.mashUntil = 0;
+    clearTimeout(this.leaving);
     const loaded = cur.deck.loaded;
     const old = cur.deck;
-    await this.mixer.kill(old, 0.06);
+    // (and whatever else is on with it: the other song of a mashup, the tail of the last mix)
+    await this.silence(0.06);
     setTimeout(() => this.mixer.dispose(old), 300);
     const deck = this.mixer.createDeck(loaded);
     await this.mixer.startAlone(deck, Math.max(0, Math.min(time, loaded.duration - 0.5)), undefined, 0.03);
