@@ -388,8 +388,16 @@ export const edgeSpeak = async (text: string, voice: string, rate: number, pitch
       if (Math.abs(theirs - ahead) <= 30) throw err;
       ahead = theirs;
     } else {
-      // The connection itself gave out (dropped half way, no answer): that happens now and then, and usually not twice
+      // The connection itself gave out (dropped half way, no answer): that happens now and then, and usually not
+      // twice. Twice it did happen, though, and each time the local voice then read for a minute: so a second go
+      // after a moment, and a third after a longer one, before giving up
       await new Promise((r) => setTimeout(r, 600));
+      try {
+        return { mp3: (await ask(text, voice, rate, pitch)).toString("base64") };
+      } catch (again) {
+        if (again instanceof Declined || again instanceof Refused) throw again;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
     }
     return { mp3: (await ask(text, voice, rate, pitch)).toString("base64") };
   }

@@ -30,7 +30,7 @@ import {
 import { persona, settings } from "./config";
 import { log, notify, warn } from "./log";
 import { lineFor, mashupLine, stockLines, type Context, type GenericKind, type Here, type Moment } from "./talk/script";
-import { prepareStock, speak, stockLine, voiceState } from "./talk/voice";
+import { prepareStock, reread, speak, stockLine, voiceState } from "./talk/voice";
 import { TidalLink } from "./tidal";
 
 // ------------------ STATUS (for the UI) ------------------
@@ -181,7 +181,13 @@ const lineOf = (m: Moment, link: TidalLink, here?: Here) => {
 const makeTalk = (m: Moment, link: TidalLink, urgent: boolean, here?: Here): Talk => {
   const text = lineOf(m, link, here);
   const talk: Talk = { type: m.type, text, clip: speak(text, urgent, () => talk.wanted?.() ?? true) };
-  talk.clip.then((c) => (talk.ready = c)).catch(() => (talk.ready = null));
+  talk.clip
+    .then((c) => {
+      talk.ready = c;
+      // (read by the stand-in while the online voice was down: by the online voice after all, if it is back before the line is said)
+      if (c) void reread(c, text, () => talk.wanted?.() ?? true).then((better) => better && (talk.ready = better));
+    })
+    .catch(() => (talk.ready = null));
   return talk;
 };
 

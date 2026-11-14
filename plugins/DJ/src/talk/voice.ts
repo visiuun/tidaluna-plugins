@@ -149,6 +149,8 @@ const generate = async (job: Job): Promise<Clip | null> => {
       writeVoice(key, r.pcm).catch(() => {});
       lastFailure = undefined;
       if (engine === "edge") {
+        // (answering again after a failure: the stock lines that came due meanwhile were read by the stand-in, or not at all)
+        if (edgeFailure !== undefined) setTimeout(prepareStock, 3000);
         edgeFailure = undefined;
         edgeFails = 0;
       }
@@ -248,6 +250,22 @@ export const speak = (text: string, urgent = true, wanted?: () => boolean): Prom
   });
   pendingByKey.set(key, job);
   return job;
+};
+
+/**
+ * A line the stand-in had to read (the online voice wasn't answering), read again by the online voice once
+ * that is being asked again. Lines are made well before they are said: one made in a minute's outage would
+ * otherwise still be said in the local voice minutes later. null: the line was read by the right voice in
+ * the first place, isn't wanted any more by then, or the online voice failed again.
+ */
+export const reread = async (clip: Clip, text: string, wanted?: () => boolean): Promise<Clip | null> => {
+  const standIn = (c: Clip) => c.key.startsWith("kokoro|");
+  if (engines()[0] !== "edge" || !standIn(clip)) return null;
+  const wait = edgeDownUntil - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait + 400));
+  if (engines()[0] !== "edge" || edgeDown() || (wanted && !wanted())) return null;
+  const again = await speak(text, false, wanted);
+  return again && !standIn(again) ? again : null;
 };
 
 /** A line that's already available right now (in memory or on disk), without generating anything */
