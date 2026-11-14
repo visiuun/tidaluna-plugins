@@ -107,18 +107,160 @@ const getSession = () => {
 };
 
 // ------------------ THE PAGE ------------------
-type Host = { id: number; view: any; ready: Promise<void>; died: Promise<never>; gone?: string; awake?: ReturnType<typeof setInterval>; /** stops watching TIDAL's page (see followPage) */ unfollow?: () => void };
+type Host = {
+  id: number;
+  view: any;
+  ready: Promise<void>;
+  died: Promise<never>;
+  gone?: string;
+  awake?: ReturnType<typeof setInterval>;
+  /** stops watching TIDAL's page (see followPage) */
+  unfollow?: () => void;
+  /** which mixer page this is (see keyOf): a page is only carried over to a plugin that speaks the same one */
+  key: string;
+  /** what the session would need to pick this mixer up again, should TIDAL's page go ("": nothing worth carrying) */
+  snapshot: string;
+};
 let host: Host | undefined;
 let hostSeq = 0;
+
+// ------------------ CARRIED OVER ------------------
+// TIDAL's page can go while the music plays: its process dies (out of memory, mostly) or it is reloaded.
+// TIDAL brings the page back by itself within seconds, and the mixer, a process of its own, has no reason
+// to stop meanwhile: what is scheduled in it plays on. So it is not closed then but carried: kept, with
+// what the session knew, until the DJ is loaded again in the new page and picks it up (see mixerAdopt),
+// or closed after CARRY_MS if nobody does.
+//
+// Where it is kept has to outlive this file, which is run afresh whenever the plugin is loaded, in a
+// sandbox of its own (its `process` and its globals are not the real ones, and what it reads off a
+// module is wrapped). Electron's `app` object is the same for every load, and a property under a symbol
+// is handed over as it is: that is where it is kept.
+type Carried = { view: any; key: string; snapshot: string; since: number; timer: ReturnType<typeof setTimeout>; awake?: ReturnType<typeof setInterval> };
+const CARRY_MS = 45000;
+// (`live`: music is playing from a mixer that would be carried; `carriedAt`: when one last was. For whoever
+// else looks after TIDAL's page, the Optimizer plugin for one: the music is not theirs to bring back then)
+type Shelf = {
+  carried?: Carried;
+  quitting?: boolean;
+  watchingQuit?: boolean;
+  live?: boolean;
+  carriedAt?: number;
+  /** Stops keeping TIDAL's own player silent (see hush), and the volume its page last asked for meanwhile, and when */
+  unhush?: () => void;
+  volume?: number;
+  volumeAt?: number;
+};
+const SHELF = Symbol.for("visiuun.dj.shelf");
+const ownShelf: Shelf = {};
+const shelf = (): Shelf => {
+  const app = getElectron()?.app;
+  if (!app) return ownShelf;
+  return (app[SHELF] ??= {});
+};
+const keyOf = (pageSource: string) => {
+  let h = 5381;
+  for (let i = 0; i < pageSource.length; i++) h = ((h * 33) ^ pageSource.charCodeAt(i)) >>> 0;
+  return `${pageSource.length}:${h}`;
+};
+/** Fades a mixer nobody drives any more and closes it */
+const closeGently = (view: any) => {
+  try {
+    const contents = view.webContents;
+    if (contents.isDestroyed()) return;
+    contents.executeJavaScript(`window.__mixer && window.__mixer.call("killAll", { fade: 1.2 })`, true).catch(() => {});
+    setTimeout(() => {
+      try {
+        detach(view);
+        if (!contents.isDestroyed()) contents.close();
+      } catch {}
+    }, 1500);
+  } catch {}
+};
+const dropCarried = (gently = false) => {
+  const c = shelf().carried;
+  if (!c) return;
+  shelf().carried = undefined;
+  clearTimeout(c.timer);
+  clearInterval(c.awake);
+  unhush(true);
+  if (gently) return closeGently(c.view);
+  try {
+    detach(c.view);
+    if (!c.view.webContents.isDestroyed()) c.view.webContents.close();
+  } catch {}
+};
+// TIDAL's own player has been playing the same song all along, silently: the page kept it at volume zero.
+// The page that comes back knows nothing of that. It starts by turning the volume all the way up, then
+// to where you have it, and after a reload it puts the song back on by itself: the song would be heard
+// twice, the first moment of it at full volume, until the DJ is loaded and has TIDAL silent again.
+// So while the mixer is carried, TIDAL's player is stopped, and kept at volume zero: whenever the page
+// asks for a volume, zero is asked for straight after it. (Sent the way the page sends it; TIDAL only
+// looks at where a message says it is from.) It ends when the DJ's session is back, which keeps TIDAL
+// silent in its own way, or when the mixer is given up, and then TIDAL gets the volume it last asked for.
+const tellPlayer = (command: object) => {
+  try {
+    getElectron()?.ipcMain?.emit("player.message", { senderFrame: { url: "https://desktop.tidal.com/" }, visiuunDj: true }, JSON.stringify(command));
+  } catch {}
+};
+const hush = () => {
+  const s = shelf();
+  tellPlayer({ command: "media.stop" });
+  if (s.unhush) return;
+  const ipc = getElectron()?.ipcMain;
+  if (!ipc?.on) return;
+  const heard = (event: any, message: unknown) => {
+    try {
+      if (event?.visiuunDj) return;
+      const m = JSON.parse(String(message));
+      if (m?.command !== "media.volume") return;
+      shelf().volume = Number(m.volume);
+      shelf().volumeAt = Date.now();
+      if (Number(m.volume) > 0) tellPlayer({ command: "media.volume", volume: 0 });
+    } catch {}
+  };
+  ipc.on("player.message", heard);
+  s.volume = undefined;
+  s.unhush = () => {
+    try {
+      ipc.off("player.message", heard);
+    } catch {}
+  };
+};
+/**
+ * `restore`: TIDAL's player gets the volume its page last asked for (nobody else is going to give it one).
+ * Not before the page has been quiet about it for three seconds: the full volume a page starts with is
+ * followed by the real one a moment later, and it is that one the player is to get.
+ */
+const SETTLED_MS = 3000;
+const unhush = (restore: boolean) => {
+  const s = shelf();
+  const stop = s.unhush;
+  if (!stop) return;
+  s.unhush = undefined;
+  const finish = () => {
+    try {
+      stop();
+      const now = shelf();
+      // (not if TIDAL's player is being kept silent again meanwhile)
+      if (restore && !now.unhush && now.volume !== undefined && Number.isFinite(now.volume)) tellPlayer({ command: "media.volume", volume: now.volume });
+      if (!now.unhush) now.volume = undefined;
+    } catch {}
+  };
+  const age = Date.now() - (s.volumeAt ?? 0);
+  if (!restore || age >= SETTLED_MS) finish();
+  else setTimeout(finish, SETTLED_MS - age);
+};
 
 // Every time the plugin is (re)loaded this file runs again with fresh variables, so "the open mixer" can't
 // just be a variable here: a new copy of the plugin must be able to close a mixer an earlier copy left
 // playing, or it would carry on underneath TIDAL's own player. Mixer pages are found by their address.
+// (All but one that is being carried over: that one is its own business, see dropCarried)
 const closeAllMixers = () => {
   try {
+    const carried = shelf().carried?.view?.webContents;
     for (const contents of getElectron()?.webContents?.getAllWebContents?.() ?? []) {
       try {
-        if (!contents.isDestroyed() && String(contents.getURL()).startsWith(PAGE_URL)) contents.close();
+        if (!contents.isDestroyed() && contents !== carried && String(contents.getURL()).startsWith(PAGE_URL)) contents.close();
       } catch {}
     }
   } catch {}
@@ -169,13 +311,44 @@ const keepAwake = (contents: any) => {
 
 // The mixer is driven from TIDAL's page. When that page goes (it reloads, or its process dies, which a
 // page holding a couple of gigabytes does now and then), nothing is left to drive the mixer or to stop
-// it, and TIDAL's own player starts again in the fresh page: two lots of music at once, until the
-// plugin is loaded again and finds the mixer it left behind. So the mixer goes when the page does.
+// it. With music playing it is carried over to the page that comes back (see CARRIED OVER); otherwise,
+// or when TIDAL itself is closing, the mixer goes when the page does.
+const pageGone = (created: Host) => {
+  if (host !== created) return;
+  const s = shelf();
+  let alive = false;
+  try {
+    alive = !created.gone && !created.view.webContents.isDestroyed();
+  } catch {}
+  if (!created.snapshot || s.quitting || !alive) return closeHost();
+  // Carried: no longer this file's mixer, but not closed
+  host = undefined;
+  sources.clear();
+  created.unfollow?.();
+  dropCarried();
+  s.carried = { view: created.view, key: created.key, snapshot: created.snapshot, since: Date.now(), awake: created.awake, timer: setTimeout(() => dropCarried(true), CARRY_MS) };
+  s.carriedAt = Date.now();
+  s.live = false;
+  hush();
+};
+const watchQuit = () => {
+  const s = shelf();
+  if (s.watchingQuit) return;
+  s.watchingQuit = true;
+  try {
+    // (TIDAL is closing: its window going is not a page to wait for)
+    getElectron()?.app?.on("before-quit", () => {
+      s.quitting = true;
+      dropCarried();
+    });
+  } catch {}
+};
 const followPage = (created: Host) => {
   try {
+    watchQuit();
     const page = tidalWindow()?.webContents;
     if (!page?.on) return;
-    const gone = () => host === created && closeHost();
+    const gone = () => pageGone(created);
     const navigated = (details: any, _url?: string, inPlace?: boolean, mainFrame?: boolean) => {
       if ((details?.isMainFrame ?? mainFrame) && !(details?.isSameDocument ?? inPlace)) gone();
     };
@@ -195,6 +368,11 @@ const followPage = (created: Host) => {
 const closeHost = () => {
   const current = host;
   host = undefined;
+  if (current) {
+    shelf().live = false;
+    // (a mixer that was picked up and is closed before its session was running: TIDAL's player is let go of)
+    unhush(true);
+  }
   sources.clear();
   clearInterval(current?.awake);
   current?.unfollow?.();
@@ -203,6 +381,30 @@ const closeHost = () => {
     if (current && !current.view.webContents.isDestroyed()) current.view.webContents.close();
   } catch {}
   closeAllMixers();
+};
+
+/** A host around a mixer page: one just made (see openHost) or one carried over (see mixerAdopt) */
+const hostFor = (view: any, key: string): Host => {
+  const contents = view.webContents;
+  let markDead!: (err: Error) => void;
+  const died = new Promise<never>((_, reject) => (markDead = reject));
+  died.catch(() => {});
+  const created: Host = { id: ++hostSeq, view, ready: null!, died, key, snapshot: "" };
+  contents.on("render-process-gone", (_: unknown, details: { reason: string }) => {
+    clearInterval(created.awake);
+    created.gone = details.reason;
+    markDead(new Error(`The DJ's mixer stopped (${details.reason})`));
+    if (host === created) closeHost();
+  });
+  // (Closed by something other than this module: just as gone. Left as "still there", the session kept
+  // waiting for a mixer that would never answer, with TIDAL's own player muted: silence)
+  contents.once("destroyed", () => {
+    clearInterval(created.awake);
+    created.gone ??= "closed";
+    markDead(new Error("The DJ's mixer was closed"));
+    if (host === created) closeHost();
+  });
+  return created;
 };
 
 const openHost = (pageSource: string): Host => {
@@ -223,24 +425,8 @@ const openHost = (pageSource: string): Host => {
   attach(view);
   contents.setWindowOpenHandler(() => ({ action: "deny" }));
   contents.on("will-navigate", (event: any) => event.preventDefault());
-  let markDead!: (err: Error) => void;
-  const died = new Promise<never>((_, reject) => (markDead = reject));
-  died.catch(() => {});
-  const created: Host = { id: ++hostSeq, view, ready: null!, died };
-  contents.on("render-process-gone", (_: unknown, details: { reason: string }) => {
-    clearInterval(created.awake);
-    created.gone = details.reason;
-    markDead(new Error(`The DJ's mixer stopped (${details.reason})`));
-    if (host === created) closeHost();
-  });
-  // (Closed by something other than this module: just as gone. Left as "still there", the session kept
-  // waiting for a mixer that would never answer, with TIDAL's own player muted: silence)
-  contents.once("destroyed", () => {
-    clearInterval(created.awake);
-    created.gone ??= "closed";
-    markDead(new Error("The DJ's mixer was closed"));
-    if (host === created) closeHost();
-  });
+  const created = hostFor(view, keyOf(pageSource));
+  const { died } = created;
   created.ready = Promise.race([
     (async () => {
       await contents.loadURL(PAGE_URL);
@@ -264,6 +450,7 @@ const openHost = (pageSource: string): Host => {
  */
 export const mixerOpen = async (pageSource: string) => {
   if (!getElectron()) throw new Error("The DJ's mixer can't run in this version of TidaLuna");
+  dropCarried();
   closeHost();
   const created = (host = openHost(pageSource));
   await created.ready;
@@ -288,8 +475,67 @@ export const mixerCall = async (method: string, argsJson: string, id?: number): 
   }
 };
 
-/** Closes the mixer with this id, if it's still the open one. Without an id: whatever is open */
+/** Closes the mixer with this id, if it's still the open one. Without an id: whatever is open, and one that was being carried over */
 export const mixerClose = async (id?: number) => {
   if (id !== undefined && host && host.id !== id) return;
+  if (id === undefined) dropCarried();
   closeHost();
+};
+
+/**
+ * What the session would need to pick this mixer up again if TIDAL's page went right now (see CARRIED
+ * OVER). Sent whenever it changes; "": nothing worth carrying (nothing playing, or the session is ending).
+ */
+export const mixerCarry = async (snapshot: string, id: number) => {
+  if (!host || host.id !== id) return;
+  host.snapshot = snapshot;
+  shelf().live = !!snapshot;
+  // (a session that says so is running, and has TIDAL's player silent itself)
+  if (snapshot) unhush(false);
+};
+
+/**
+ * A mixer left playing by the page that went, if there is one and it is the same mixer page as
+ * `pageSource` (an update of the plugin in between changes what the page understands: that one is closed).
+ * Returns what its session knew, and for how long it has been on its own (ms).
+ */
+export const mixerCarried = async (pageSource: string): Promise<{ snapshot: string; alone: number } | null> => {
+  const c = shelf().carried;
+  if (!c) return null;
+  let alive = false;
+  try {
+    alive = !c.view.webContents.isDestroyed() && !c.view.webContents.isCrashed();
+  } catch {}
+  if (!alive || c.key !== keyOf(pageSource)) {
+    dropCarried(alive);
+    return null;
+  }
+  return { snapshot: c.snapshot, alone: Date.now() - c.since };
+};
+
+/** Takes the carried mixer as this page's own: it is driven from here from now on. Returns its id (see mixerOpen) */
+export const mixerAdopt = async () => {
+  const c = shelf().carried;
+  if (!c) throw new Error("There is no mixer to pick up");
+  // (anything else that is open goes first, while the carried one is still marked as such: see closeAllMixers)
+  closeHost();
+  shelf().carried = undefined;
+  clearTimeout(c.timer);
+  clearInterval(c.awake);
+  // The page fetches its audio from this file's own handler (the one an earlier load put there knows nothing of this load's tracks)
+  getSession();
+  const created = hostFor(c.view, c.key);
+  created.ready = Promise.resolve();
+  const contents = c.view.webContents;
+  // (TIDAL makes a new window when its page has died: the mixer's pixel moves into it)
+  detach(c.view);
+  attach(c.view);
+  keepAwake(contents);
+  created.awake = setInterval(() => (contents.isDestroyed() ? clearInterval(created.awake) : keepAwake(contents)), 10000);
+  // The session that knew this mixer is gone, but what it knew still holds until the new one says otherwise
+  created.snapshot = c.snapshot;
+  shelf().live = true;
+  host = created;
+  followPage(created);
+  return created.id;
 };

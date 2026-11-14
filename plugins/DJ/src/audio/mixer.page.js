@@ -2684,6 +2684,13 @@ registerProcessor("dj-limiter", Limiter);
       stopVoice(fade ?? 0.12);
       return {};
     },
+    /** What this mixer holds: its decks and the tracks loaded in it. For a session that picks it up after TIDAL's page was away (see CARRIED OVER in mixer.native.ts) */
+    inventory: () => ({
+      // (how loud it is set, 0-1: the page that comes back doesn't know your volume yet, this still does)
+      volume,
+      decks: [...decks.values()].map((d) => ({ ref: d.id, track: d.trackId })),
+      tracks: [...tracks.entries()].map(([id, t]) => ({ id, duration: t.buffer.duration })),
+    }),
   };
 
   window.__mixer = {

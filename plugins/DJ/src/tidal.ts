@@ -153,6 +153,22 @@ export class TidalLink {
     } catch {}
   }
 
+  /** Waits until TIDAL's player and its queue are there to take over (they aren't in the first moments of a page). False: they didn't come */
+  async whenReady(ms: number) {
+    const until = Date.now() + ms;
+    for (;;) {
+      try {
+        if (activePlayer() && Array.isArray(state().playQueue?.elements) && state().playbackControls) {
+          // (a moment more: TIDAL is still putting back what it remembered of its queue)
+          await new Promise((r) => setTimeout(r, 1000));
+          return true;
+        }
+      } catch {}
+      if (Date.now() > until) return false;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
   /** Called on every store change and on the session's tick */
   observe(force = false) {
     if (!this.active) return;
@@ -310,6 +326,12 @@ export class TidalLink {
     return true;
   }
 
+  /** Sets TIDAL's volume slider (percent) */
+  setVolume(percent: number) {
+    try {
+      actions()["playbackControls/SET_VOLUME"]({ volume: Math.max(0, Math.min(100, Math.round(percent))) });
+    } catch {}
+  }
   seek(time: number) {
     this.selfSeekUntil = Date.now() + 1200;
     actions()["playbackControls/SEEK"](Math.max(0, time));

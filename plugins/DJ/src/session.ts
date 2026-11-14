@@ -2,7 +2,7 @@
 // something else, has every track loaded and analysed before it's needed, plans and schedules each
 // transition and talk break, and follows what you do with TIDAL's own controls.
 import type { Analysis } from "./audio/analysis";
-import { Mixer, type Clip, type Deck, type Loaded, type MashFit, type MashSide } from "./audio/mixer";
+import { closeAnyMixer, Mixer, type Clip, type Deck, type Loaded, type MashFit, type MashSide } from "./audio/mixer";
 import { planNow, planTransition, type MashWay, type Mixing, type Move, type Plan } from "./audio/plan";
 import { prepareSeparator, separate, separatorProgress, STEM_MARGIN, STEM_PIECE } from "./audio/stems";
 import {
@@ -108,6 +108,18 @@ type Item = {
 };
 type Playing = { item: Item; deck: Deck };
 type Pending = Playing & { swap: number };
+// What a session needs to know to pick up a mixer that played on while TIDAL's page was away (it died,
+// or was reloaded: see CARRIED OVER in mixer.native.ts). Kept there, in step, for as long as music plays.
+type SegmentNote = { kind: Segment["kind"]; key: string; title: string };
+type Carry = {
+  v: 1;
+  mode: "dj" | "follow";
+  current: { id: string; deck: string; segment: SegmentNote };
+  /** A transition that is scheduled: the track coming in, and when it takes over (on the mixer's clock) */
+  pending?: { id: string; deck: string; swap: number; segment: SegmentNote };
+  upcoming: { id: string; segment: SegmentNote; first: boolean }[];
+  mashUntil: number;
+};
 type Prep = { forId: string; fromId: string; plan?: Plan; stretchKey?: string; working?: boolean; /** The DJ introduces the incoming set over this transition */ voice?: boolean };
 
 const TICK_MS = 200;
@@ -251,9 +263,25 @@ class Session {
     this.link = new TidalLink({
       seek: (t) => void this.run(() => this.onSeek(t)),
       playing: (p) => this.onPlaying(p),
-      volume: (v, muted) => void this.mixer.setVolume(v, muted).catch(() => {}),
+      volume: (v, muted) => this.onVolume(v, muted),
       device: () => {},
     });
+  }
+
+  /**
+   * The volume the mixer had when it was picked up again (see adopt), and until when that is what counts.
+   * TIDAL's page comes back with its volume at full, and only finds yours again a little later: taken
+   * from it at that moment, the music jumped to full volume and then back. So for the first seconds it
+   * goes the other way: the mixer keeps its volume and TIDAL is given it.
+   */
+  private kept?: { percent: number; until: number };
+  private onVolume(v: number, muted: boolean) {
+    const k = this.kept;
+    if (k && Date.now() < k.until) {
+      if (muted) return;
+      if (Math.round(v) !== k.percent) return void this.link.setVolume(k.percent);
+    }
+    void this.mixer.setVolume(v, muted).catch(() => {});
   }
 
   /** Ends this session, whether or not it is (still) the current one */
@@ -591,7 +619,158 @@ class Session {
   private tick() {
     if (this.stopped || this.ticking) return;
     this.ticking = true;
-    this.run(() => this.step()).finally(() => (this.ticking = false));
+    this.run(() => this.step()).finally(() => {
+      this.ticking = false;
+      this.noteCarry();
+    });
+  }
+
+  // ------------------ CARRIED OVER ------------------
+  private carried = "";
+  /** Keeps the mixer's side told what it would take to pick this session up again, should TIDAL's page go while the music plays */
+  private noteCarry() {
+    const cur = this.current;
+    let json = "";
+    if (cur && !this.opening && !this.stopped && !this.mixer.gone && this.mixer.running && this.link.playing) {
+      const note = (s: Segment): SegmentNote => ({ kind: s.kind, key: s.key, title: s.title });
+      const p = this.pending;
+      const carry: Carry = {
+        v: 1,
+        mode: this.follow ? "follow" : "dj",
+        current: { id: cur.item.track.id, deck: cur.deck.ref, segment: note(cur.item.segment) },
+        pending: p && { id: p.item.track.id, deck: p.deck.ref, swap: Math.round(p.swap * 1000) / 1000, segment: note(p.item.segment) },
+        upcoming: this.items
+          .filter((i) => i !== p?.item)
+          .slice(0, 12)
+          .map((i) => ({ id: i.track.id, segment: note(i.segment), first: i.first })),
+        mashUntil: Math.round(this.mashUntil * 1000) / 1000,
+      };
+      json = JSON.stringify(carry);
+    }
+    if (json === this.carried) return;
+    this.carried = json;
+    this.mixer.carry(json);
+  }
+
+  /**
+   * Picks up the mixer that played on while TIDAL's page was away, and the session that page had: the
+   * song that is playing, a transition that was scheduled, the sets that were to come. TIDAL's own player
+   * is put back on the song, silently, at the place the music is at. False: there was nothing left to
+   * pick up (the song had ended meanwhile, or TIDAL can't be put on it).
+   */
+  async adopt(c: Carry, alone: number): Promise<boolean> {
+    setStatus({ phase: "starting", mode: this.follow ? "follow" : "dj", busy: "Picking the music back up", note: undefined, caption: undefined, segment: c.current.segment.title });
+    const { decks, tracks, volume } = await this.mixer.adopt();
+    // (the mixer's volume stands, and TIDAL gets it: see onVolume. Not if it was at nothing: then you had it muted)
+    if (volume > 0) this.kept = { percent: volume, until: Date.now() + 25000 };
+    if (!(await this.link.whenReady(10000))) throw new Error("TIDAL's player didn't come back");
+    await initBrain();
+    if (this.stopped) return true;
+    await this.mixer.status();
+    const now = this.mixer.now;
+    const byRef = new Map(decks.map((d) => [d.ref, d]));
+    let cur = c.current;
+    let pend = c.pending;
+    if (pend && !byRef.get(pend.deck)) pend = undefined;
+    // A transition the session had only just scheduled when the page went is not in what it left behind,
+    // but it is in the mixer: the playing deck has been given an end, and there is a deck the session's
+    // notes don't know, which will not end. That one is the track coming in. (Unseen, it played on by
+    // itself and the session started its track a second time: the song twice, one over the other.)
+    const noted = byRef.get(cur.deck);
+    if (!pend && noted && noted.stopAt < Infinity) {
+      const coming = decks.filter((d) => d !== noted && d.started && d.stopAt === Infinity && d.map[0].t >= noted.map[0].t).sort((x, y) => y.map[0].t - x.map[0].t)[0];
+      if (coming) {
+        const known = c.upcoming.find((u) => u.id === coming.id);
+        // (when it takes over isn't known any more: half-way between its start and the other one's end)
+        pend = { id: coming.id, deck: coming.ref, swap: (Math.max(coming.map[0].t, noted.map[0].t) + noted.stopAt) / 2, segment: known?.segment ?? cur.segment };
+        c.upcoming = c.upcoming.filter((u) => u !== known);
+      }
+    }
+    // (a transition that was scheduled may have happened meanwhile: then its track is the one playing)
+    if (pend && now >= pend.swap) {
+      cur = pend;
+      pend = undefined;
+    }
+    const deck = byRef.get(cur.deck);
+    const incoming = pend ? byRef.get(pend.deck) : undefined;
+    if (pend && !incoming) pend = undefined;
+    const sounding = (d: Deck) => d.started && d.stopAt > now + 1.5 && d.positionAt(now) < d.loaded.duration - 1.5;
+    if (!deck || deck.id !== cur.id || !(sounding(deck) || (incoming && sounding(incoming)))) return false;
+    // Whatever else is in the mixer and not on its way out is nobody's: stopped, so it can't play on under the rest
+    for (const d of decks) if (d !== deck && d !== incoming && d.stopAt === Infinity) void this.mixer.kill(d, 0.3);
+
+    const ids = [cur.id, ...(pend ? [pend.id] : []), ...c.upcoming.map((u) => u.id)];
+    await ensureTracks(ids);
+    const track = trackInfo(cur.id);
+    if (!track) return false;
+    // The sets, as they were
+    const segments = new Map<string, Segment>();
+    const segmentOf = (n: SegmentNote): Segment => {
+      if (this.follow) return FOLLOW_SEGMENT;
+      const key = `${n.kind}|${n.key}|${n.title}`;
+      let s = segments.get(key);
+      if (!s) segments.set(key, (s = { kind: n.kind, key: n.key, title: n.title, tracks: [], facts: {} }));
+      return s;
+    };
+    const item: Item = { track, segment: segmentOf(cur.segment), first: false, ready: deck.loaded };
+    if (!this.follow) item.segment.tracks.push(track);
+    const items: Item[] = [];
+    const pendTrack = pend && trackInfo(pend.id);
+    let pending: Pending | undefined;
+    if (pend && incoming && pendTrack) {
+      const next: Item = { track: pendTrack, segment: segmentOf(pend.segment), first: false, ready: incoming.loaded };
+      if (!this.follow) next.segment.tracks.push(pendTrack);
+      items.push(next);
+      pending = { item: next, deck: incoming, swap: pend.swap };
+    }
+    if (!this.follow) {
+      for (const u of c.upcoming) {
+        const t = trackInfo(u.id);
+        if (!t) continue;
+        const segment = segmentOf(u.segment);
+        segment.tracks.push(t);
+        items.push({ track: t, segment, first: u.first });
+      }
+      this.anchor = await anchorFromTrack(cur.id).catch(() => undefined);
+    }
+    if (this.stopped) return true;
+
+    const engaged = await this.run(async () => {
+      this.link.takeOver(!this.follow);
+      this.current = { item, deck };
+      this.pending = pending;
+      this.items = items;
+      for (const i of [item, ...items]) this.known.set(i.track.id, i);
+      if (!this.follow) this.planned = [...new Set([item, ...items].map((i) => i.segment))];
+      this.greeted = true;
+      this.mashUntil = c.mashUntil;
+      // TIDAL's own player back on the song (it is silent now): the full DJ gives it its queue again,
+      // transitions only finds the song in the queue TIDAL has
+      if (!this.follow) await this.link.startQueue([cur.id, ...items.map((i) => i.track.id)]);
+      else {
+        if (!this.link.moveTo(cur.id)) return false;
+        this.link.play();
+      }
+      // (only now: TIDAL's page comes back paused, which is not you pausing the music)
+      this.opening = false;
+      this.lastTid = cur.id;
+      // (...and at the place the music is at: see reconcile)
+      this.justMoved = true;
+      this.nextSeekAt = Date.now() + 1200;
+      return true;
+    });
+    if (!engaged) return engaged === undefined;
+    // What the mixer still holds of tracks that are no longer playing is let go of
+    const inUse = new Set(this.mixer.decks.size ? [...this.mixer.decks].map((d) => d.id) : []);
+    for (const id of tracks) if (!inUse.has(id)) void this.mixer.unload(id);
+    setStatus({ phase: "playing", busy: undefined, segment: item.segment.title });
+    this.timer = setInterval(() => this.tick(), TICK_MS);
+    log(`Picked the music back up: TIDAL's page was away for ${(alone / 1000).toFixed(1)}s and ${track.artists[0]?.name} - ${track.title} played on${pending ? `, with the transition into ${pending.item.track.title} still to come` : ""}${this.follow ? " (transitions only)" : `; ${items.length} tracks still queued`}`);
+    if (!this.follow) {
+      if (settings.commentary !== "off") void voiceState().then((v) => v.usable && !this.stopped && prepareStock());
+      setTimeout(() => this.prepareAlt(), 4000);
+    }
+    return true;
   }
 
   private async step() {
@@ -749,6 +928,9 @@ class Session {
     const a = cur.deck.analysis;
     let plan = prep.plan;
     if (!plan) return;
+    // (the song has already run out, which takes TIDAL standing still for a while: nothing left to mix out
+    // of, and a transition planned now would start after seconds of silence. The next song simply starts)
+    if (pos >= a.lastSound - 0.05) return;
     let t0 = cur.deck.timeAt(plan.aStart);
     if (t0 - now > ARM_LEAD) return;
     let stretchKey = prep.stretchKey;
@@ -801,7 +983,8 @@ class Session {
       // Never leave silence because of a scheduling error: cut straight over
       warn("Couldn't schedule the transition, cutting over", err);
       this.mixer.dispose(deck);
-      await this.mixer.kill(cur.deck, 0.2);
+      // (everything that is on, not only the playing deck: whatever stood in the way of the transition is not to play on under the new track)
+      await this.silence(0.2);
       const plain = this.mixer.createDeck(next.ready!);
       this.pending = { item: next, deck: plain, swap: await this.mixer.startAlone(plain, next.ready!.analysis.firstSound, this.mixer.now + 0.2) };
     }
@@ -1801,6 +1984,9 @@ class Session {
     clearInterval(this.timer);
     clearTimeout(this.captionTimer);
     clearTimeout(this.leaving);
+    // (a session that ends is not one to pick up again)
+    this.carried = "";
+    this.mixer.carry("");
     log(`Session ended (${reason})`);
     setStatus({ phase: "stopping", busy: undefined, transition: undefined });
     const mixer = this.mixer;
@@ -1876,6 +2062,40 @@ export const startSession = async (mode: "dj" | "follow" = "dj", forMashup = fal
     if (mode === "dj") notify(`DJ couldn't start: ${(err as Error)?.message ?? err}`);
     await s.stop("failed to start", { quick: true });
     if (session === s) session = undefined;
+  } finally {
+    starting = false;
+  }
+};
+
+/**
+ * Called when the plugin loads: if the page before this one left its mixer playing (TIDAL's page died or
+ * was reloaded while the music played, see CARRIED OVER in mixer.native.ts), the session is picked up
+ * again where it was. Returns whether it was; if not, nothing of that mixer is left.
+ */
+export const resumeCarried = async (): Promise<boolean> => {
+  if (unloaded || session || starting) return false;
+  starting = true;
+  let s: Session | undefined;
+  try {
+    const found = await Mixer.carried();
+    if (!found) return false;
+    let c: Carry | undefined;
+    try {
+      c = JSON.parse(found.snapshot);
+    } catch {}
+    if (!c || c.v !== 1 || !c.current || (c.mode === "follow" && !settings.transitionOnly)) throw new Error("what was left of the session can't be read");
+    s = new Session(c.mode === "follow");
+    session = s;
+    if (await s.adopt(c, found.alone)) return true;
+    throw new Error("the song had ended, or TIDAL couldn't be put back on it");
+  } catch (err) {
+    warn("Couldn't pick the music back up", err);
+    if (s) {
+      await s.stop("couldn't pick the music back up", { quick: true }).catch(() => {});
+      if (session === s) session = undefined;
+    }
+    await closeAnyMixer();
+    return false;
   } finally {
     starting = false;
   }

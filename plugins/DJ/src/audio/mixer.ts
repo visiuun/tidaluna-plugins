@@ -3,7 +3,7 @@
 import dspSource from "file://./dsp.js";
 import pageSource from "file://./mixer.page.js";
 import { cachedAnalysis, storeAnalysis, type Analysis } from "./analysis";
-import { mixerCall, mixerClose, mixerOpen, mixerTrackUrl } from "./mixer.native";
+import { mixerAdopt, mixerCall, mixerCarried, mixerCarry, mixerClose, mixerOpen, mixerTrackUrl } from "./mixer.native";
 import type { Move, Plan } from "./plan";
 import { jingleStyle } from "../config";
 import { log } from "../log";
@@ -88,12 +88,21 @@ const JINGLE_SURE = 0.03;
 let nextDeck = 0;
 /** A deck in the mixer, with a local copy of its timeline */
 export class Deck {
-  readonly ref = `d${nextDeck++}`;
+  readonly ref: string;
   map: MapPoint[] = [];
   stopAt = Infinity;
   gain = 1;
   disposed = false;
-  constructor(readonly loaded: Loaded) {}
+  /** `ref`: the name of a deck that is already in the mixer (one picked up again, see Mixer.adopt) */
+  constructor(
+    readonly loaded: Loaded,
+    ref?: string,
+  ) {
+    this.ref = ref ?? `d${nextDeck++}`;
+    // (new decks are numbered on from the ones that are there)
+    const n = ref ? Number(ref.slice(1)) : NaN;
+    if (Number.isFinite(n)) nextDeck = Math.max(nextDeck, n + 1);
+  }
   get id() {
     return this.loaded.id;
   }
@@ -181,6 +190,50 @@ export class Mixer {
     this.gone = true;
     // Only ever its own: never the mixer of a session that started meanwhile
     if (this.hostId !== undefined) await mixerClose(this.hostId).catch(() => {});
+  }
+
+  // ------------------ CARRIED OVER ------------------
+  // The mixer plays on when TIDAL's page dies or is reloaded, and is picked up again by the DJ in the page
+  // that comes back (see CARRIED OVER in mixer.native.ts)
+  /** A mixer the page before this one left playing, if there is one: what its session knew, and for how long it has been on its own (ms) */
+  static carried() {
+    return mixerCarried(pageSource);
+  }
+  /** What a session would need to pick this mixer up again if the page went now ("": nothing) */
+  carry(snapshot: string) {
+    if (this.hostId !== undefined && !this.gone) mixerCarry(snapshot, this.hostId).catch(() => {});
+  }
+  /**
+   * Takes the carried mixer over. Returns its decks (as they are in it right now: where each is in its
+   * track, and when it stops), the tracks loaded in it, and the volume it is set to (percent).
+   */
+  async adopt() {
+    this.hostId = await mixerAdopt();
+    const inv = await this.call<{ volume?: number; decks: { ref: string; track: string }[]; tracks: { id: string; duration: number }[] }>("inventory");
+    const durations = new Map(inv.tracks.map((t) => [t.id, t.duration]));
+    const decks: Deck[] = [];
+    for (const d of inv.decks) {
+      const duration = durations.get(d.track);
+      if (duration === undefined) {
+        // (its track has been unloaded: it was on its way out)
+        this.call("dispose", { deck: d.ref }).catch(() => {});
+        continue;
+      }
+      const known = await cachedAnalysis(d.track);
+      const loaded: Loaded = { id: d.track, duration, analysis: known ?? placeholder(duration), analysed: !!known };
+      if (!known)
+        this.call<{ analysis: unknown }>("analyse", { id: d.track })
+          .then(async (a) => {
+            loaded.analysis = await storeAnalysis(d.track, a.analysis);
+            loaded.analysed = true;
+          })
+          .catch(() => {});
+      const deck = new Deck(loaded, d.ref);
+      this.decks.add(deck);
+      decks.push(deck);
+    }
+    await this.status();
+    return { decks, tracks: inv.tracks.map((t) => t.id), volume: Math.round(Math.max(0, Math.min(1, Number(inv.volume) || 0)) * 100) };
   }
   /** Refreshes the clock and levels */
   status() {
