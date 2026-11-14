@@ -44,7 +44,7 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("DJ
   quality: "LOSSLESS",
   homeCard: true,
   captions: true,
-  jingle: "swell",
+  jingle: "off",
   coverFx: true,
   transitionOnly: true,
   allowExplicit: true,
@@ -70,5 +70,6 @@ export const VOICES: Persona[] = [
 ];
 /** (settings saved before there was a choice have none: the online voices, then) */
 export const voiceEngine = (): VoiceEngine => (settings.voiceEngine === "local" ? "local" : "edge");
-export const jingleStyle = (): Jingle => (JINGLES.some((j) => j.id === settings.jingle) ? settings.jingle : "swell");
+/** (off unless one was chosen) */
+export const jingleStyle = (): Jingle => (JINGLES.some((j) => j.id === settings.jingle) ? settings.jingle : "off");
 export const persona = () => VOICES.find((v) => v.id === settings.voice) ?? VOICES.find((v) => v.id === "bella")!;
