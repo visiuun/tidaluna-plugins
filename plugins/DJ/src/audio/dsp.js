@@ -483,11 +483,32 @@ const DSP = (() => {
   };
 
   // ------------------ KEY ------------------
-  const KK_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
-  const KK_MINOR = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
-  const estimateKey = (chroma, frames2) => {
+  // How much each note of the scale is heard in a key (from the key note up), major and minor: Sha'ath's
+  // profiles, made for dance music (Krumhansl's, with more weight on the minor seventh).
+  const KEY_MAJOR = [6.6, 2.0, 3.5, 2.3, 4.6, 4.0, 2.5, 5.2, 2.4, 3.7, 2.3, 3.4];
+  const KEY_MINOR = [6.5, 2.7, 3.5, 5.4, 2.6, 3.5, 2.5, 5.2, 4.0, 2.7, 4.3, 3.2];
+  /**
+   * The key, from the notes that stand out (see `notes`): which of the 24 keys' profiles the notes heard
+   * over the whole track fit best. Only the peaks of the spectrum count, each at its real pitch and set
+   * against the track's own tuning, the bass notes at half weight, and every moment weighs about the
+   * same however loud it is. (Counting all the energy between 60 Hz and 2 kHz instead, as this did
+   * before, let the kick drum and the bass decide: four songs in ten came out as A minor or C major. On
+   * 21 songs whose key is known, that was right for 5 and nowhere near for 8; this is right for 13 and
+   * nowhere near for 3.)
+   */
+  const estimateKey = (heard) => {
     const sum = new Float64Array(12);
-    for (let t = 0; t < frames2; t++) for (let p = 0; p < 12; p++) sum[p] += chroma[t * 12 + p];
+    for (let t = 0; t < heard.frames; t++) {
+      let st = 0;
+      let sb = 0;
+      for (let p = 0; p < 12; p++) {
+        st += heard.top[t * 12 + p];
+        sb += heard.bass[t * 12 + p];
+      }
+      const kt = st > 0 ? 1 / Math.sqrt(st) : 0;
+      const kb = sb > 0 ? 0.5 / Math.sqrt(sb) : 0;
+      for (let p = 0; p < 12; p++) sum[p] += heard.top[t * 12 + p] * kt + heard.bass[t * 12 + p] * kb;
+    }
     const corr = (profile, shift) => {
       let mx = 0;
       let my = 0;
@@ -511,8 +532,8 @@ const DSP = (() => {
     };
     const all = [];
     for (let s = 0; s < 12; s++) {
-      all.push({ tonic: s, mode: "major", c: corr(KK_MAJOR, s) });
-      all.push({ tonic: s, mode: "minor", c: corr(KK_MINOR, s) });
+      all.push({ tonic: s, mode: "major", c: corr(KEY_MAJOR, s) });
+      all.push({ tonic: s, mode: "minor", c: corr(KEY_MINOR, s) });
     }
     all.sort((a, b) => b.c - a.c);
     return { tonic: all[0].tonic, mode: all[0].mode, conf: all[0].c - all[1].c, corr: all[0].c };
@@ -746,7 +767,8 @@ const DSP = (() => {
     const beatFramesPer = env.length / Math.max(1, nBeats);
     const pulse = nBeats ? onBeat / nBeats / (total / env.length + 1e-9) : 0;
 
-    const key = estimateKey(f.chroma, f.frames2);
+    const heard = notes(x, sr);
+    const key = estimateKey(heard);
 
     return {
       duration,
@@ -776,6 +798,8 @@ const DSP = (() => {
       outroBars: nBars - outroBar,
       fadeOut,
       key,
+      // (how far the track is from concert pitch, in cents; 0 where its notes don't say)
+      tuning: heard.clarity > 0.12 ? heard.tuning : 0,
     };
   };
 
@@ -1102,7 +1126,9 @@ const DSP = (() => {
    * average, in cents: a track made from a sped-up sample can be a quarter tone out, and two tracks only
    * sound in tune together when that is known.
    */
-  const profile = (x, sr) => {
+  const profile = (x, sr) => ({ ...notes(x, sr), ...hits(x, sr) });
+  /** The notes of a track, frame by frame, and its tuning (the first half of `profile`; the key is read off this too) */
+  const notes = (x, sr) => {
     // The notes are all below 2.1 kHz: a quarter of the samples carry them (and cost a quarter to look at)
     const D = 4;
     const xd = new Float32Array(Math.floor(x.length / D));
@@ -1203,7 +1229,10 @@ const DSP = (() => {
         (list[i + 2] ? top : bass)[t * 12 + pc] += list[i + 1];
       }
     }
-
+    return { frames, hop: H / srd, win: N / srd, bass, top, eBass, eTop, tuning, clarity };
+  };
+  /** The drum hits of a track (the second half of `profile`) */
+  const hits = (x, sr) => {
     // Drum hits: how fast the level rises, below 150 Hz (the kick) and above 1.5 kHz (claps, snares,
     // hats). Followed in the waveform itself, smoothed over a few waves: a window short enough to place
     // a kick is shorter than a bass note's wave, and a held bass note then looks like a string of hits.
@@ -1249,7 +1278,7 @@ const DSP = (() => {
         }
       }
     }
-    return { frames, hop: H / srd, win: N / srd, bass, top, eBass, eTop, tuning, clarity, fps: sr / H2, drumWin: N2 / sr, low, high };
+    return { fps: sr / H2, drumWin: N2 / sr, low, high };
   };
 
   return { analyze, stretch, profile, makeFFT };

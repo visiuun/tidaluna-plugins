@@ -78,8 +78,13 @@ const placeholder = (duration: number): Analysis => ({
   outroBars: 0,
   fadeOut: false,
   key: { tonic: 0, mode: "major", conf: 0 },
+  tuning: 0,
 });
 
+const NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+// How clear a key has to be (the lead of the best fit over the next) for the jingle to say major or minor: under this
+// the runner-up can be the same key note in the other mode, and the wrong third is the one thing that would clash
+const JINGLE_SURE = 0.03;
 let nextDeck = 0;
 /** A deck in the mixer, with a local copy of its timeline */
 export class Deck {
@@ -280,24 +285,32 @@ export class Mixer {
   /** The DJ speaks, optionally over a deck that fades away and/or into a deck that starts under the line */
   async talk(clip: Clip, opts: { a?: Deck; t0?: number; b?: Deck; pos?: number; intro?: number }) {
     await this.ensureClip(clip);
-    return this.spoke(await this.call<Spoken>("talk", { clip: clip.key, a: opts.a?.ref, t0: opts.t0, b: opts.b?.ref, track: opts.b?.id, pos: opts.pos, intro: opts.intro, ...this.jingle(opts.a, opts.b) }));
+    const sting = this.jingle(opts.a, opts.b);
+    return this.spoke(await this.call<Spoken>("talk", { clip: clip.key, a: opts.a?.ref, t0: opts.t0, b: opts.b?.ref, track: opts.b?.id, pos: opts.pos, intro: opts.intro, ...sting }), sting);
   }
   /**
-   * The DJ's jingle, if one comes before its lines (its style), and the key it is played in: that of the
-   * song it comes over (the one going out, the one playing, or the one about to come in), C if there is none
+   * The DJ's jingle, if one comes before its lines (its style), and what it takes from the song it comes
+   * over (the one going out, the one playing, or the one about to come in): its key note (C if there is no
+   * song), whether it is minor, whether the key is clear enough to say so (`sure`: the jingle's chord is
+   * left open otherwise), and how far the song is from concert pitch (`cents`)
    */
   private jingle(a?: Deck, b?: Deck) {
     const now = this.now;
     const playing = [...this.decks].filter((d) => !d.disposed && d.started && d.stopAt > now);
     const deck = a ?? playing[playing.length - 1] ?? b;
-    const key = deck?.loaded.analysed ? deck.analysis.key : undefined;
+    const analysis = deck?.loaded.analysed ? deck.analysis : undefined;
+    const key = analysis?.key;
     const style = jingleStyle();
-    return { jingle: style === "off" ? undefined : style, tonic: key?.tonic, minor: key?.mode === "minor" };
+    return { jingle: style === "off" ? undefined : style, tonic: key?.tonic, minor: key?.mode === "minor", sure: (key?.conf ?? 0) >= JINGLE_SURE, cents: analysis?.tuning ?? 0 };
   }
-  /** Notes how a line sits against the music */
-  private spoke(r: Spoken) {
+  /** Notes how a line sits against the music, and the key its jingle was in */
+  private spoke(r: Spoken, sting?: { tonic?: number; minor?: boolean; sure?: boolean; cents?: number }) {
     const db = (v: number) => (20 * Math.log10(Math.max(v, 1e-6))).toFixed(1);
-    if (r.jingle !== undefined) log(`Jingle ${(r.voiceStart - r.jingle).toFixed(2)}s before the line`);
+    if (r.jingle !== undefined) {
+      const cents = Math.round((sting?.cents ?? 0) / 5) * 5;
+      const key = sting?.tonic === undefined ? "C (no song to take a key from)" : `${NOTES[sting.tonic]}${sting.sure ? (sting.minor ? " minor" : " major") : " (major or minor unclear: its chord left open)"}${cents ? `, ${cents > 0 ? "+" : ""}${cents} cents` : ""}`;
+      log(`Jingle in ${key}, ${(r.voiceStart - r.jingle).toFixed(2)}s before the line`);
+    }
     log(`Voice level: speaking at ${db(r.voice)} dBFS, the music at full ${db(r.music)} dBFS and ${db(r.music * r.under)} under the voice: the words are ${db(r.voice / (r.music * r.under))} dB above it`);
     return r;
   }
@@ -321,7 +334,7 @@ export class Mixer {
     await this.ensureClip(clip);
     const jingle = withJingle ? this.jingle() : {};
     const dip = await this.call<{ voiceAt: number }>("dipMusic", { seconds: clip.duration + 0.2, at, ...jingle });
-    return this.spoke(await this.call<Spoken>("talk", { clip: clip.key, t0: dip.voiceAt, ...jingle }));
+    return this.spoke(await this.call<Spoken>("talk", { clip: clip.key, t0: dip.voiceAt, ...jingle }), jingle);
   }
   /** Everything eases down under the voice from now on. Returns when the line should start (on the mixer's clock) */
   async duckAll() {

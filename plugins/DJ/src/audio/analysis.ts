@@ -29,8 +29,10 @@ export type Analysis = {
   outroBars: number;
   fadeOut: boolean;
   key: { tonic: number; mode: "major" | "minor"; conf: number };
+  /** How far the track is from concert pitch, in cents (0 where its notes don't say) */
+  tuning: number;
 };
-const VERSION = 8;
+const VERSION = 9;
 
 // ------------------ CACHE ------------------
 let cache: Record<string, Analysis> | undefined;
@@ -90,6 +92,7 @@ const compact = (r: any): Analysis => {
     outroBars: r.outroBars,
     fadeOut: r.fadeOut,
     key: { tonic: r.key.tonic, mode: r.key.mode, conf: round(r.key.conf, 3) },
+    tuning: round(r.tuning ?? 0, 1),
   };
 };
 

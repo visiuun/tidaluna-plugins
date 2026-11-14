@@ -1546,16 +1546,20 @@ registerProcessor("dj-limiter", Limiter);
     return when + buffer.duration;
   };
   // ------------------ JINGLE ------------------
-  // The DJ's signature, heard before it speaks: two seconds, the same every time (that is what is
-  // remembered), in one of five styles (`style`), each with its accent a quarter to half a second in:
+  // The DJ's signature, heard before it speaks: two seconds, the same shape every time (that is what is
+  // remembered) in the colour of the song it comes over, in one of five styles (`style`), each with its
+  // accent a quarter to half a second in:
   //   swell   a soft rush of air and a string ensemble winding up, which stutter and are sucked away for a
   //           moment, landing on a deep boom with the air rushing back out and a softly strummed chord over it
   //   brass   a horn section: a short stab a tone below the key note and a long one on it ("ba-DAAH")
   //   guitar  two muted chugs and an overdriven power chord, with kick, snare and a dark cymbal
   //   drums   four toms going down and a boom
   //   pulse   four quick notes on a synth bass, its filter opening, and a stab that closes again
-  // All of them are in the key of the song they come over (`tonic`: 0 = C ... 11 = B, C when there is
-  // none; `minor` where a third is played), so they are in tune with the music they interrupt.
+  // All of them take their sound from the song they come over, so they are in tune with the music they
+  // interrupt and change with it: its key note (`tonic`: 0 = C ... 11 = B, C when there is none), its
+  // major or minor (`third`: 4 or 3 semitones, played in each style's chord, the toms coming down it; 0
+  // where the key isn't known well enough to say, and the chord is left open: key note and fifth), and its
+  // tuning (`cents` from concert pitch: a track made from a sped-up sample can be a quarter tone out).
   // They are made by an offline audio context (the same oscillators and filters as the live one, run
   // as fast as they go), the plucked strings sample by sample; once for each key asked for.
   const JINGLE_IN = 0.45; // its start, from when the music starts to go down (its first half second needs the music partly out of the way)
@@ -1564,10 +1568,10 @@ registerProcessor("dj-limiter", Limiter);
   const JINGLE_LEVEL = 0.24; // RMS of its loudest third of a second (the voice speaks at VOICE_LEVEL)
   const JINGLE_GAP = 45; // not again within this many seconds: two lines in a row share one
   const JINGLE_SECONDS = 2.1;
-  const renderJingle = async (sr, tonic, minor, style) => {
-    // (the key note between the F two octaves below middle C and the E above it)
+  const renderJingle = async (sr, tonic, third, style, cents = 0) => {
+    // (the key note between the F two octaves below middle C and the E above it, as far from concert pitch as the song is)
     const root = 41 + (((((tonic | 0) - 5) % 12) + 12) % 12);
-    const hz = (semis) => 440 * Math.pow(2, (root + semis - 69) / 12);
+    const hz = (semis) => 440 * Math.pow(2, (root + semis - 69 + cents / 100) / 12);
     // (the same noise every time, so the jingle is the same every time)
     let seed = 20231;
     const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x40000000) - 1;
@@ -1731,7 +1735,6 @@ registerProcessor("dj-limiter", Limiter);
     };
     const T = 0.02;
     const HIT = T + 0.5;
-    const third = minor ? 3 : 4;
     const VOICE = toVoice(style);
 
     if (style === "brass") {
@@ -1761,7 +1764,7 @@ registerProcessor("dj-limiter", Limiter);
       };
       horns(T, 0.14, [-2, 10, 14, 17, 22], 0.8);
       kick(T, 0.6, 0.2);
-      horns(T + 0.22, 0.55, [0, 12, 12 + third, 19, 24], 1);
+      horns(T + 0.22, 0.55, third ? [0, 12, 12 + third, 19, 24] : [0, 12, 19, 24], 1);
       kick(T + 0.22, 0.8);
     } else if (style === "guitar") {
       // (two takes, one to each side)
@@ -1769,7 +1772,7 @@ registerProcessor("dj-limiter", Limiter);
         const x = new Float32Array(Math.round(JINGLE_SECONDS * sr));
         const late = side > 0 ? 0.009 : 0;
         for (const at of [T, T + 0.14]) for (const semis of [0, 7]) string(x, hz(semis), at + late, 0.11, 0.955);
-        [0, 7, 12, 19].forEach((semis, k) => string(x, hz(semis), T + 0.3 + late + 0.011 * k, 1.4, 0.9985));
+        (third ? [0, 7, 12, 19, 24 + third] : [0, 7, 12, 19]).forEach((semis, k) => string(x, hz(semis), T + 0.3 + late + 0.011 * k, 1.4, 0.9985));
         const s = oc.createBufferSource();
         s.buffer = mono(x);
         s.start(0);
@@ -1806,7 +1809,7 @@ registerProcessor("dj-limiter", Limiter);
         p.connect(out);
         p.connect(gain(0.5)).connect(room);
       };
-      [12, 7, 5, 0].forEach((semis, k) => tom(T + 0.13 * k, hz(semis), 0.6 + 0.08 * k, -0.5 + 0.33 * k));
+      [12, 7, third || 5, 0].forEach((semis, k) => tom(T + 0.13 * k, hz(semis), 0.6 + 0.08 * k, -0.5 + 0.33 * k));
       kick(T + 0.52, 0.9, 0.35);
       boom(T + 0.52, 0.7);
       wash(T + 0.52, 0.12, 0.9);
@@ -1825,13 +1828,13 @@ registerProcessor("dj-limiter", Limiter);
         osc("square", hz(semis), t, 0.2, -9).connect(gain(0.5)).connect(g);
         g.connect(lp);
       });
-      // the stab: the key note and its fifth, the filter closing again
+      // the stab: the key note and its fifth (and the third, where the key says which), the filter closing again
       const close = filter("lowpass", 3000, 4);
       close.frequency.setValueAtTime(3000, HIT);
       close.frequency.exponentialRampToValueAtTime(450, HIT + 0.6);
       const env = gain(0);
       hitEnv(env.gain, HIT, 0.9, 0.7, 0.005, 0.05);
-      for (const semis of [0, 12, 19, 24]) for (const cents of [-8, 8]) osc("sawtooth", hz(semis), HIT, 0.8, cents).connect(panned(cents / 12)).connect(gain(0.18)).connect(close);
+      for (const semis of third ? [0, 12, 12 + third, 19, 24] : [0, 12, 19, 24]) for (const cents of [-8, 8]) osc("sawtooth", hz(semis), HIT, 0.8, cents).connect(panned(cents / 12)).connect(gain(0.18)).connect(close);
       close.connect(env).connect(out);
       env.connect(gain(0.4)).connect(echo);
       env.connect(gain(0.3)).connect(room);
@@ -1872,7 +1875,7 @@ registerProcessor("dj-limiter", Limiter);
       air.gain.exponentialRampToValueAtTime(0.22, HIT - 0.04);
       air.gain.linearRampToValueAtTime(0, HIT - 0.03);
       noise(T, 0.6).connect(lp).connect(air).connect(chop);
-      // a chord fading in under it (the key note and its fifth: no third) on a string ensemble (saw
+      // a chord fading in under it (the key note and its fifth, and the third where it is known) on a string ensemble (saw
       // waves, four to a note and a little apart, through a filter that opens as they swell), winding
       // up to its pitch like a record getting up to speed; it rings on after the landing, darker
       const rise = new Float32Array(32);
@@ -1894,6 +1897,7 @@ registerProcessor("dj-limiter", Limiter);
         [12, 0.2],
         [19, 0.16],
         [24, 0.14],
+        ...(third ? [[12 + third, 0.12]] : []),
       ]) {
         for (const cents of [-11, -4, 4, 11]) {
           const o = osc("sawtooth", hz(semis), T, 1.9, cents);
@@ -1920,10 +1924,10 @@ registerProcessor("dj-limiter", Limiter);
       away.connect(out);
       away.connect(gain(0.5)).connect(room);
       // and an open chord strummed softly over it on plucked strings (key note, fifth, octave, second,
-      // fifth: no third), two players, one to each side, echoing once
+      // fifth, with the third under them where it is known), two players, one to each side, echoing once
       for (const side of [-1, 1]) {
         const x = new Float32Array(Math.round(JINGLE_SECONDS * sr));
-        [12, 19, 24, 26, 31].forEach((semis, k) => string(x, hz(semis), HIT + 0.004 + 0.017 * k + (side > 0 ? 0.007 : 0), 1.5, 0.9975, 0.78));
+        (third ? [12, 12 + third, 19, 24, 26, 31] : [12, 19, 24, 26, 31]).forEach((semis, k) => string(x, hz(semis), HIT + 0.004 + 0.017 * k + (side > 0 ? 0.007 : 0), 1.5, 0.9975, 0.78));
         const src = oc.createBufferSource();
         src.buffer = mono(x);
         src.start(0);
@@ -1975,16 +1979,22 @@ registerProcessor("dj-limiter", Limiter);
   const onTheWall = (t) => performance.now() / 1000 + (t - ctx.currentTime);
   let jingledFor = -1e9; // the start of the last line that had one
   const jingleDue = (on, voiceAt) => !!on && onTheWall(voiceAt) - jingledFor > JINGLE_GAP;
-  /** The jingle in a style and a key (a promise of it: it is made the first time it is asked for, which takes a moment) */
-  const jingleIn = (style, tonic, minor) => {
+  /**
+   * The jingle in a style and a key (a promise of it: it is made the first time it is asked for, which takes
+   * a moment). `sure`: the key is known well enough to say major or minor (its third is played); `cents`:
+   * how far the song is from concert pitch, which the jingle is then too (to the nearest 5).
+   */
+  const jingleIn = (style, tonic, minor, sure, cents) => {
     const pc = Number.isFinite(tonic) ? ((Math.round(tonic) % 12) + 12) % 12 : 0;
-    const key = style + ":" + pc + (minor ? "m" : "");
+    const off = Number.isFinite(cents) ? Math.max(-50, Math.min(50, Math.round(cents / 5) * 5)) : 0;
+    const third = !sure ? 0 : minor ? 3 : 4;
+    const key = style + ":" + pc + ":" + third + ":" + off;
     let made = jingles.get(key);
     if (!made) {
-      made = renderJingle(ctx.sampleRate, pc, !!minor, style);
+      made = renderJingle(ctx.sampleRate, pc, third, style, off);
       jingles.set(key, made);
       made.catch(() => jingles.delete(key));
-      if (jingles.size > 6) jingles.delete(jingles.keys().next().value);
+      if (jingles.size > 8) jingles.delete(jingles.keys().next().value);
     }
     return made;
   };
@@ -2562,12 +2572,12 @@ registerProcessor("dj-limiter", Limiter);
     /**
      * The DJ talks. Optionally drops deck `a` under the voice and fades it out; speaks `clip`; optionally
      * brings deck `b` in around the end of the line (see bringIn). With `jingle` (a style of it), its signature
-     * comes first (in the key `tonic`, `minor` or not), unless the line before had it a moment ago.
+     * comes first (in the key `tonic`, `minor` or not, see jingleIn), unless the line before had it a moment ago.
      */
-    talk: async ({ a: aId, t0, clip: clipKey, b: bId, track, pos, intro, jingle, tonic, minor }) => {
+    talk: async ({ a: aId, t0, clip: clipKey, b: bId, track, pos, intro, jingle, tonic, minor, sure, cents }) => {
       const a = aId ? decks.get(aId) : undefined;
       // (made before anything is timed: the first time in a key that takes a moment)
-      const sting = jingle ? await jingleIn(jingle, tonic, minor).catch(() => null) : null;
+      const sting = jingle ? await jingleIn(jingle, tonic, minor, sure, cents).catch(() => null) : null;
       t0 = soon(t0 ?? 0, 0.08);
       let voiceStart = t0;
       if (a) {
@@ -2610,8 +2620,8 @@ registerProcessor("dj-limiter", Limiter);
      * Returns when the line should start: a moment into the music going down, or, with `jingle`, once
      * the DJ's signature has had its turn (see talk).
      */
-    dipMusic: async ({ seconds, at, jingle, tonic, minor }) => {
-      if (jingle) await jingleIn(jingle, tonic, minor).catch(() => null);
+    dipMusic: async ({ seconds, at, jingle, tonic, minor, sure, cents }) => {
+      if (jingle) await jingleIn(jingle, tonic, minor, sure, cents).catch(() => null);
       const g = music.gain;
       const t = Math.max(ctx.currentTime + 0.03, at ?? 0);
       const lead = jingleDue(jingle, t + LEAD) ? JINGLE_IN + toVoice(jingle) : LEAD;
@@ -2628,8 +2638,8 @@ registerProcessor("dj-limiter", Limiter);
       return { voiceAt: t + lead };
     },
     /** Everything down under the voice from now on (a goodbye, or a line with nothing to mix out of). Returns when the line should start */
-    duckAll: async ({ jingle, tonic, minor }) => {
-      if (jingle) await jingleIn(jingle, tonic, minor).catch(() => null);
+    duckAll: async ({ jingle, tonic, minor, sure, cents }) => {
+      if (jingle) await jingleIn(jingle, tonic, minor, sure, cents).catch(() => null);
       const now = ctx.currentTime + 0.03;
       const level = under(now);
       for (const d of decks.values()) {
@@ -2645,8 +2655,8 @@ registerProcessor("dj-limiter", Limiter);
       return { voiceAt: now + (jingleDue(jingle, now + LEAD) ? JINGLE_IN + toVoice(jingle) : LEAD) };
     },
     /** Has the jingle made in a key before it is needed */
-    jinglePrep: ({ jingle, tonic, minor }) => {
-      if (jingle) jingleIn(jingle, tonic, minor).catch(() => null);
+    jinglePrep: ({ jingle, tonic, minor, sure, cents }) => {
+      if (jingle) jingleIn(jingle, tonic, minor, sure, cents).catch(() => null);
       return {};
     },
     killAll: ({ fade }) => {

@@ -149,7 +149,7 @@ export const Settings = () => {
         <LunaSelectItem value="off">No talking, just the mix</LunaSelectItem>
       </LunaSelectSetting>
 
-      <LunaSelectSetting title="Jingle" desc="The DJ's signature before it speaks: two seconds, in the key of the song it comes over" value={jingleStyle()} onChange={(e: any) => set("jingle", e.target.value as Jingle)}>
+      <LunaSelectSetting title="Jingle" desc="The DJ's signature before it speaks: two seconds, in the key, the major or minor and the tuning of the song it comes over" value={jingleStyle()} onChange={(e: any) => set("jingle", e.target.value as Jingle)}>
         {JINGLES.map((j) => (
           <LunaSelectItem key={j.id} value={j.id}>
             {j.name}
