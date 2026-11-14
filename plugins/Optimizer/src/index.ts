@@ -1,4 +1,13 @@
-// Optimizer: nothing is animated or drawn while nobody can see it.
+// Optimizer: keeps TIDAL light, and keeps it going.
+//
+// Besides what is below, which is this file's own business:
+//   - a memory guard that cleans TIDAL's page as it fills up and reloads it before it dies (memory.ts)
+//   - what was playing put back on after the page died, froze or was reloaded (recover.ts)
+//   - a measurement of which scripts the page spends its time in (scripts.ts)
+//   - TIDAL's processes, their memory and what is on disk, on the settings page (Settings.tsx)
+// The part of all that which has to happen outside the page is in guard.native.ts.
+//
+// Nothing is animated or drawn while nobody can see it.
 //
 // TIDAL keeps its window fully awake in the background (see watch.native.ts), so minimised, or behind a
 // game, TIDAL and every plugin go on drawing every frame of every animation, visualiser and 3D cover.
@@ -16,10 +25,17 @@
 // Other plugins can go by it without depending on it: `document.hidden` and the "visibilitychange" event
 // are the standard way, and `window.lunaOptimizer` ({ visible, onChange(cb) }) is there as well.
 import { LunaUnload, Tracer } from "@luna/core";
+import { seenChanged, startGuard } from "./memory";
+import { startRecovery } from "./recover";
+import { installTimers, removeTimers, setSlowing } from "./scripts";
 import { settings, status, statusChanged } from "./state";
 import { startWatching, stopWatching, visibilityAfter } from "./watch.native";
 
 export { Settings } from "./Settings";
+// (what the settings page shows and does, for whoever wants to look or ask from outside it)
+export { check, clean, checkDisk } from "./memory";
+export { measure } from "./scripts";
+export { settings, status } from "./state";
 export const { trace } = Tracer("[Optimizer]");
 export const unloads = new Set<LunaUnload>();
 
@@ -181,6 +197,9 @@ let sweep: ReturnType<typeof setInterval> | undefined;
 const apply = (hide: boolean) => {
   if (hide === applied) return;
   applied = hide;
+  // (the memory guard cleans up while nobody is looking; fast timers run slower then, if that is asked for)
+  seenChanged(hide);
+  setSlowing(hide);
   if (hide) {
     status.pauses++;
     status.pausedSince = Date.now();
@@ -232,6 +251,13 @@ unloads.add(() => {
   apply(false);
   stopWatching().catch(() => {});
 });
+
+// ------------------ MEMORY, RECOVERY, TIMERS ------------------
+const said = { notify: (msg: string) => trace.msg.log(msg), log: (msg: string) => trace.log(msg) };
+unloads.add(startGuard(said));
+unloads.add(startRecovery(said));
+installTimers();
+unloads.add(removeTimers);
 
 (async () => {
   try {

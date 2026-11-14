@@ -1,7 +1,7 @@
 {
   "name": "@visiuun/optimizer",
-  "version": "1.0.1",
-  "description": "Optimizer: stops TIDAL and every plugin from animating and rendering while the window can't be seen (minimised, or behind a game or another window), and starts them again the moment it can",
+  "version": "1.1.0",
+  "description": "Optimizer: keeps TIDAL light and keeps it going. Nothing is animated or drawn while the window can't be seen; a memory guard cleans TIDAL's page before it fills up; and when the page dies or freezes, it and the music are brought back",
   "author": {
     "name": "visiuun",
     "url": "https://github.com/visiuun/tidaluna-plugins",

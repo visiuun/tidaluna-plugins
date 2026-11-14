@@ -35,6 +35,19 @@ type Watch = {
 };
 let watch: Watch | undefined;
 
+// This file is run afresh, with fresh variables, whenever the plugin is loaded, and that includes a page
+// that was reloaded or died: nothing then stops the watch the page before had started. Its timer went on
+// asking a little page that the new load had meanwhile closed, and failed every five seconds with an
+// error box ("Cannot read properties of undefined (reading 'executeJavaScript')"). So the way to stop the
+// running watch is kept where every load finds it: on Electron's `app` object, under a symbol.
+const SHARED = Symbol.for("visiuun.optimizer.watch");
+const own: { stop?: () => void } = {};
+const shared = (): { stop?: () => void } => {
+  const app = getElectron()?.app;
+  if (!app) return own;
+  return (app[SHARED] ??= {});
+};
+
 const settle = (w: Watch) => {
   let visible = false;
   try {
@@ -89,12 +102,15 @@ export const startWatching = async (): Promise<{ visible: boolean; covered: bool
       if (text.startsWith(MARK + ":")) heard(text.slice(MARK.length + 1));
     });
     await view.webContents.loadURL(SENTINEL);
-    // (asked now and then as well, should a message go missing)
-    const ask = () =>
-      view.webContents
-        .executeJavaScript("document.visibilityState")
-        .then(heard)
-        .catch(() => {});
+    // (asked now and then as well, should a message go missing. Never throws: this runs from a timer,
+    // where an error is an error box on the screen; a little page that is gone ends the asking)
+    const ask = async () => {
+      try {
+        const contents = view.webContents;
+        if (!contents || contents.isDestroyed()) return void clearInterval(poll);
+        heard(await contents.executeJavaScript("document.visibilityState"));
+      } catch {}
+    };
     poll = setInterval(ask, 5000);
     await ask();
     covered = true;
@@ -114,13 +130,15 @@ export const startWatching = async (): Promise<{ visible: boolean; covered: bool
         win.contentView.removeChildView(w.view);
       } catch {}
       try {
-        w.view.webContents.close();
+        w.view.webContents?.close();
       } catch {}
     }
     for (const tell of w.waiting) tell(null);
     w.waiting.clear();
+    if (shared().stop === w.stop) shared().stop = undefined;
   };
   watch = w;
+  shared().stop = w.stop;
   settle(w);
   return { visible: w.visible, covered };
 };
@@ -149,4 +167,9 @@ export const visibilityAfter = (known: boolean): Promise<boolean | null> => {
 export const stopWatching = async () => {
   watch?.stop();
   watch = undefined;
+  // (and one an earlier load of this file left running)
+  try {
+    shared().stop?.();
+  } catch {}
+  shared().stop = undefined;
 };
