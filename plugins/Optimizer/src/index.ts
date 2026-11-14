@@ -6,7 +6,8 @@
 //
 //   - holds animation frames: what was asked to be drawn waits, and is drawn once when the window is back
 //   - pauses CSS animations, and endless animations made in script
-//   - pauses videos that have no sound (animated covers and the like), and plays them again afterwards
+//   - pauses decoration that is a video (animated covers and the like: muted, with no sound of its own), and plays it
+//     again afterwards. Never TIDAL's own player
 //   - has the page say it is hidden (document.hidden, "visibilitychange"), as it would in a browser:
 //     TIDAL and any plugin that asks can then leave their own work undone
 //
@@ -105,11 +106,19 @@ const resumeLoops = () => {
 unloads.add(resumeLoops);
 
 // ------------------ VIDEOS ------------------
-// Only the ones nobody hears: a video with sound is something being listened to
+// Only decoration: animated covers and the like, which are muted and have no sound of their own.
+//
+// Never TIDAL's own player. That is a <video> too (in #tidal-player-root), and not only for videos:
+// songs TIDAL plays through its web player are in it as well. With the DJ plugin on it plays at volume
+// zero, since the DJ's mixer makes the sound, and pausing it pauses TIDAL, and the DJ, which follows
+// TIDAL, with it: the music stopped whenever the window went out of sight during such a song. So volume
+// zero doesn't count as "no sound" (muted does), anything that has an audio track is left alone, and so
+// is everything in TIDAL's player.
 const paused = new Set<HTMLVideoElement>();
-const silent = (v: HTMLVideoElement) => v.muted || v.volume === 0;
+const PLAYER = "#tidal-player-root, .tidal-player-root, [id^='tidal-player'], [class*='tidal-player']";
+const decoration = (v: HTMLVideoElement) => v.muted && !(Number((v as any).webkitAudioDecodedByteCount) > 0) && v.id !== "video-one" && v.id !== "video-two" && !v.closest(PLAYER);
 const pauseVideo = (v: HTMLVideoElement) => {
-  if (v.paused || !silent(v)) return;
+  if (v.paused || !decoration(v)) return;
   paused.add(v);
   status.videosPaused++;
   v.pause();
