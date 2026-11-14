@@ -127,8 +127,13 @@ export const check = async () => {
 };
 
 // ------------------ BACK TO WINDOWS ------------------
+// Luna has to allow it, and asks with a box that stops TIDAL until it is answered (see guard.native.ts).
+// So it is asked only when you are there to answer: when you switch this on, or, where it is on already,
+// with TIDAL's window in front of you (a new version of the plugin is asked about again). Until it has
+// been allowed in this run, nothing is handed back.
 /** Memory can be handed back here (Windows, and Luna allows it). Not known until asked */
 let canTrim: boolean | undefined;
+let asking: Promise<boolean> | undefined;
 /** Hands the memory TIDAL isn't using back to Windows now. `why`: for the record */
 export const trim = async (why: string) => {
   const r = await handBack();
@@ -147,9 +152,11 @@ export const seenChanged = (hidden: boolean) => {
   unseen = hidden;
   clearTimeout(hiddenTimer);
   clearInterval(trimTimer);
+  // (in front of you again, and Luna hasn't been asked in this run: now is the time)
+  if (!hidden) askInSight();
   if (!hidden || unloaded) return;
   const handOver = () => {
-    if (unloaded || !unseen || !settings.trim || !canTrim) return;
+    if (unloaded || !unseen || !settings.handBack || canTrim !== true) return;
     trim("TIDAL was out of sight").catch((err) => log(`Memory couldn't be handed back: ${String((err as Error)?.message ?? err)}`));
   };
   hiddenTimer = setTimeout(async () => {
@@ -191,8 +198,9 @@ export const startGuard = (opts: { notify: (msg: string) => void; log: (msg: str
   const touched = () => (lastTouch = Date.now());
   const events = ["pointerdown", "keydown", "wheel"] as const;
   for (const e of events) window.addEventListener(e, touched, { capture: true, passive: true });
-  // (asked now, while you are there: Luna asks once whether this plugin may start a program)
-  if (settings.trim) void askTrim();
+  // (once it is known whether TIDAL's window can be seen, and whenever you come to it: see askInSight)
+  const ask = setTimeout(askInSight, 6000);
+  window.addEventListener("focus", askInSight);
   const first = setTimeout(check, 4000);
   const timer = setInterval(check, CHECK_MS);
   const disk = setTimeout(checkDisk, 30000);
@@ -206,12 +214,31 @@ export const startGuard = (opts: { notify: (msg: string) => void; log: (msg: str
     clearInterval(diskTimer);
     clearTimeout(hiddenTimer);
     clearInterval(trimTimer);
+    clearTimeout(ask);
+    window.removeEventListener("focus", askInSight);
   };
 };
-/** Finds out whether memory can be handed back here (this is where Luna asks its question) */
-export const askTrim = async () => {
-  canTrim = await canHandBack().catch(() => false);
-  status.canTrim = canTrim;
-  statusChanged();
-  return canTrim;
+/**
+ * Finds out whether memory can be handed back here. THIS IS WHERE LUNA ASKS ITS QUESTION, and TIDAL
+ * stands still until it is answered: only called when you are there (you switched it on, you pressed the
+ * button, or TIDAL's window is in front of you). A "no" from you switches the setting off, so that it
+ * isn't asked again at every start.
+ */
+export const askTrim = (): Promise<boolean> =>
+  (asking ??= (async () => {
+    const answer = await canHandBack().catch(() => "no" as const);
+    canTrim = answer === "yes";
+    if (answer === "refused") settings.handBack = false;
+    status.canTrim = canTrim;
+    statusChanged();
+    return canTrim;
+  })().finally(() => (asking = undefined)));
+/**
+ * Where it is switched on and Luna hasn't been asked in this run: asked now, if TIDAL's window can be seen
+ * and is the one you are in (Luna's box is put on the window that has the keyboard; with none it comes up
+ * on its own, wherever that may be).
+ */
+const askInSight = () => {
+  if (unloaded || unseen || !status.visible || !document.hasFocus() || !settings.handBack || canTrim !== undefined) return;
+  void askTrim();
 };

@@ -238,12 +238,14 @@ export const Settings = () => {
       )}
       {toggle("cleanHidden", "Clean memory while out of sight", "When TIDAL has been minimised or covered for a minute, its page gives back the memory it no longer needs (at most every ten minutes)")}
       {toggle(
-        "trim",
+        "handBack",
         "Hand memory back to Windows while out of sight",
         status.canTrim === false
-          ? "Not possible here: this is done on Windows, and Luna has to allow this plugin to start a program (it asks once)"
-          : "When TIDAL has been out of sight for a minute, and every ten minutes after, Windows is asked to take what TIDAL holds but isn't using out of memory: the Task Manager's figure drops to what TIDAL really needs, and the rest is there for your game. Nothing is closed; what is needed again is back at once. Never asked of what makes the sound",
-        () => settings.trim && void askTrim(),
+          ? "Not possible: this is done on Windows only, and Luna has to allow this plugin to start a program. Switch it on again to be asked again"
+          : "When TIDAL has been out of sight for a minute, and every ten minutes after, Windows is asked to take what TIDAL holds but isn't using out of memory: the Task Manager's figure drops to what TIDAL really needs, and the rest is there for your game. Nothing is closed; what is needed again is back at once. Never asked of what makes the sound. Off unless you switch it on: it is done by a PowerShell line, so Luna asks you, the moment you switch it on (and once after each update, with TIDAL in front of you), whether this plugin may start programs",
+        () => {
+          if (settings.handBack) void askTrim().then(() => setState({ ...settings }));
+        },
       )}
       <LunaButtonSetting
         title="Hand memory back now"
@@ -251,7 +253,7 @@ export const Settings = () => {
         loading={busy === "trim"}
         onClick={() =>
           run("trim", async () => {
-            if (!(await askTrim())) return "Not possible here";
+            if (!(await askTrim())) return "Not possible: Windows only, and Luna has to allow it";
             const r = await trim("by hand");
             void check();
             return `Handed back: ${mb(r.before)} in memory before, ${mb(r.after)} after`;

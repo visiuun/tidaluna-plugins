@@ -256,9 +256,17 @@ export const heapUsage = async (): Promise<number> => {
 // pages, any page that is playing. A stutter is not worth any amount of memory.
 //
 // There is no way to ask this from here, so a PowerShell line does it (it sets each process's
-// working-set limits to what they already are, which makes Windows trim it). Luna asks you once whether
-// this plugin may start programs.
+// working-set limits to what they already are, which makes Windows trim it).
+//
+// Luna asks whether this plugin may start programs, and it asks at the moment one is first started, with
+// a box that stops all of TIDAL until it is answered. Version 1.2.0 started its first one a minute after
+// TIDAL had gone out of sight: the box came up behind whatever was in front, with nobody there, and
+// TIDAL and the music stood still until somebody found it. So the question is put on purpose (see
+// canHandBack), only when you switch this on or while TIDAL's window is in front of you, and nothing is
+// ever started that hasn't been allowed in this very run.
 let childProcess: any | null | undefined;
+/** Luna has let this plugin start programs (asked in this run: see canHandBack) */
+let allowed = false;
 const starter = (): any | null => {
   if (childProcess !== undefined) return childProcess;
   try {
@@ -270,10 +278,26 @@ const starter = (): any | null => {
 };
 const onWindows = path.sep === "\\";
 /**
- * Whether memory can be handed back here: on Windows, and Luna lets this plugin start a program. Asked
- * when the plugin loads, so that Luna's question comes then and not while you are away.
+ * Whether memory can be handed back here: "no" where it can't be done at all (not Windows), otherwise
+ * what Luna says to this plugin starting programs. THIS IS WHERE LUNA ASKS (once for each version of the
+ * plugin, if you allowed it; again every time if you didn't): only to be called when you are there.
+ * Nothing is started by it: `spawn` is called with nothing to start, which Luna rules on before Node
+ * turns it down.
  */
-export const canHandBack = async (): Promise<boolean> => onWindows && !!getElectron() && !!starter();
+export const canHandBack = async (): Promise<"yes" | "refused" | "no"> => {
+  const cp = onWindows && getElectron() ? starter() : null;
+  if (!cp) return "no";
+  if (allowed) return "yes";
+  try {
+    cp.spawn();
+    return "no";
+  } catch (err: any) {
+    // (Luna's refusal says so; anything else is Node complaining that there was nothing to start, which means Luna let it through)
+    if (/Security|Access Denied|blocked/i.test(String(err?.message ?? err))) return "refused";
+    allowed = true;
+    return "yes";
+  }
+};
 export type HandedBack = { before: number; after: number; processes: number };
 /**
  * Hands the memory TIDAL's processes aren't using back to Windows. Returns what all of TIDAL had in
@@ -283,6 +307,8 @@ export const handBack = async (): Promise<HandedBack> => {
   const electron = getElectron();
   const cp = onWindows ? starter() : null;
   if (!electron || !cp) throw new Error("not possible here");
+  // (never the first start of a program: that is what Luna asks about, and it is asked only when you are there)
+  if (!allowed) throw new Error("Luna hasn't been asked yet whether this plugin may start programs");
   const leave = new Set<number>();
   for (const c of electron.webContents.getAllWebContents()) {
     try {

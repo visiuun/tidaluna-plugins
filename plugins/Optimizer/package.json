@@ -1,6 +1,6 @@
 {
   "name": "@visiuun/optimizer",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Optimizer: keeps TIDAL light and keeps it going. Nothing is drawn while the window can't be seen, and no more often than needed while it can (a frame limit for fast screens); memory TIDAL isn't using goes back to Windows; a memory guard cleans TIDAL's page before it fills up; and when the page dies or freezes, it and the music are brought back",
   "author": {
     "name": "visiuun",

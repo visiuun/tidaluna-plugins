@@ -23,8 +23,8 @@ export type PluginSettings = {
   guardReload: boolean;
   /** Collect the page's garbage when it has been out of sight for a minute */
   cleanHidden: boolean;
-  /** Hand the memory TIDAL isn't using back to Windows while it is out of sight */
-  trim: boolean;
+  /** Hand the memory TIDAL isn't using back to Windows while it is out of sight. Off unless switched on: Luna has to be asked for it (1.2.0 had it on, under another name, and asked at the worst moment) */
+  handBack: boolean;
   /** Clear TIDAL's cache on disk when it passes this many MB (0: never by itself) */
   cacheLimit: number;
   /** After the page died or was reloaded: put what was playing back on, where it was */
@@ -48,7 +48,7 @@ const DEFAULTS: PluginSettings = {
   guardLimit: 1500,
   guardReload: true,
   cleanHidden: true,
-  trim: true,
+  handBack: false,
   cacheLimit: 1024,
   recover: true,
   unfreeze: true,
