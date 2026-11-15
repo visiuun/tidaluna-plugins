@@ -65,6 +65,10 @@ const css = `
   @keyframes ${ROOT}-cross { 0%, 100% { transform: rotate(0deg) scale(1); } 50% { transform: rotate(180deg) scale(1.25); } }
   .${ROOT}-more { width: 16px; height: 28px; border: 0; padding: 0; margin-left: -3px; background: none; color: inherit; opacity: .55; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
   .${ROOT}-more:hover { opacity: 1; }
+  .${ROOT}-full { width: 24px !important; min-width: 0 !important; height: 28px !important; padding: 0 !important; border: 0; background: none; color: inherit; opacity: .55; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .${ROOT}-full:hover { opacity: 1; }
+  .${ROOT}-full svg { width: 14px !important; height: 14px !important; fill: none !important; flex: none; }
+  .${ROOT}-full svg path { fill: none !important; stroke: currentColor !important; stroke-width: 1.7px !important; }
   /* TIDAL's own rules for buttons in the player bar size every icon to 16px and fill its paths, which
      turned the chevron into a solid blob: these hold it to an outline at its own size */
   .${ROOT}-more { width: 16px !important; min-width: 0 !important; height: 28px !important; padding: 0 !important; }
@@ -146,7 +150,8 @@ const shield = (input: HTMLElement) => {
   for (const type of ["keydown", "keyup", "keypress"]) input.addEventListener(type, (e) => e.stopPropagation());
 };
 
-export const mountUi = (unloads: Set<LunaUnload>) => {
+/** `openStage`: the DJ full screen (see stage.ts) */
+export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   // Only one plugin instance may own the interface: a live reload whose cleanup didn't run must not leave a second one
   window.__visiuunDjUiDispose?.();
   document.getElementById(STYLE_ID)?.remove();
@@ -167,7 +172,17 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
   more.type = "button";
   more.title = "DJ: requests and options";
   more.innerHTML = `<svg viewBox="0 0 10 6" width="9" height="6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1 5l4-4 4 4"/></svg>`;
-  wrap.append(button, more);
+  // The DJ full screen
+  const full = el("button", `${ROOT}-full`);
+  full.type = "button";
+  full.title = "DJ full screen";
+  full.innerHTML = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>`;
+  full.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setOpen(false);
+    openStage();
+  });
+  wrap.append(button, more, full);
 
   // ------------------ CAPTION ------------------
   const caption = el("div", `${ROOT}-caption`);
@@ -240,9 +255,10 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
   const primary = el("button", "pill main");
   const skipBtn = el("button", "pill", "Skip");
   const stopBtn = el("button", "pill", "Stop DJ");
-  for (const b of [primary, skipBtn, stopBtn]) b.type = "button";
+  const fullBtn = el("button", "pill", "Full screen");
+  for (const b of [primary, skipBtn, stopBtn, fullBtn]) b.type = "button";
   const spacer = el("div", "spacer");
-  actions.append(primary, skipBtn, spacer, stopBtn);
+  actions.append(primary, skipBtn, spacer, fullBtn, stopBtn);
   // (shown while the DJ picks by what the TrueTaste plugin has measured of your listening)
   const powered = el("div", `${ROOT}-powered`);
   const poweredLink = el("a", undefined, "TrueTaste");
@@ -448,6 +464,10 @@ export const mountUi = (unloads: Set<LunaUnload>) => {
     render(getStatus());
   });
   skipBtn.addEventListener("click", () => skip());
+  fullBtn.addEventListener("click", () => {
+    setOpen(false);
+    openStage();
+  });
   stopBtn.addEventListener("click", () => {
     stopSession("stopped from the panel");
     setOpen(false);

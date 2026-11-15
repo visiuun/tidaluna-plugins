@@ -1138,7 +1138,12 @@ registerProcessor("dj-limiter", Limiter);
     return f;
   };
   /** How the pieces of the mashups under way have been arriving */
-  const feedState = () => ({ arrangement: lastArrangement ? lastArrangement.said.slice() : [], cut: lastArrangement ? lastArrangement.cut : 0, feeds: feeds.map((f) => ({ name: f.name, wanted: f.grid.to - f.grid.from, played: f.played.size, late: f.late, missed: f.missed, spare: f.spare === Infinity ? null : Math.round(f.spare * 10) / 10 })) });
+  const feedState = () => ({
+    arrangement: lastArrangement ? lastArrangement.said.slice() : [],
+    cut: lastArrangement ? lastArrangement.cut : 0,
+    plan: lastArrangement
+      ? { halves: lastArrangement.halves, from: lastArrangement.from, end: lastArrangement.end, planned: lastArrangement.planned, per: lastArrangement.per, bar: lastArrangement.bar, blocks: (lastArrangement.blocks || []).slice() }
+      : undefined, feeds: feeds.map((f) => ({ name: f.name, wanted: f.grid.to - f.grid.from, played: f.played.size, late: f.late, missed: f.missed, spare: f.spare === Infinity ? null : Math.round(f.spare * 10) / 10 })) });
 
   const profileOf = (id) => {
     let p = profiles.get(id);
@@ -2378,6 +2383,19 @@ registerProcessor("dj-limiter", Limiter);
           );
           makeRoom(a, b, T1, 2 * bar, T3, 0.9);
           stopSources(a, T3);
+          // (what it does, for the log and the DJ's full-screen view: on top it is everything but the bass, below the bass)
+          lastArrangement = {
+            said: [`${plan.bars1} bars B on top of A's bass`, `${plan.bars2} bars A on top of B, leaving`],
+            cut: 0,
+            halves: "bass",
+            from: T1,
+            end: T3,
+            planned: 2,
+            blocks: [
+              { from: T1, to: T2, a: { top: 1, low: 1 }, b: { top: ON_TOP, low: 0 }, what: "B on top of A's bass" },
+              { from: T2, to: T3, a: { top: ON_TOP, low: 0 }, b: { top: 1, low: 1 }, what: "A on top of B, leaving" },
+            ],
+          };
           return { swap: T1, end: T3, bStart: t0, first: T1, mid: T2 };
         }
         // A singer in one or both: the two songs trade places, a block of eight bars at a time. In each
@@ -2570,6 +2588,8 @@ registerProcessor("dj-limiter", Limiter);
           said.push(`cut short after ${k * per} of ${total} bars (the voices weren't ready in time)`);
           arrangement.end = end;
           arrangement.told.cut = end;
+          arrangement.told.end = end;
+          arrangement.told.blocks.push({ from: T, to: end, a: { top: 0, low: 0 }, b: { top: 1, low: 1 }, what: "cut short: the voices weren't ready in time", cut: true });
           feedA.end = end;
           try {
             b.post.gain.cancelScheduledValues(end);
@@ -2631,12 +2651,13 @@ registerProcessor("dj-limiter", Limiter);
           }
           go(T, next);
           said.push(`${per} bars ${what}`);
+          arrangement.told.blocks.push({ from: T, to: last ? Tend : T + per * bar, a: { top: next.va, low: next.fa }, b: { top: next.vb, low: next.fb }, what, sings: { a: !!sa, b: !!sb } });
           // ...and by the end the other song is whole: this song leaves as the other's own singer comes
           // back, over the last two bars (its band, where that is all that is left of it, over the last four)
           if (last) go(Tend, WHOLE_B, (next.va ? 2 : 4) * bar);
         };
         // (the blocks after the first are decided as they come up: see watchFeeds)
-        const arrangement = { k: 1, blocks, at: (k) => T1 + k * per * bar - D - 0.5, decide, said, deck: b, other: a, end: Tend, told: { said, cut: 0 } };
+        const arrangement = { k: 1, blocks, at: (k) => T1 + k * per * bar - D - 0.5, decide, said, deck: b, other: a, end: Tend, told: { said, cut: 0, halves: "voice", from: T1, end: Tend, planned: blocks, per, bar, blocks: [] } };
         decide(0);
         arrangers.push(arrangement);
         lastArrangement = arrangement.told;
@@ -2806,6 +2827,47 @@ registerProcessor("dj-limiter", Limiter);
       for (const d of decks.values()) killDeck(d, fade ?? 0.12);
       stopVoice(fade ?? 0.12);
       return {};
+    },
+    /**
+     * A track's waveform for the DJ's full-screen view: how loud it is, `rate` times a second, as the
+     * loudest sample (peak) and the average power (rms) of each slice, both 0-255. Worked out once a track.
+     */
+    waveform: ({ id, rate }) => {
+      const t = tracks.get(id);
+      if (!t) throw new Error("track not loaded: " + id);
+      const r = Math.max(5, Math.min(50, rate || 20));
+      if (t.wave && t.wave.rate === r) return t.wave;
+      const buffer = t.buffer;
+      const step = buffer.sampleRate / r;
+      const n = Math.floor(buffer.length / step);
+      const chans = [];
+      for (let c = 0; c < buffer.numberOfChannels; c++) chans.push(buffer.getChannelData(c));
+      const peak = new Array(n);
+      const rms = new Array(n);
+      let top = 1e-9;
+      const raw = new Float32Array(n * 2);
+      for (let i = 0; i < n; i++) {
+        const a = Math.floor(i * step);
+        const b = Math.min(buffer.length, Math.floor((i + 1) * step));
+        let p = 0;
+        let sq = 0;
+        for (const ch of chans)
+          for (let k = a; k < b; k += 2) {
+            const v = ch[k];
+            const m = v < 0 ? -v : v;
+            if (m > p) p = m;
+            sq += v * v;
+          }
+        raw[i * 2] = p;
+        raw[i * 2 + 1] = Math.sqrt(sq / Math.max(1, ((b - a) / 2) * chans.length));
+        if (p > top) top = p;
+      }
+      for (let i = 0; i < n; i++) {
+        peak[i] = Math.round(Math.min(1, raw[i * 2] / top) * 255);
+        rms[i] = Math.round(Math.min(1, (raw[i * 2 + 1] / top) * 1.3) * 255);
+      }
+      t.wave = { rate: r, peak, rms };
+      return t.wave;
     },
     /** What this mixer holds: its decks and the tracks loaded in it. For a session that picks it up after TIDAL's page was away (see CARRIED OVER in mixer.native.ts) */
     inventory: () => ({

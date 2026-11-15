@@ -35,6 +35,46 @@ import { TidalLink } from "./tidal";
 import { nativeReady } from "./access";
 
 // ------------------ STATUS (for the UI) ------------------
+export type StageDeck = {
+  id: string;
+  track: Track;
+  /** The set it belongs to */
+  set: string;
+  deck: string;
+  started: boolean;
+  /** Where in the track it is (s), and how fast it plays (1: its own tempo) */
+  pos: number;
+  rate: number;
+  /** Mixer time → track position, in pieces (see Deck in mixer.ts) */
+  map: { t: number; pos: number; rate: number }[];
+  startsAt?: number;
+  /** An incoming track: when it takes over (mixer clock) */
+  swap?: number;
+  duration: number;
+  analysed: boolean;
+  bpm: number;
+  /** Seconds per beat, and where one falls (s into the track) */
+  period: number;
+  phase: number;
+  bars: number[];
+  barEnergy: number[];
+  introEnd: number;
+  outroStart: number;
+  key?: { tonic: number; mode: "major" | "minor"; conf: number };
+  gain: number;
+};
+export type Stage = {
+  /** The mixer's clock at what is heard right now */
+  now: number;
+  follow: boolean;
+  current?: StageDeck;
+  /** The one before the current one, while it is still heard */
+  outgoing?: StageDeck;
+  incoming?: StageDeck;
+  upcoming: { track: Track; set: string; first: boolean; ready: boolean }[];
+  mashUntil: number;
+  mashing: boolean;
+};
 export type Status = {
   phase: "off" | "starting" | "playing" | "stopping";
   /** follow: transitions only (TIDAL's own queue, mixed); dj: the full DJ */
@@ -42,6 +82,8 @@ export type Status = {
   /** The DJ is speaking right now */
   talking: boolean;
   caption?: string;
+  /** When the line in the caption is said, on the mixer's clock: from its first sound to its last (see mixerClock) */
+  captionSpan?: { start: number; end: number };
   /** The set that's playing */
   segment?: string;
   /** Something the DJ is busy with ("Picking music") */
@@ -66,6 +108,40 @@ export type CoverTransition = {
   end: number;
   /** Seconds per beat, when the transition is on a beat */
   beat?: number;
+  /** What the DJ does in it, for the full-screen view's breakdown (times on the mixer's clock) */
+  detail?: TransitionDetail;
+};
+export type TransitionDetail = {
+  /** Each track's own tempo */
+  bpmA: number;
+  bpmB: number;
+  /** The incoming track's tempo while the two play together (its own times this), and how it goes back to its own afterwards: from `glideAt`, over `glide` seconds */
+  speed?: number;
+  glide?: number;
+  glideAt?: number;
+  /** A blend: how many beats, when the bass changes hands, and how the two cross */
+  beats?: number;
+  bassAt?: number;
+  style?: "swap" | "filter";
+  /** When the incoming track is all the way up, when the outgoing one starts to leave, and when it is gone */
+  inUntil?: number;
+  outFrom?: number;
+  outEnd?: number;
+  /** How the incoming track's drums were lined up */
+  nudgeMs?: number;
+  beatShift?: number;
+  /** A drop: how the outgoing track leaves */
+  move?: Move;
+  /** A mashup: what goes over what (see Plan.way), how many bars, and whether each sings */
+  way?: MashWay;
+  bars1?: number;
+  bars2?: number;
+  sings?: { a?: boolean; b?: boolean };
+  keyA?: { tonic: number; mode: "major" | "minor" };
+  keyB?: { tonic: number; mode: "major" | "minor" };
+  /** A mashup: how the other song was made to fit (its tempo times `speed`, moved `semitones`), how well its notes fit
+   * this song's bass (-1 to 1), how well the drums agree, and by how many beats it was moved for them */
+  mash?: { speed: number; semitones: number; fit: number; rhythm: number; shift: number };
 };
 let transitionSeq = 0;
 /** How the outgoing track left at the last drop, so the next one leaves another way */
@@ -121,7 +197,7 @@ type Carry = {
   upcoming: { id: string; segment: SegmentNote; first: boolean }[];
   mashUntil: number;
 };
-type Prep = { forId: string; fromId: string; plan?: Plan; stretchKey?: string; working?: boolean; /** The DJ introduces the incoming set over this transition */ voice?: boolean };
+type Prep = { forId: string; fromId: string; plan?: Plan; stretchKey?: string; working?: boolean; /** The DJ introduces the incoming set over this transition */ voice?: boolean; /** A mashup: what it was matched on */ mash?: TransitionDetail["mash"] };
 
 const TICK_MS = 200;
 /** How far TIDAL's own position (and with it the lyrics) may be from the sound before it is put right, seconds */
@@ -201,6 +277,8 @@ class Session {
   private items: Item[] = []; // upcoming, next first
   private known = new Map<string, Item>(); // every track of this session
   private current?: Playing;
+  /** The track that was playing before the current one, while it may still be heard (going out of a mix, or under a mashup) */
+  private outgoing?: Playing;
   private pending?: Pending;
   private prep?: Prep;
   /** Start the next item as soon as it has loaded (optionally around a line being spoken) */
@@ -227,7 +305,7 @@ class Session {
     return { ...this.before, minutes: (Date.now() - this.began) / 60e3, songs: this.songs, place: place && place.index >= 0 ? place : undefined };
   }
   private greeted = false;
-  private stopped = false;
+  stopped = false;
   private lastTid?: string;
   private nextSeekAt = 0;
   private seekCheckAt = 0;
@@ -615,7 +693,7 @@ class Session {
     this.talkUntil = end;
     this.greeted = true;
     clearTimeout(this.captionTimer);
-    const show = () => setStatus({ talking: true, caption: text });
+    const show = () => setStatus({ talking: true, caption: text, captionSpan: { start, end } });
     const wait = (start - this.mixer.now) * 1000;
     if (wait > 30) this.captionTimer = setTimeout(show, wait);
     else show();
@@ -973,7 +1051,7 @@ class Session {
         log(`Mashup scheduled: it starts ${((sched.first ?? t0) - now).toFixed(1)}s from now (${plan.note}${sched.levels ? `; the voice at ${(20 * Math.log10(sched.levels.voice)).toFixed(1)} dBFS over a band at ${(20 * Math.log10(sched.levels.band)).toFixed(1)}, brought up by ${(20 * Math.log10(sched.lift ?? 1)).toFixed(1)} dB` : ""})`);
       }
       if (plan.kind === "drop") lastMove = sched.move ?? plan.move;
-      this.announce(cur, next, plan, t0, sched);
+      this.announce(cur, next, plan, t0, sched, prep.mash);
       if (plan.kind === "blend") log(`Blend scheduled: drums lined up by moving the incoming track ${sched.nudgeMs ?? 0} ms${sched.beatShift ? `, and ${sched.beatShift} beat(s) later so the patterns match` : ""}; bass hands over on beat ${sched.bassBeat ?? "?"}`);
       // (The mixer has to have it worked out before it starts: if it ever hasn't, that should be known)
       const ahead = t0 - this.mixer.now;
@@ -1010,7 +1088,7 @@ class Session {
   }
 
   /** Tells the UI what's about to happen to the sound, so the cover art can do the same */
-  private announce(cur: Playing, next: Item, plan: Plan, t0: number, sched: { swap: number; end: number; bStart: number; bassBeat?: number; first?: number; mid?: number }) {
+  private announce(cur: Playing, next: Item, plan: Plan, t0: number, sched: { swap: number; end: number; bStart: number; bassBeat?: number; first?: number; mid?: number; nudgeMs?: number; beatShift?: number; move?: Move }, mash?: TransitionDetail["mash"]) {
     const beat = plan.period;
     let start = t0;
     let swap = sched.swap;
@@ -1036,7 +1114,32 @@ class Session {
       start = swap - 0.6;
       end = swap + 1.3;
     } else swap = t0 + plan.duration / 2;
-    setStatus({ transition: { seq: ++transitionSeq, fromId: cur.item.track.id, toId: next.track.id, kind: plan.kind, songs, mid, start, swap, end, beat } });
+    const aA = cur.deck.analysis;
+    const aB = next.ready?.analysis;
+    const detail: TransitionDetail = {
+      bpmA: aA.grid?.bpm ?? aA.bpm,
+      bpmB: aB ? (aB.grid?.bpm ?? aB.bpm) : 0,
+      speed: plan.speed,
+      glide: plan.glide,
+      glideAt: plan.speed && plan.speed !== 1 ? t0 + plan.duration : undefined,
+      beats: plan.beats,
+      bassAt: plan.kind === "blend" && beat && sched.bassBeat !== undefined ? t0 + sched.bassBeat * beat : undefined,
+      style: plan.style,
+      inUntil: t0 + plan.bAt + (plan.fadeIn ?? 0),
+      outFrom: t0 + (plan.fadeOutFrom ?? 0),
+      outEnd: t0 + plan.duration,
+      nudgeMs: sched.nudgeMs,
+      beatShift: sched.beatShift,
+      move: plan.kind === "drop" ? (sched.move ?? plan.move) : undefined,
+      way: plan.way,
+      bars1: plan.bars1,
+      bars2: plan.bars2,
+      sings: plan.sings,
+      keyA: aA.key?.conf ? { tonic: aA.key.tonic, mode: aA.key.mode } : undefined,
+      keyB: aB?.key?.conf ? { tonic: aB.key.tonic, mode: aB.key.mode } : undefined,
+      mash,
+    };
+    setStatus({ transition: { seq: ++transitionSeq, fromId: cur.item.track.id, toId: next.track.id, kind: plan.kind, songs, mid, start, swap, end, beat, detail } });
   }
 
   /** The DJ introduces `item`'s set over the music at `at`. If the line is still being made, it's said as soon as it's ready, up to `until` */
@@ -1061,6 +1164,7 @@ class Session {
     this.cutting = 0;
     this.immediate = false;
     this.current = { item: p.item, deck: p.deck };
+    this.outgoing = previous;
     const i = this.items.indexOf(p.item);
     if (i >= 0) this.discard(this.items.splice(0, i + 1).filter((x) => x !== p.item));
     this.prep = undefined;
@@ -1729,7 +1833,7 @@ class Session {
           this.known.set(partner.id, item);
           const at = this.planned.indexOf(cur.item.segment);
           this.planned.splice(at >= 0 ? at + 1 : this.planned.length, 0, segment);
-          this.prep = { forId: partner.id, fromId: track.id, plan, stretchKey };
+          this.prep = { forId: partner.id, fromId: track.id, plan, stretchKey, mash: { speed: fit.speed, semitones: fit.semitones, fit: fit.fit, rhythm: fit.rhythm, shift: fit.shift } };
           this.immediate = false;
           this.lateVoice = undefined;
           this.syncQueue();
@@ -1984,6 +2088,53 @@ class Session {
     return this.mixer.voice;
   }
 
+  /** What is playing, coming in and coming up, as the full-screen view shows it (see stage.ts) */
+  stage(): Stage {
+    const now = this.mixer.now - this.mixer.latency;
+    const deckOf = (p: Playing | undefined, swap?: number): StageDeck | undefined => {
+      if (!p) return undefined;
+      const { deck, item } = p;
+      const a = deck.analysis;
+      const last = deck.map[deck.map.length - 1];
+      return {
+        id: item.track.id,
+        track: item.track,
+        set: item.segment.title,
+        deck: deck.ref,
+        started: deck.started,
+        pos: deck.started ? deck.positionAt(now) : 0,
+        rate: last?.rate ?? 1,
+        map: deck.map,
+        startsAt: deck.started ? deck.map[0].t : undefined,
+        swap,
+        duration: deck.loaded.duration,
+        analysed: deck.loaded.analysed,
+        bpm: a.grid?.bpm ?? a.bpm,
+        period: a.grid?.period ?? (a.bpm ? 60 / a.bpm : 0.5),
+        phase: a.grid?.phase ?? a.firstBeat ?? 0,
+        bars: a.bars,
+        barEnergy: a.barEnergy,
+        introEnd: a.introEnd,
+        outroStart: a.outroStart,
+        key: a.key?.conf ? a.key : undefined,
+        gain: deck.gain,
+      };
+    };
+    const out = this.outgoing;
+    const heard = out && !out.deck.disposed && out.deck.started && Math.min(out.deck.stopAt, out.deck.endTime) > now;
+    if (out && !heard) this.outgoing = undefined;
+    return {
+      now,
+      follow: this.follow,
+      current: deckOf(this.current),
+      outgoing: heard ? deckOf(out) : undefined,
+      incoming: deckOf(this.pending, this.pending?.swap),
+      upcoming: this.items.slice(0, 8).map((i) => ({ track: i.track, set: i.segment.title, first: i.first, ready: !!i.ready })),
+      mashUntil: this.mashUntil,
+      mashing: this.mashing,
+    };
+  }
+
   // ------------------ STOP ------------------
   async stop(reason: string, opts: { quick?: boolean } = {}) {
     if (this.stopped) return;
@@ -2004,7 +2155,7 @@ class Session {
           const bye = await stockLine("signoff").catch(() => null);
           if (bye) {
             const t = await mixer.talk(bye.clip, { t0: await mixer.duckAll() });
-            setStatus({ talking: true, caption: bye.text });
+            setStatus({ talking: true, caption: bye.text, captionSpan: { start: t.voiceStart, end: t.voiceEnd } });
             await new Promise((r) => setTimeout(r, Math.max(0, t.voiceEnd - mixer.now) * 1000 + 100));
           }
         }
@@ -2159,6 +2310,13 @@ export const ask = (text: string) => session?.ask(text);
 export const skip = () => session?.skip();
 /** 0-1, how loud the DJ's voice is right now */
 export const voiceLevel = () => session?.voiceLevel() ?? 0;
+/** What the full-screen view shows (see stage.ts): nothing while the DJ is off */
+export const getStage = () => (session && !session.stopped ? session.stage() : undefined);
+/** A mashup under way, block by block as the mixer decides it, and how the taking out of the voices keeps up */
+export const getMash = () => (session && !session.stopped && !session.mixer.gone && getStatus().transition?.kind === "mashup" ? session.mixer.feedState() : Promise.resolve(undefined));
+/** A track's waveform for the full-screen view, once it is loaded in the mixer */
+export const getWaveform = (id: string) => (session && !session.stopped && !session.mixer.gone ? session.mixer.waveform(id) : Promise.resolve(undefined));
+
 /** The mixer's clock at what is being heard right now, seconds (it stands still while paused) */
 export const mixerClock = () => (session ? session.mixer.now - session.mixer.latency : 0);
 

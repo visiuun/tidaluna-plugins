@@ -9,7 +9,7 @@ import type { LunaUnload } from "@luna/core";
 
 import { settings } from "./config";
 import { warn } from "./log";
-import { mixerClock, onStatus, type CoverTransition } from "./session";
+import { getStatus, mixerClock, onStatus, type CoverTransition } from "./session";
 
 const BIG_COVER = 'img[data-test="now-playing-artwork"]';
 const MINI_COVER = 'figure[data-test="current-media-imagery"] img';
@@ -491,8 +491,15 @@ const visible = (img: HTMLImageElement) => {
   // The player bar's cover is hidden (not removed) while the now playing view is open
   return !img.closest('[class*="_artworkHidden_"]');
 };
+// The DJ's full screen (see stage.ts) has a cover of its own where the two covers merge: while it is open, the
+// transition is drawn there, and not on TIDAL's covers hidden underneath it
+let stageImg: HTMLImageElement | undefined;
 const findTargets = () => {
   const found: { img: HTMLImageElement; big: boolean }[] = [];
+  if (stageImg) {
+    if (visible(stageImg)) found.push({ img: stageImg, big: true });
+    return found;
+  }
   const bigs = document.querySelectorAll<HTMLImageElement>(BIG_COVER);
   for (let i = bigs.length - 1; i >= 0; i--) {
     if (visible(bigs[i])) {
@@ -606,7 +613,7 @@ const sync = () => {
     // Only leave once TIDAL's own cover underneath is the new one (it changes when TIDAL moves on)
     const now = performance.now();
     r.holdSince ??= now;
-    const under: HTMLImageElement | undefined = targets.keys().next().value;
+    const under = [...targets.keys()].find((img) => img !== stageImg);
     const arrived = !under || coverIdOf(under.currentSrc || under.src) === r.toCover;
     if (arrived || now - r.holdSince > 4000) {
       r.leaving = true;
@@ -674,6 +681,21 @@ const abort = () => {
   }
 };
 
+/**
+ * The DJ's full screen opens (with the cover the transitions are to be drawn on) or closes (undefined). One under
+ * way goes on there; one that is due is begun, even with the cover transitions in TIDAL's player switched off.
+ */
+export const coverFxStage = (img: HTMLImageElement | undefined) => {
+  stageImg = img;
+  if (worker) syncTargets();
+  if (!img) {
+    if (settings.coverFx === false) abort();
+    return;
+  }
+  const tr = getStatus().transition;
+  if (tr && !run && mixerClock() < tr.end) void begin(tr);
+};
+
 // ------------------ MOUNT ------------------
 export const mountCoverFx = (unloads: Set<LunaUnload>) => {
   let lastSeq = -1;
@@ -686,7 +708,7 @@ export const mountCoverFx = (unloads: Set<LunaUnload>) => {
     }
     if (tr.seq === lastSeq) return;
     lastSeq = tr.seq;
-    if (settings.coverFx === false) return;
+    if (settings.coverFx === false && !stageImg) return;
     void begin(tr);
   });
   // (one that is under way when the window goes out of sight is let go of)

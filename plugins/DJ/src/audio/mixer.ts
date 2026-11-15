@@ -131,6 +131,13 @@ export class Deck {
   }
 }
 
+/** One stretch of a mashup as the mixer decided it (on its clock): how loud each song's two halves are (a voice
+ * mashup: `top` its voice, `low` its band; a layered one: `top` all but its bass, `low` its bass), and who sang there */
+export type MashBlock = { from: number; to: number; a: { top: number; low: number }; b: { top: number; low: number }; what: string; sings?: { a: boolean; b: boolean }; cut?: boolean };
+export type MashArrangement = { halves: "voice" | "bass"; from: number; end: number; planned: number; per?: number; bar?: number; blocks: MashBlock[] };
+/** How loud a track is, `rate` times a second: its peaks and its average, 0-255 */
+export type Wave = { rate: number; peak: number[]; rms: number[] };
+
 type Reply = { ok: boolean; latency?: number; result?: any; error?: string; gone?: boolean; now: number; running: boolean; decks?: Record<string, { map: MapPoint[]; stopAt: number | null; gain: number }>; level?: number; voice?: number };
 
 export class Mixer {
@@ -239,6 +246,10 @@ export class Mixer {
   status() {
     return this.call("status");
   }
+  /** A loaded track's waveform (see waveform in mixer.page.js) */
+  waveform(id: string, rate = 20) {
+    return this.call<Wave>("waveform", { id, rate });
+  }
   setVolume(percent: number, muted: boolean) {
     return this.call("setVolume", { percent, muted });
   }
@@ -304,7 +315,7 @@ export class Mixer {
   }
   /** How the pieces of a mashup under way have been arriving */
   feedState() {
-    return this.call<{ /** what each block of the last mashup was, in the order they were played */ arrangement?: string[]; /** when the mixer ended the last mashup early, if it had to (on its clock; 0: it didn't) */ cut?: number; feeds: { name: string; wanted: number; played: number; late: number; missed: number; /** the least time a piece arrived before it was heard, seconds */ spare: number | null }[] }>("feedState", {});
+    return this.call<{ /** what each block of the last mashup was, in the order they were played */ arrangement?: string[]; /** when the mixer ended the last mashup early, if it had to (on its clock; 0: it didn't) */ cut?: number; /** the last mashup, block by block as it is decided */ plan?: MashArrangement; feeds: { name: string; wanted: number; played: number; late: number; missed: number; /** the least time a piece arrived before it was heard, seconds */ spare: number | null }[] }>("feedState", {});
   }
   /** How track `b` would best go on top of track `a` (both loaded), and how good a mashup that makes */
   mashMatch(a: string, b: string, A: MashSide, B: MashSide, free: boolean, exact = false) {
