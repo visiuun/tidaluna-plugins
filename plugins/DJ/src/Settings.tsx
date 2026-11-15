@@ -2,9 +2,9 @@ import React from "react";
 import { JINGLES, jingleStyle, settings, voiceEngine, VOICES, type Commentary, type Jingle, type Mixing, type PluginSettings, type VoiceEngine } from "./config";
 import { poweredByTrueTaste } from "./brain";
 import { getStatus, onStatus, setTransitionOnly, startSession, stopSession } from "./session";
-import { clearVoiceFiles, getDataDir, openTrueTastePage } from "./store.native";
+import { clearVoiceFiles, getDataDir, openTrueTastePage } from "./native";
 import { prepareStock, voiceState, type VoiceState } from "./talk/voice";
-import { clearVoiceModel } from "./talk/voice.native";
+import { clearVoiceModel } from "./native";
 
 export { settings };
 

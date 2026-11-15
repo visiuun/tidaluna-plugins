@@ -1,5 +1,6 @@
 import { Tracer } from "@luna/core";
-import { appendLog } from "./store.native";
+import { accessAllowed } from "./access";
+import { appendLog } from "./native";
 
 export const { trace } = Tracer("[DJ]");
 
@@ -8,6 +9,12 @@ let timer: ReturnType<typeof setTimeout> | undefined;
 const flushLog = () => {
   timer = undefined;
   if (!buffer.length) return;
+  // (not before Luna has been asked about the DJ's files: kept until then, the last few hundred lines of it)
+  if (!accessAllowed()) {
+    if (buffer.length > 500) buffer = buffer.slice(-500);
+    timer = setTimeout(flushLog, 5000);
+    return;
+  }
   const text = buffer.join("\n") + "\n";
   buffer = [];
   appendLog(text).catch(() => {});

@@ -1,10 +1,10 @@
 // Runs in the Electron main process: the DJ's own files on disk. Everything stays on this machine.
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from "fs/promises";
 import { createHash } from "crypto";
-import { homedir } from "os";
 import path from "path";
 import { promisify } from "util";
 import { gunzip, gzip } from "zlib";
+import { tryAccess } from "./nativeAccess";
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -23,7 +23,10 @@ const lunarDataDir = () => {
   return lunarDir;
 };
 
-export const dataDir = () => path.join(lunarDataDir() ?? path.join(homedir(), ".cache"), "visiuun-dj");
+// (The home folder from the environment, not from os.homedir(): every module a native file calls into is
+// one more of Luna's questions, see access.ts)
+const homeDir = () => process.env.USERPROFILE || process.env.HOME || ".";
+export const dataDir = () => path.join(lunarDataDir() ?? path.join(homeDir(), ".cache"), "visiuun-dj");
 const logFile = () => path.join(dataDir(), "log.txt");
 const voiceDir = () => path.join(dataDir(), "voice");
 const MAX_LOG_BYTES = 1024 * 1024;
@@ -100,3 +103,10 @@ export const appendLog = async (lines: string) => {
 };
 
 export const getDataDir = async () => dataDir();
+
+// ------------------ LUNA'S QUESTIONS ------------------
+/** Has Luna ask now, all at once, about every module this file uses (see access.ts): false if one was blocked */
+export const askAccess = async () =>
+  tryAccess([
+    () => stat(dataDir()),
+  ]);

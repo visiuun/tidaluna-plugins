@@ -1,7 +1,7 @@
 // TIDAL's side of the vocal separator (the work is done in a hidden page of its own: see stems.native.ts)
 import core from "file://./stems.js";
 import runner from "file://./stems.page.js";
-import { stemsClose, stemsProgress, stemsReady, stemsSeparate } from "./stems.native";
+import { stemsClose, stemsProgress, stemsReady, stemsSeparate } from "../native";
 
 const page = `${core}\n${runner}`;
 

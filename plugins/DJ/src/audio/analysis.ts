@@ -1,6 +1,6 @@
 // What the DJ knows about a track's rhythm and structure (worked out by dsp.js inside the mixer), kept
 // on disk: a track is only ever analysed once.
-import { readDoc, writeDoc } from "../store.native";
+import { readDoc, writeDoc } from "../native";
 import { warn } from "../log";
 
 export type Grid = { period: number; phase: number; count: number; resid: number; inlierShare: number; contrast: number; bpm: number };

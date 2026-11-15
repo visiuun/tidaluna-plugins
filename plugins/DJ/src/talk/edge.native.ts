@@ -8,6 +8,8 @@
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { request } from "https";
 import type { Socket } from "net";
+import { Agent as HttpsAgent } from "https";
+import { tryAccess } from "../nativeAccess";
 
 const CLIENT = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const EDGE = "143.0.3650.75";
@@ -402,3 +404,10 @@ export const edgeSpeak = async (text: string, voice: string, rate: number, pitch
     return { mp3: (await ask(text, voice, rate, pitch)).toString("base64") };
   }
 };
+
+// ------------------ LUNA'S QUESTIONS ------------------
+/** Has Luna ask now, all at once, about every module this file uses (see access.ts): false if one was blocked */
+export const askAccess = async () =>
+  tryAccess([
+    () => new HttpsAgent(),
+  ]);

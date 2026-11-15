@@ -32,6 +32,7 @@ import { log, notify, warn } from "./log";
 import { lineFor, mashupLine, stockLines, type Context, type GenericKind, type Here, type Moment } from "./talk/script";
 import { prepareStock, reread, speak, stockLine, voiceState } from "./talk/voice";
 import { TidalLink } from "./tidal";
+import { nativeReady } from "./access";
 
 // ------------------ STATUS (for the UI) ------------------
 export type Status = {
@@ -2046,6 +2047,8 @@ export const isActive = () => !!session || starting;
 
 /** Starts the full DJ, or (mode "follow") transitions only. The DJ takes the place of a transitions-only session */
 export const startSession = async (mode: "dj" | "follow" = "dj", forMashup = false) => {
+  // (you pressed the button: after a "Block" in Luna's box, Luna is asked again)
+  if (mode === "dj") void nativeReady(true).catch(() => {});
   while (stopping) await stopping;
   if (starting || unloaded) return;
   if (session) {

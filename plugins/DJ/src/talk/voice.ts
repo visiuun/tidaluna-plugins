@@ -10,10 +10,10 @@ import type { Clip } from "../audio/mixer";
 import { persona, settings, voiceEngine, type Persona } from "../config";
 import { log, warn } from "../log";
 import { brighten, carry } from "./level";
-import { readVoice, writeVoice } from "../store.native";
+import { readVoice, writeVoice } from "../native";
 import { stockLines, type GenericKind } from "./script";
-import { edgeSpeak } from "./edge.native";
-import { cloudSpeak, kokoroSpeak, voiceStatus } from "./voice.native";
+import { edgeSpeak } from "../native";
+import { cloudSpeak, kokoroSpeak, voiceStatus } from "../native";
 
 const RATE = 24000;
 

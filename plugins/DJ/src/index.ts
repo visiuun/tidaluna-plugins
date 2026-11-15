@@ -1,11 +1,12 @@
 import type { LunaUnload } from "@luna/core";
+import { watchAccess } from "./access";
 import { closeAnyMixer } from "./audio/mixer";
 import { closeSeparator } from "./audio/stems";
 import { stopRequests } from "./brain";
 import { flushLogNow, log, trace } from "./log";
 import { applyTransitionOnly, markUnloaded, resumeCarried, stopSession } from "./session";
 import { resetVoiceQueue } from "./talk/voice";
-import { stopVoiceEngine } from "./talk/voice.native";
+import { stopVoiceEngine } from "./native";
 import { mountCoverFx } from "./cover";
 import { mountUi } from "./ui";
 
@@ -13,6 +14,10 @@ export { Settings } from "./Settings";
 export { trace };
 
 export const unloads = new Set<LunaUnload>();
+
+// Luna's questions about the DJ's native side are asked once you are there to answer them, and nothing native is
+// done before (see access.ts)
+unloads.add(watchAccess());
 
 mountUi(unloads);
 mountCoverFx(unloads);

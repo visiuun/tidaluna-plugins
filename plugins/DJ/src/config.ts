@@ -33,6 +33,8 @@ export type PluginSettings = {
   cloudVoiceKey: string; // optional OpenAI API key: a cloud voice instead of the local one
   /** Who reads the lines: Edge's online voices (the local one steps in whenever they can't be had), or only the model on this machine */
   voiceEngine: VoiceEngine;
+  /** The version Luna's questions were all allowed for (see access.ts): until it changes, nothing is asked first */
+  accessFor: string;
 };
 
 export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("DJ", {
@@ -50,6 +52,7 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("DJ
   allowExplicit: true,
   cloudVoiceKey: "",
   voiceEngine: "edge",
+  accessFor: "",
 });
 
 // The DJ's voices. `edge` is who reads it online (one of Edge's read-aloud voices), `kokoro` the local model's voice,

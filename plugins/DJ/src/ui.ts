@@ -2,7 +2,7 @@
 // requests and quick settings, captions for what the DJ says, and a card on the Home page.
 import type { LunaUnload } from "@luna/core";
 import { poweredByTrueTaste, suggestions } from "./brain";
-import { openTrueTastePage } from "./store.native";
+import { openTrueTastePage } from "./native";
 import { persona, settings, VOICES, type Commentary } from "./config";
 import { readingNow } from "./talk/voice";
 import { ask, getStatus, isActive, mashup, mixerClock, onStatus, setTransitionOnly, skip, startSession, stopSession, switchUp, voiceLevel, type Status } from "./session";

@@ -22,8 +22,9 @@ import type { Track } from "../../TrueTaste/src/types";
 import { trackVector } from "../../TrueTaste/src/vectors";
 import { settings } from "./config";
 import { log, warn } from "./log";
-import { readDoc, writeDoc } from "./store.native";
+import { readDoc, writeDoc } from "./native";
 import { speakable, type Taste, type TrackFacts } from "./talk/script";
+import { nativeReady } from "./access";
 
 export type { Track };
 export type Kind = "more" | "onRepeat" | "recentLikes" | "throwback" | "taste" | "discovery" | "artist" | "forgotten" | "mood" | "dailyMix" | "usual" | "request";
@@ -339,6 +340,8 @@ export const initBrain = (force = false) => {
 };
 
 const load = async () => {
+  // (TrueTaste's files are read through a native file of the DJ's own: not before Luna has been asked, see access.ts)
+  await nativeReady();
   const t0 = Date.now();
   api.setRequestGap(110);
   await loadAll();

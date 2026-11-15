@@ -11,6 +11,8 @@ import os from "os";
 import path from "path";
 import { Readable } from "stream";
 import { dataDir } from "../store.native";
+import { Agent as HttpsAgent } from "https";
+import { tryAccess } from "../nativeAccess";
 
 // Through a variable so the build leaves it alone, and inside a try: TidaLunar may not hand out electron
 const runtimeRequire = (id: string) => require(id);
@@ -341,3 +343,13 @@ export const cloudSpeak = async (apiKey: string, text: string, voice: string, st
   if (!res.ok) throw new Error(`Cloud voice failed (HTTP ${res.status}): ${(await res.text().catch(() => "")).slice(0, 160)}`);
   return { rate: 24000, pcm: Buffer.from(await res.arrayBuffer()).toString("base64") };
 };
+
+// ------------------ LUNA'S QUESTIONS ------------------
+/** Has Luna ask now, all at once, about every module this file uses (see access.ts): false if one was blocked */
+export const askAccess = async () =>
+  tryAccess([
+    () => stat(dataDir()),
+    () => new HttpsAgent(),
+    () => os.platform(),
+    () => runtimeRequire("electron").app.getVersion(),
+  ]);

@@ -7,7 +7,7 @@
 // up about you.
 import type { Segment, Track } from "../brain";
 import type { Persona } from "../config";
-import { readDoc, writeDoc } from "../store.native";
+import { readDoc, writeDoc } from "../native";
 
 type Tone = Persona["tone"];
 export type Moment =

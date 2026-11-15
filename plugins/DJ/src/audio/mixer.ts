@@ -3,7 +3,7 @@
 import dspSource from "file://./dsp.js";
 import pageSource from "file://./mixer.page.js";
 import { cachedAnalysis, storeAnalysis, type Analysis } from "./analysis";
-import { mixerAdopt, mixerCall, mixerCarried, mixerCarry, mixerClose, mixerOpen, mixerTrackUrl } from "./mixer.native";
+import { mixerAdopt, mixerCall, mixerCarried, mixerCarry, mixerClose, mixerOpen, mixerTrackUrl } from "../native";
 import type { Move, Plan } from "./plan";
 import { jingleStyle } from "../config";
 import { log } from "../log";
