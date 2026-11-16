@@ -72,6 +72,12 @@ export type Stage = {
   outgoing?: StageDeck;
   incoming?: StageDeck;
   upcoming: { track: Track; set: string; first: boolean; ready: boolean }[];
+  /**
+   * The transition that is planned and not scheduled yet, as it is expected to go, with the track it goes into. (One
+   * is scheduled only a few seconds ahead, see arm, and Status.transition is the scheduled one: the full-screen view
+   * puts the two tracks side by side well before that.)
+   */
+  planned?: { transition: CoverTransition; deck: StageDeck };
   mashUntil: number;
   mashing: boolean;
 };
@@ -88,6 +94,8 @@ export type Status = {
   segment?: string;
   /** Something the DJ is busy with ("Picking music") */
   busy?: string;
+  /** The track that is about, when it is about one (a song being tried for a mashup, the one it is put together with) */
+  busyTrack?: string;
   /** A short message for the panel ("Couldn't find anything for that") */
   note?: string;
   /** The transition that's scheduled or under way (the cover art follows it) */
@@ -143,6 +151,9 @@ export type TransitionDetail = {
    * this song's bass (-1 to 1), how well the drums agree, and by how many beats it was moved for them */
   mash?: { speed: number; semitones: number; fit: number; rhythm: number; shift: number };
 };
+/** Whether what the DJ is busy with is looking for music (the full-screen view flicks through records while it does) */
+export const lookingForMusic = (busy: string | undefined) =>
+  !!busy && /^(Picking music|Switching it up|Finding that|Looking for a song|Trying it with|Asking TIDAL's AI|TIDAL's AI is|Reading what it picked|Choosing where to start)/.test(busy);
 let transitionSeq = 0;
 /** How the outgoing track left at the last drop, so the next one leaves another way */
 let lastMove: Move | undefined;
@@ -154,6 +165,8 @@ export const onStatus = (fn: (s: Status) => void) => {
   return () => void listeners.delete(fn);
 };
 const setStatus = (patch: Partial<Status>) => {
+  // (a track goes with the words it was given with, and no further)
+  if ("busy" in patch && !("busyTrack" in patch)) patch = { ...patch, busyTrack: undefined };
   status = { ...status, ...patch };
   for (const fn of listeners) {
     try {
@@ -197,6 +210,8 @@ type Carry = {
   upcoming: { id: string; segment: SegmentNote; first: boolean }[];
   mashUntil: number;
 };
+/** What the mixer says of a transition it has scheduled (see Mixer.transition) */
+type Scheduled = { swap: number; end: number; bStart: number; bassBeat?: number; first?: number; mid?: number; nudgeMs?: number; beatShift?: number; move?: Move };
 type Prep = { forId: string; fromId: string; plan?: Plan; stretchKey?: string; working?: boolean; /** The DJ introduces the incoming set over this transition */ voice?: boolean; /** A mashup: what it was matched on */ mash?: TransitionDetail["mash"] };
 
 const TICK_MS = 200;
@@ -1088,7 +1103,12 @@ class Session {
   }
 
   /** Tells the UI what's about to happen to the sound, so the cover art can do the same */
-  private announce(cur: Playing, next: Item, plan: Plan, t0: number, sched: { swap: number; end: number; bStart: number; bassBeat?: number; first?: number; mid?: number; nudgeMs?: number; beatShift?: number; move?: Move }, mash?: TransitionDetail["mash"]) {
+  private announce(cur: Playing, next: Item, plan: Plan, t0: number, sched: Scheduled, mash?: TransitionDetail["mash"]) {
+    setStatus({ transition: { seq: ++transitionSeq, ...this.describe(cur, next, plan, t0, sched, mash) } });
+  }
+
+  /** A transition as the UI is told about it: `plan` starting at `t0`, as the mixer scheduled it (or, before it has, as it is expected to) */
+  private describe(cur: Playing, next: Item, plan: Plan, t0: number, sched: Scheduled, mash?: TransitionDetail["mash"]): Omit<CoverTransition, "seq"> {
     const beat = plan.period;
     let start = t0;
     let swap = sched.swap;
@@ -1139,7 +1159,7 @@ class Session {
       keyB: aB?.key?.conf ? { tonic: aB.key.tonic, mode: aB.key.mode } : undefined,
       mash,
     };
-    setStatus({ transition: { seq: ++transitionSeq, fromId: cur.item.track.id, toId: next.track.id, kind: plan.kind, songs, mid, start, swap, end, beat, detail } });
+    return { fromId: cur.item.track.id, toId: next.track.id, kind: plan.kind, songs, mid, start, swap, end, beat, detail };
   }
 
   /** The DJ introduces `item`'s set over the music at `at`. If the line is still being made, it's said as soon as it's ready, up to `until` */
@@ -1600,7 +1620,7 @@ class Session {
         // (A good one ends the search once it has taken a while: every second spent looking is a
         // second less of the song for the mashup)
         if (picks[0] && Date.now() - searching > 4500) break;
-        setStatus({ busy: `Trying it with ${c.title}` });
+        setStatus({ busy: `Trying it with ${c.title}`, busyTrack: c.id });
         let loaded: Loaded;
         try {
           const job = fetch(c);
@@ -1695,7 +1715,7 @@ class Session {
         if (!enough()) break;
         const partner = pick.track;
         const b = pick.loaded.analysis;
-        setStatus({ busy: `Putting it together with ${partner.title}` });
+        setStatus({ busy: `Putting it together with ${partner.title}`, busyTrack: partner.id });
         // Where: as soon as what has to be there by then can be. That is the other song at this one's
         // tempo and two pieces of its voice, to hear whether it sings (some seven seconds), and then
         // enough of a start on the rest for two minutes of mashup, or for all that is left of this
@@ -1731,7 +1751,7 @@ class Session {
         // Who sings where the two meet decides how it starts, and what has to be taken out at all.
         // The other song: its first two pieces, and if nobody sings in those, one from further on
         // (they are pieces the mashup needs anyway, if it sings)
-        setStatus({ busy: `Listening for a singer in ${partner.title}` });
+        setStatus({ busy: `Listening for a singer in ${partner.title}`, busyTrack: partner.id });
         const heardB: number[] = [];
         const loudB: number[] = [];
         const heardA: number[] = [];
@@ -1850,9 +1870,9 @@ class Session {
         const heardAt = cur.deck.timeAt(aPos) - ease;
         const wait = Math.max(0, heardAt - this.mixer.now);
         let over = cur.deck.timeAt(plan.aStart) + plan.duration;
-        setStatus({ busy: `Mashup with ${partner.title} in ${Math.round(wait)}s` });
+        setStatus({ busy: `Mashup with ${partner.title} in ${Math.round(wait)}s`, busyTrack: partner.id });
         log(`Mashup set: ${track.title} × ${partner.artists[0]?.name} - ${partner.title} in ${wait.toFixed(1)}s, ${((Date.now() - since) / 1000).toFixed(0)}s after it was asked for (${how}; ${whole} bars had room; ${need.filter((n) => !n.spare).length} pieces still to make at ${pieceSeconds.toFixed(1)}s each, ${A.voice.size} of ${track.title} made ahead; ${describeFit(fit)})`);
-        setTimeout(() => !this.stopped && this.prep?.plan === plan && setStatus({ busy: `Mashup with ${partner.title} coming up` }), Math.max(0, wait - 5) * 1000);
+        setTimeout(() => !this.stopped && this.prep?.plan === plan && setStatus({ busy: `Mashup with ${partner.title} coming up`, busyTrack: partner.id }), Math.max(0, wait - 5) * 1000);
         // The DJ says what it found, and, if there is still a while to go after that, that it starts
         if (settings.commentary !== "off") {
           void (async () => {
@@ -2088,6 +2108,75 @@ class Session {
     return this.mixer.voice;
   }
 
+  /**
+   * The transition that is planned, until it is scheduled: as it is expected to go, with the next track where it is
+   * expected to play (it has no deck yet)
+   */
+  private plannedStage(now: number): Stage["planned"] {
+    const cur = this.current;
+    const next = this.items[0];
+    const prep = this.prep;
+    const plan = prep?.plan;
+    if (!cur || !next?.ready || !prep || !plan || this.pending || this.awaiting || prep.forId !== next.track.id || prep.fromId !== cur.item.track.id || cur.deck.stopAt !== Infinity) return undefined;
+    const t0 = cur.deck.timeAt(plan.aStart);
+    if (!Number.isFinite(t0) || t0 < now + 0.3) return undefined;
+    const end = t0 + plan.duration;
+    // (where the bass changes hands in a blend is found in the two tracks' sound when it is scheduled: until then
+    // only about where is known, and nothing of how the drums are lined up)
+    const transition: CoverTransition = {
+      seq: 0,
+      ...this.describe(
+        cur,
+        next,
+        plan,
+        t0,
+        {
+          swap: t0 + plan.swapAt,
+          end,
+          bStart: t0 + plan.bAt,
+          first: plan.kind === "mashup" ? t0 + (plan.pre ?? 0) : undefined,
+          move: plan.move,
+        },
+        prep.mash,
+      ),
+    };
+    const a = next.ready.analysis;
+    const speed = plan.speed ?? 1;
+    const from = t0 + plan.bAt;
+    return {
+      transition,
+      deck: {
+        id: next.track.id,
+        track: next.track,
+        set: next.segment.title,
+        deck: "",
+        started: false,
+        pos: 0,
+        rate: speed,
+        // (at the tempo it is matched to while the two play together, at its own after)
+        map:
+          speed !== 1 && end > from
+            ? [
+                { t: from, pos: plan.bStart, rate: speed },
+                { t: end, pos: plan.bStart + (end - from) * speed, rate: 1 },
+              ]
+            : [{ t: from, pos: plan.bStart, rate: 1 }],
+        swap: transition.swap,
+        duration: next.ready.duration,
+        analysed: next.ready.analysed,
+        bpm: a.grid?.bpm ?? a.bpm,
+        period: a.grid?.period ?? (a.bpm ? 60 / a.bpm : 0.5),
+        phase: a.grid?.phase ?? a.firstBeat ?? 0,
+        bars: a.bars,
+        barEnergy: a.barEnergy,
+        introEnd: a.introEnd,
+        outroStart: a.outroStart,
+        key: a.key?.conf ? a.key : undefined,
+        gain: 1,
+      },
+    };
+  }
+
   /** What is playing, coming in and coming up, as the full-screen view shows it (see stage.ts) */
   stage(): Stage {
     const now = this.mixer.now - this.mixer.latency;
@@ -2129,6 +2218,7 @@ class Session {
       current: deckOf(this.current),
       outgoing: heard ? deckOf(out) : undefined,
       incoming: deckOf(this.pending, this.pending?.swap),
+      planned: this.plannedStage(now),
       upcoming: this.items.slice(0, 8).map((i) => ({ track: i.track, set: i.segment.title, first: i.first, ready: !!i.ready })),
       mashUntil: this.mashUntil,
       mashing: this.mashing,

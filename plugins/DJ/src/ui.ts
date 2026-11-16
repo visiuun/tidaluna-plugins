@@ -84,6 +84,8 @@ const css = `
 
   .${ROOT}-panel { position: fixed; z-index: 9999; width: 340px; padding: 16px; border-radius: 16px; background: rgba(20,20,26,.96); backdrop-filter: blur(18px); color: #fff; box-shadow: 0 14px 50px rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.09); font-size: 13px; line-height: 1.45; display: none; }
   .${ROOT}-panel.open { display: block; }
+  /* (opened from the DJ full screen, which covers the window: over it) */
+  .${ROOT}-panel.over { z-index: 2147483600; }
   .${ROOT}-panel h3 { margin: 0; font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
   .${ROOT}-panel h3 small { font-size: 12px; font-weight: 500; opacity: .6; margin-left: auto; }
   .${ROOT}-status { margin: 8px 0 12px; min-height: 18px; opacity: .78; }
@@ -273,18 +275,30 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   document.body.appendChild(panel);
 
   let open = false;
+  /** What the panel is opened under, when that isn't the DJ button: the full screen's own button for it (see stage.ts) */
+  let anchor: HTMLElement | undefined;
   const position = () => {
     const r = wrap.getBoundingClientRect();
-    if (!r.width) return;
     const place = (box: HTMLElement, width: number) => {
       box.style.left = `${Math.max(12, Math.min(window.innerWidth - width - 12, r.left + r.width / 2 - width / 2))}px`;
       box.style.bottom = `${Math.max(12, window.innerHeight - r.top + 12)}px`;
     };
-    place(panel, 372);
-    place(caption, Math.min(340, caption.offsetWidth || 340));
+    if (anchor) {
+      // (under the button, its right edge on the button's)
+      const a = anchor.getBoundingClientRect();
+      panel.style.left = `${Math.max(12, Math.min(window.innerWidth - 372 - 12, a.right - 372))}px`;
+      panel.style.top = `${a.bottom + 10}px`;
+      panel.style.bottom = "auto";
+    } else if (r.width) {
+      panel.style.top = "";
+      place(panel, 372);
+    }
+    if (r.width) place(caption, Math.min(340, caption.offsetWidth || 340));
   };
-  const setOpen = (v: boolean) => {
+  const setOpen = (v: boolean, under?: HTMLElement) => {
     open = v;
+    anchor = v ? under : undefined;
+    panel.classList.toggle("over", !!anchor);
     panel.classList.toggle("open", v);
     if (v) {
       renderChips();
@@ -495,7 +509,7 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
     settings.commentary = talkSelect.value as Commentary;
   });
   const outside = (e: MouseEvent) => {
-    if (open && !panel.contains(e.target as Node) && !wrap.contains(e.target as Node)) setOpen(false);
+    if (open && !panel.contains(e.target as Node) && !wrap.contains(e.target as Node) && !anchor?.contains(e.target as Node)) setOpen(false);
   };
   document.addEventListener("mousedown", outside, true);
   const onResize = () => (open || caption.classList.contains("show")) && position();
@@ -599,7 +613,15 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   };
   window.__visiuunDjUiDispose = dispose;
   unloads.add(dispose);
-  return { refresh: place };
+  return {
+    refresh: place,
+    /** The panel, for the full screen: opened under `under` (or closed, if it is open there) */
+    panel: {
+      toggle: (under: HTMLElement) => setOpen(!(open && anchor === under), under),
+      isOpen: () => open,
+      close: () => setOpen(false),
+    },
+  };
 };
 
 export { isActive };

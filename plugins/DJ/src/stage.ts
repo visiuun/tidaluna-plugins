@@ -13,11 +13,14 @@
 //     the filter, the bass swap, the drop, the glide back, the way out; their beats ticked off against each other
 //   - picking music: records flick past over the cover; a new set: its name comes up, its tracks land in "Up next"
 //   - what the DJ says, the way TIDAL shows lyrics
+//   - a track's name carries TIDAL's marks for it (explicit, made with AI, an upload, Dolby Atmos)
+//   - on top: TrueTaste's thumbs for what is playing (when that plugin is there), the DJ's buttons, and its panel
+//     (requests, the voice, how much it talks); they go out of sight while the mouse is still
 // It never changes TIDAL's window: no full screen of the browser's own (TIDAL uses that for its now-playing view, and
 // leaving it from here took TIDAL out of that view half-way). It covers the window, and is gone again when closed.
 import type { LunaUnload } from "@luna/core";
 import type { MashArrangement, MashBlock, Wave } from "./audio/mixer";
-import type { CoverTransition, Stage, StageDeck, Status, TransitionDetail } from "./session";
+import { lookingForMusic, type CoverTransition, type Stage, type StageDeck, type Status } from "./session";
 
 export type StageSource = {
   status: () => Status;
@@ -35,10 +38,22 @@ export type StageSource = {
   start: () => void;
   startFollow: () => void;
   switchUp: () => void;
+  /** A mashup of what's playing with a song the DJ picks for it */
+  mashup: () => void;
+  /** How TIDAL marks a track: explicit, made with AI, an upload, in Dolby Atmos */
+  marks: (trackId: string) => Promise<Marks | undefined>;
+  /**
+   * TrueTaste's thumbs on what is playing: which is pressed (0: neither; undefined: TrueTaste isn't there, or nothing
+   * is playing), and pressing one (again takes it back; a thumbs down also skips the song, as TrueTaste has it)
+   */
+  feedback: { state: () => 1 | -1 | 0 | undefined; give: (v: 1 | -1) => void };
+  /** The DJ's panel (requests, the voice, how much it talks, transitions only): opened under `anchor`, or closed if it is open there */
+  panel: { toggle: (anchor: HTMLElement) => void; isOpen: () => boolean; close: () => void };
   skip: () => void;
   stop: () => void;
 };
 
+export type Marks = { explicit?: boolean; ai?: boolean; upload?: boolean; atmos?: boolean };
 export type Mash = { plan?: MashArrangement; cut?: number; feeds: { wanted: number; played: number; late: number; missed: number; spare: number | null }[] };
 
 const R = "visiuun-dj-stage";
@@ -60,9 +75,14 @@ const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const smooth = (t: number) => t * t * (3 - 2 * t);
 const ease = (dt: number, speed: number) => 1 - Math.exp(-dt * speed);
 const GLIDE = "cubic-bezier(.2, .8, .2, 1)";
-/** How long before a mix the two decks show (s), and how long the two covers take to come together (s) */
+/**
+ * How long before a mix the two decks show (s), and how long the two covers take to come together (s). A mix that
+ * comes up with less than SPLIT_MIN to go (one asked for right now: a switch-up, a request) isn't worth moving the
+ * covers apart for, only to bring them back together at once: the next cover goes under the playing one instead.
+ */
 const LEAD = 20;
 const TRAVEL = 2.6;
+const SPLIT_MIN = 7;
 
 const css = `
   .${R} { position: fixed; inset: 0; z-index: 2147483000; background: #000; color: #fff; overflow: hidden; display: none; font-family: ${T.text}; font-size: 14px; line-height: 20px; font-weight: 500; -webkit-font-smoothing: antialiased; user-select: none; }
@@ -82,6 +102,15 @@ const css = `
   .${R} .icon { width: 40px; height: 40px; border-radius: 1000px; border: 0; background: transparent; color: #fff; display: grid; place-items: center; cursor: pointer; padding: 0; flex: none; }
   .${R} .icon:hover { background: ${T.ultraThin}; }
   .${R} .icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .${R} .icon.thumb svg { width: 20px; height: 20px; }
+  .${R} .icon.thumb.down svg { transform: rotate(180deg); }
+  .${R} .icon.thumb.on svg { fill: currentColor; }
+  .${R} .icon.thumb + .icon.thumb { margin-left: -8px; }
+  .${R} .icon[disabled] { opacity: .35; cursor: default; }
+  /* The buttons go out of sight (and the pointer with them) once the mouse has been still for a while */
+  .${R} .top .btn, .${R} .top .icon { transition: opacity .4s ease, background-color .15s ease; }
+  .${R}.resting { cursor: none; }
+  .${R}.resting .top .btn, .${R}.resting .top .icon { opacity: 0; pointer-events: none; }
   .${R} .who { display: flex; align-items: baseline; gap: 10px; color: ${T.secondary}; white-space: nowrap; min-width: 0; overflow: hidden; transition: opacity .3s ease; }
   .${R} .who strong { color: #fff; font-weight: 600; }
   .${R} .who span { overflow: hidden; text-overflow: ellipsis; }
@@ -97,19 +126,25 @@ const css = `
   .${R} .main { position: relative; min-height: 0; }
   .${R} .cv { position: absolute; left: 0; top: 0; border-radius: 4px; overflow: hidden; background: #18181b; box-shadow: 0 24px 64px rgba(0,0,0,.5); transform-origin: 50% 50%; will-change: transform, opacity; }
   .${R} .cv img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* a cover that can't be had: the track's name on a plain plate */
+  .${R} .cv, .${R} .dig .rec, .${R} .card .ph { container-type: inline-size; }
+  .${R} .blank { position: absolute; inset: 0; display: grid; place-items: center; padding: 8cqw; text-align: center; overflow: hidden; background: linear-gradient(145deg, #2c2c33, #18181b); color: ${T.secondary}; font-family: ${T.display}; font-weight: 700; font-size: clamp(8px, 9cqw, 52px); line-height: 1.1; overflow-wrap: anywhere; }
+  .${R} .card .ph { position: relative; }
+  .${R} .card .ph .blank { font-size: 0; }
   .${R} .cv b { position: absolute; left: 10px; bottom: 10px; font-size: 12px; line-height: 16px; font-weight: 600; padding: 4px 10px; border-radius: 1000px; background: rgba(0,0,0,.6); backdrop-filter: blur(12px); opacity: 0; transition: opacity .3s ease; }
   .${R} .cv.tagged b { opacity: 1; }
   /* where the two covers merge: the transition is drawn here, over them (see cover.ts) */
   .${R} .fx { position: absolute; left: 0; top: 0; z-index: 5; pointer-events: none; opacity: 0; transition: opacity .25s ease; }
   .${R} .fx.on { opacity: 1; }
   .${R} .fx > img { width: 100%; height: 100%; display: block; opacity: 0; }
-  .${R} .main.digging .cv { filter: brightness(.35) blur(2px); transition: filter .5s ease; }
+  .${R} .main.digging .cv { filter: brightness(.35) blur(2px); }
+  .${R} .main .cv { transition: filter .5s ease; }
   .${R} .dig { position: absolute; left: 0; top: 0; z-index: 6; pointer-events: none; opacity: 0; transition: opacity .4s ease; }
   .${R} .dig.on { opacity: 1; }
-  .${R} .dig .stack { position: absolute; left: 24%; top: 18%; width: 52%; height: 52%; }
+  .${R} .dig .stack { position: absolute; left: 24%; top: 16%; width: 52%; height: 52%; }
   .${R} .dig .rec { position: absolute; inset: 0; border-radius: 4px; overflow: hidden; background: #303036; box-shadow: 0 12px 32px rgba(0,0,0,.5); }
   .${R} .dig .rec img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .${R} .dig p { position: absolute; left: 0; right: 0; bottom: 8%; margin: 0; text-align: center; font-size: 15px; font-weight: 600; }
+  .${R} .dig p { position: absolute; left: 6%; right: 6%; bottom: 7%; margin: 0; text-align: center; font-size: 15px; line-height: 20px; font-weight: 600; text-shadow: 0 1px 8px rgba(0,0,0,.8); }
   .${R} .dig p i { font-style: normal; display: inline-block; width: 1.2em; text-align: left; }
 
   /* what the DJ worked out for the two, between the two decks */
@@ -124,8 +159,17 @@ const css = `
   .${R} .ttl { position: absolute; left: 0; top: 0; text-align: center; will-change: transform, opacity; }
   .${R} .ttl .label { color: ${T.secondary}; font-size: 13px; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .${R} .ttl .label.accent { color: ${T.accent}; font-weight: 600; }
-  .${R} .ttl h1 { margin: 0; font-family: ${T.display}; font-weight: 700; line-height: 1.1; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .${R} .ttl h1 { margin: 0; font-family: ${T.display}; font-weight: 700; line-height: 1.1; letter-spacing: -.01em; white-space: nowrap; display: flex; align-items: center; justify-content: center; gap: .22em; }
+  .${R} .ttl h1 .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .${R} .ttl h1 .x2 { color: ${T.secondary}; font-weight: 500; }
+  /* TIDAL's marks on a track (explicit, made with AI, an upload, Dolby Atmos), after its name as TIDAL has them */
+  /* (TIDAL's drawings take their white and black from these two of its colours: given here as what they are, so a
+     badge is never drawn in nothing) */
+  .${R} .ttl h1 .marks { flex: none; display: inline-flex; align-items: center; gap: max(4px, .07em); --market-core-fill-white-color: #fff; --market-core-fill-black-color: #000; }
+  .${R} .ttl h1 .marks:empty { display: none; }
+  /* (TIDAL's are 16px beside its 16px names: here they grow with the name) */
+  .${R} .ttl h1 .marks i { flex: none; display: inline-flex; height: max(16px, .36em); }
+  .${R} .ttl h1 .marks svg { width: 100%; height: 100%; display: block; overflow: visible; }
   .${R} .ttl .by { margin-top: 4px; color: ${T.secondary}; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .${R} .tags { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; min-height: 28px; }
   .${R} .tags span { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 12px; border-radius: 1000px; background: ${T.ultraThin}; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -149,7 +193,8 @@ const css = `
   .${R} .card strong { display: block; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .${R} .card span { display: block; color: ${T.secondary}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .${R} .card em { display: block; font-style: normal; font-size: 12px; line-height: 16px; color: ${T.accent}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .${R} .card.gone { opacity: 0; transform: translateY(-16px) !important; }
+  /* (one that leaves is taken out of the row as it goes, so that the ones coming in land in their own places) */
+  .${R} .card.gone { position: absolute; opacity: 0; transform: translateY(-16px) !important; }
   .${R} .card.lifted { opacity: 0 !important; }
   .${R} .cards .none { color: ${T.secondary}; }
 
@@ -164,6 +209,9 @@ const css = `
 
 // (TIDAL's own "close the now-playing view" chevron)
 const ICON_CLOSE = `<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>`;
+const ICON_OPTIONS = `<svg viewBox="0 0 24 24"><path d="M4 7h8.5M19.5 7h.5M4 17h.5M11.5 17H20"/><circle cx="16" cy="7" r="3"/><circle cx="8" cy="17" r="3"/></svg>`;
+// (TrueTaste's thumb)
+const ICON_THUMB = `<svg viewBox="0 0 24 24"><path d="M7 10v11H3V10h4Z"/><path d="M7 10l4.2-7.4c.4-.7 1.3-.9 1.9-.5.9.6 1.3 1.6 1.1 2.6L13.6 9h6c1.2 0 2.1 1.1 1.9 2.3l-1.3 7.5c-.2 1.3-1.3 2.2-2.6 2.2H7"/></svg>`;
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string) => {
   const e = document.createElement(tag);
@@ -195,6 +243,8 @@ const keyFit = (a: Key, b: Key) => {
   if (d === 1 && x.major === y.major) return "next door on the wheel";
   return d <= 2 ? "close keys" : "different keys";
 };
+/** "Blue Berries'", "Clarity's", and "Beggin's" of "Beggin'" */
+const poss = (name: string) => (/['’]$/.test(name) ? `${name}s` : /s$/i.test(name) ? `${name}'` : `${name}'s`);
 const artistsOf = (d: { track: { artists: { name: string }[] } }) => d.track.artists.map((a) => a.name).join(", ");
 const titleOf = (d: { track: { title: string; version?: string } }) => d.track.title + (d.track.version ? ` (${d.track.version})` : "");
 type MapPoint = StageDeck["map"][number];
@@ -325,14 +375,22 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const bannerTitle = el("strong");
   banner.append(bannerLabel, bannerTitle);
   const switchBtn = el("button", "btn primary", "Switch it up");
+  const mashBtn = el("button", "btn", "Mashup");
   const skipBtn = el("button", "btn", "Skip");
   const djBtn = el("button", "btn primary", "Start the DJ");
   const stopBtn = el("button", "btn", "Stop DJ");
   const closeBtn = el("button", "icon");
-  for (const b of [switchBtn, skipBtn, djBtn, stopBtn, closeBtn]) b.type = "button";
+  const upBtn = el("button", "icon thumb");
+  const downBtn = el("button", "icon thumb down");
+  const optionsBtn = el("button", "icon");
+  for (const b of [switchBtn, mashBtn, skipBtn, djBtn, stopBtn, closeBtn, upBtn, downBtn, optionsBtn]) b.type = "button";
+  mashBtn.title = "Mash this song up with one the DJ picks for it";
   closeBtn.title = "Close (Esc)";
   closeBtn.innerHTML = ICON_CLOSE;
-  top.append(who, banner, el("div", "sp"), djBtn, switchBtn, skipBtn, stopBtn, closeBtn);
+  upBtn.innerHTML = downBtn.innerHTML = ICON_THUMB;
+  optionsBtn.title = "DJ: requests and options";
+  optionsBtn.innerHTML = ICON_OPTIONS;
+  top.append(who, banner, el("div", "sp"), upBtn, downBtn, djBtn, switchBtn, mashBtn, skipBtn, stopBtn, optionsBtn, closeBtn);
 
   const main = el("div", "main");
   const fx = el("div", "fx");
@@ -401,6 +459,8 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       .catch(() => {})
       .finally(() => asked.delete(id));
   };
+  /** What each track is called (for a cover that can't be had) */
+  const names = new Map<string, string>();
   /** The cover of a track as an <img> inside `into` */
   const img = (id: string, into: HTMLElement) => {
     into.dataset.cover = id;
@@ -410,6 +470,12 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       if (!im) {
         im = el("img");
         im.alt = "";
+        // (a cover TIDAL doesn't hand out, which happens: a plate with the track's name, not a broken picture)
+        im.addEventListener("error", (e) => {
+          (e.currentTarget as HTMLElement).remove();
+          if (into.dataset.cover === id && !into.querySelector(".blank")) into.prepend(el("div", "blank", names.get(id) ?? ""));
+        });
+        into.querySelector(".blank")?.remove();
         into.prepend(im);
       }
       if (im.src !== url) im.src = url;
@@ -456,16 +522,33 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   // ------------------ WHAT IS ON ------------------
   // The two tracks of the transition, whichever of them the session calls current by now (a mashup's partner is
   // "current" long before the first song stops), and where it is at
-  type Scene = { phase: "" | "one" | "decks" | "join" | "merged"; tr?: Live; a?: StageDeck; b?: StageDeck; lead?: StageDeck; k: number };
+  type Scene = {
+    phase: "" | "one" | "decks" | "join" | "merged";
+    tr?: Live;
+    a?: StageDeck;
+    b?: StageDeck;
+    lead?: StageDeck;
+    k: number;
+    /** A mix that is seconds away and came up too late for two decks (see SPLIT_MIN): the next cover waits under the playing one */
+    near?: boolean;
+  };
+  /** Whether the two tracks of a mix are (or were) put side by side before it: decided when the mix is first seen */
+  let split: { pair: string; yes: boolean } | undefined;
   const sceneOf = (st: Stage | undefined, tr: Live | undefined, t: number): Scene => {
     if (!st) return { phase: "", k: 0 };
     const byId = new Map<string, StageDeck>();
-    for (const d of [st.outgoing, st.current, st.incoming]) if (d) byId.set(d.id, d);
+    // (the next track as it is planned to play, until it has a deck of its own)
+    for (const d of [st.planned?.deck, st.outgoing, st.current, st.incoming]) if (d) byId.set(d.id, d);
     const a = tr && byId.get(tr.fromId);
     const b = tr && byId.get(tr.toId);
     if (tr && a && b && a.id !== b.id && t < tr.end && t >= tr.start - LEAD) {
+      const lead = t >= tr.swap ? b : a;
+      if (t >= tr.start) return { phase: "merged", tr, a, b, lead, k: 1 };
+      const pair = `${a.id}>${b.id}`;
+      if (split?.pair !== pair) split = { pair, yes: tr.start - t >= SPLIT_MIN };
+      if (!split.yes) return { phase: "one", tr, a, b, lead, k: 0, near: true };
       const k = smooth(clamp((t - (tr.start - TRAVEL)) / TRAVEL));
-      return { phase: t >= tr.start ? "merged" : k > 0 ? "join" : "decks", tr, a, b, lead: t >= tr.swap ? b : a, k };
+      return { phase: k > 0 ? "join" : "decks", tr, a, b, lead, k };
     }
     // after a mix and until the session says so, the one that came in is the one playing
     const lead = tr && b && t >= tr.swap ? b : st.current;
@@ -490,10 +573,13 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     const mainH = Math.max(160, H - 64 - 20 - 72 - capH - tlH);
     frame.style.gridTemplateRows = `64px ${mainH.toFixed(1)}px ${capH.toFixed(1)}px ${tlH.toFixed(1)}px 72px`;
     const two = sc.phase === "decks" || sc.phase === "join";
-    // (room under the cover for its name, artist and tags, with some air before the breakdown)
-    const titleRoom = two ? 132 : 204;
+    // (room under the cover for its name, artist and tags, with some air before the breakdown: a deck's name is
+    // small and has no tags, and grows into the full one as the two come together)
+    const titleRoom = two ? lerp(132, 204, sc.k) : 204;
     const sWant = Math.max(120, Math.min(mainH - titleRoom, W * 0.34));
-    sNow = sNow ? sNow + (sWant - sNow) * k : sWant;
+    // (it grows into room at its ease, and makes room at once: what takes the room is eased in itself, and a cover
+    // that lagged behind it would push its name into what the DJ says)
+    sNow = !sNow || sWant < sNow ? sWant : sNow + (sWant - sNow) * k;
     const S = Math.round(sNow);
     const gap = Math.max(120, Math.min(170, W * 0.11));
     const topY = Math.max(4, Math.round((mainH - S - titleRoom) / 2));
@@ -582,7 +668,14 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       setPose(coverEl(a!.id), { x: geo.C, scale: 1, opacity: 1, z: 2 });
       // (under the transition, which covers both; should it not be drawn, the incoming cover fades over the other)
       setPose(coverEl(b!.id), { x: geo.C, scale: 1, opacity: mixed(tr!, t), z: 3 });
-    } else if (sc.lead) setPose(coverEl(sc.lead.id), { x: geo.C, scale: 1, opacity: 1, z: 2 });
+    } else if (sc.lead) {
+      setPose(coverEl(sc.lead.id), { x: geo.C, scale: 1, opacity: 1, z: 2 });
+      // (a mix seconds away: the next cover comes out of "Up next" and waits under this one)
+      if (sc.near && b && b.id !== sc.lead.id) {
+        onStage = b.id;
+        setPose(coverEl(b.id), { x: geo.C, scale: 1, opacity: 1, z: 1 });
+      }
+    }
     fx.classList.toggle("on", sc.phase === "merged");
     if (sc.phase !== phase) {
       if (sc.phase === "decks" || (sc.phase === "one" && phase !== "merged")) glide(900);
@@ -617,7 +710,8 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     if (!sc.tr || !sc.a || !sc.b) return;
     const tr = sc.tr;
     const d = tr.detail;
-    const key = `${tr.seq}`;
+    // (a planned mix and the same one once it is scheduled: then how the drums were lined up is known too)
+    const key = `${tr.seq}|${tr.fromId}|${tr.toId}`;
     if (key === matchKey) return;
     matchKey = key;
     const cards: { big: (string | HTMLElement)[]; small: string; good?: boolean }[] = [];
@@ -644,18 +738,19 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     }
     if (d?.mash) {
       const f = d.mash.fit;
-      cards.push({ big: [`Notes fit ${Math.round(clamp(f) * 100)}%`], small: `${sc.b.track.title} over ${sc.a.track.title}'s bass, bar by bar`, good: f > 0.3 });
+      cards.push({ big: [`Notes fit ${Math.round(clamp(f) * 100)}%`], small: `${sc.b.track.title} over ${poss(sc.a.track.title)} bass, bar by bar`, good: f > 0.3 });
       cards.push({ big: ["Drums together"], small: `${Math.round(clamp(d.mash.rhythm) * 100)}% in step${d.mash.shift ? `, moved ${d.mash.shift} beat${Math.abs(d.mash.shift) > 1 ? "s" : ""}` : ""}` });
     }
     if (tr.kind === "blend") {
       const beats = d?.beats ?? Math.round((tr.end - tr.start) / (tr.beat ?? 0.5));
       const swapBar = d?.bassAt && tr.beat ? Math.round((d.bassAt - tr.start) / tr.beat / 4) + 1 : undefined;
-      cards.push({ big: [`${Math.round(beats / 4)}-bar blend`], small: `${d?.style === "filter" ? "filtered, " : ""}bass swap${swapBar ? ` on bar ${swapBar}` : " in the middle"}` });
+      // (the bar the bass changes hands on is found when the mix is scheduled: a planned one doesn't name it yet)
+      cards.push({ big: [`${Math.round(beats / 4)}-bar blend`], small: `${d?.style === "filter" ? "filtered, " : ""}${swapBar ? `bass swap on bar ${swapBar}` : tr.seq ? "bass swap in the middle" : "with a bass swap"}` });
     } else if (tr.kind === "mashup") {
       const way = d?.way ?? "voice";
       cards.push({
         big: ["Mashup"],
-        small: way === "carry" ? `${sc.a.track.title}'s voice over ${sc.b.track.title}'s band` : way === "layer" ? `${sc.b.track.title} over ${sc.a.track.title}'s bass, then the bass swaps` : `${sc.b.track.title}'s voice over ${sc.a.track.title}'s band`,
+        small: way === "carry" ? `${poss(sc.a.track.title)} voice over ${poss(sc.b.track.title)} band` : way === "layer" ? `${sc.b.track.title} over ${poss(sc.a.track.title)} bass, then the bass swaps` : `${poss(sc.b.track.title)} voice over ${poss(sc.a.track.title)} band`,
       });
     } else cards.push({ big: [KIND[tr.kind]], small: tr.kind === "drop" ? (d?.move === "brake" ? "the old one brakes to a stop" : d?.move === "sweep" ? "the old one is swept away" : "the new one lands on the one") : tr.kind === "cut" ? "straight over, on the beat" : "one fades into the other" });
     if (d?.nudgeMs !== undefined && tr.kind === "blend") cards.push({ big: ["Drums lined up"], small: `moved ${d.nudgeMs} ms${d.beatShift ? `, ${d.beatShift} beat${d.beatShift > 1 ? "s" : ""} on` : ""}` });
@@ -672,35 +767,108 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   };
 
   // ------------------ TITLES ------------------
-  type Ttl = { el: HTMLElement; label: HTMLElement; h1: HTMLElement; by: HTMLElement; tags?: HTMLElement; key: string };
+  type Ttl = { el: HTMLElement; label: HTMLElement; h1: HTMLElement; /** the name, and TIDAL's marks after it */ t: HTMLElement; marks: HTMLElement; by: HTMLElement; tags?: HTMLElement; key: string };
   const ttl = (withTags: boolean): Ttl => {
     const e = el("div", "ttl");
     const label = el("div", "label");
     const h1 = el("h1");
+    const t = el("span", "t");
+    const marks = el("span", "marks");
+    h1.append(t, marks);
     const by = el("div", "by");
     e.append(label, h1, by);
     const tags = withTags ? el("div", "tags") : undefined;
     if (tags) e.appendChild(tags);
     main.appendChild(e);
-    return { el: e, label, h1, by, tags, key: "" };
+    return { el: e, label, h1, t, marks, by, tags, key: "" };
   };
   const nowTtl = ttl(true);
   const nextTtl = ttl(false);
+  // How TIDAL marks each track (asked once a track)
+  const marked = new Map<string, Marks | null>();
+  const marksAsked = new Map<string, ((m: Marks) => void)[]>();
+  const marksFor = (id: string, then: (m: Marks) => void) => {
+    const known = marked.get(id);
+    if (known) return then(known);
+    const list = marksAsked.get(id);
+    if (list) return void list.push(then);
+    marksAsked.set(id, [then]);
+    src
+      .marks(id)
+      .then((m) => {
+        if (!m) return;
+        marked.set(id, m);
+        for (const fn of marksAsked.get(id) ?? []) fn(m);
+      })
+      .catch(() => {})
+      .finally(() => marksAsked.delete(id));
+  };
+  // TIDAL's own badges, drawn as its page draws them (see its badge component: an <i> with the svg in it). The ones
+  // TIDAL keeps in its page are used from there, so they are whatever TIDAL has now; the same drawings are kept
+  // here for a page that doesn't have them. (The AI badge TIDAL writes out in place, as here.)
+  const PLATE = "var(--profile-content-color, var(--market-core-fill-white-color, #fff))";
+  const INK = "var(--profile-background, var(--market-core-fill-black-color, #000))";
+  const BADGES: Record<keyof Marks, { title: string; symbol?: string; ratio: number; svg: string }> = {
+    explicit: {
+      title: "Explicit",
+      symbol: "explicit-badge",
+      ratio: 1,
+      svg: `<svg viewBox="0 0 16 16" fill="none"><rect width="16" height="16" rx="4" fill="${PLATE}"/><path d="M5.97215 11V4.7H10.1392V5.627H7.05215V7.301H9.70715V8.21H7.05215V10.073H10.1932V11H5.97215Z" fill="${INK}"/></svg>`,
+    },
+    ai: {
+      title: "AI-generated",
+      ratio: 1,
+      svg: `<svg viewBox="0 0 16 16" fill="none"><rect width="16" height="16" rx="4" fill="${PLATE}"/><path d="M3.77102 11L6.18302 4.7H7.40702L9.81902 11H8.68502L7.06502 6.563L6.83102 5.834H6.75902L6.53402 6.563L4.90502 11H3.77102ZM4.95002 9.488V8.57H8.64002V9.488H4.95002ZM10.6128 11V4.7H11.6928V11H10.6128Z" fill="${INK}"/></svg>`,
+    },
+    upload: {
+      title: "Uploaded",
+      symbol: "uploaded-badge",
+      ratio: 1,
+      svg: `<svg viewBox="0 0 16 16" fill="none"><rect width="16" height="16" rx="4" fill="var(--profile-content-color, white)" fill-opacity="0.1"/><path d="M11.8042 6.91092C12.0621 7.16013 12.0698 7.57163 11.8208 7.82986C11.5718 8.08787 11.1603 8.09511 10.9019 7.84646L8.64995 5.67459V11.8543C8.64952 12.2129 8.35824 12.5037 7.99956 12.5037C7.64083 12.5037 7.34959 12.2129 7.34917 11.8543L7.34917 5.67654L5.09819 7.84646C4.83987 8.09521 4.42835 8.08778 4.17924 7.82986C3.93026 7.57158 3.93789 7.16011 4.19584 6.91092L7.54936 3.67849C7.80114 3.43581 8.19994 3.43579 8.4517 3.67849L11.8042 6.91092Z" fill="var(--profile-content-color, white)" fill-opacity="0.55"/></svg>`,
+    },
+    // (Dolby's double D)
+    atmos: {
+      title: "Dolby Atmos",
+      symbol: "atmos-logo",
+      ratio: 15 / 14,
+      svg: `<svg viewBox="0 0 15 14" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M3.88264 4H3V9.99999H3.88264C5.53074 9.99999 6.87419 8.65274 6.87419 6.99998C6.87419 5.34725 5.53074 4 3.88264 4ZM10.628 10H11.5106V4.00001H10.628C8.97986 4.00001 7.6364 5.34726 7.6364 7C7.6364 8.65275 8.97986 10 10.628 10Z" fill="#B2B2BF"/><rect x="0.5" y="0.5" width="13.5106" height="13" rx="1.5" stroke="#EBEBFF" stroke-opacity="0.2"/></svg>`,
+    },
+  };
+  const MARKS = ["explicit", "ai", "upload", "atmos"] as const;
+  const badge = (key: keyof Marks) => {
+    const b = BADGES[key];
+    const mark = el("i");
+    mark.title = b.title;
+    mark.dataset.mark = key;
+    mark.style.aspectRatio = String(b.ratio);
+    mark.innerHTML = b.symbol && document.getElementById(b.symbol) ? `<svg><use href="#${b.symbol}" width="100%" height="100%"></use></svg>` : b.svg;
+    return mark;
+  };
   const fillTrack = (d: StageDeck) => (b: Ttl) => {
-    b.h1.textContent = titleOf(d);
+    b.t.textContent = titleOf(d);
     b.by.textContent = artistsOf(d);
+    b.marks.replaceChildren();
+    marksFor(d.id, (m) => {
+      // (the name may have changed hands since it was asked)
+      if (b.key !== d.id || b.t.textContent !== titleOf(d)) return;
+      b.marks.replaceChildren(...MARKS.filter((key) => m[key]).map(badge));
+    });
   };
   /** The title changes (at the swap, a skip, a mashup): the old one lifts away, the new one comes up */
-  const replace = (b: Ttl, key: string, fill: (b: Ttl) => void) => {
+  const replace = (b: Ttl, key: string, fill: (b: Ttl) => void, unseen = false) => {
     if (b.key === key) return;
-    if (!b.key) {
+    // (one that isn't in sight is simply filled in: the last name it had isn't shown leaving)
+    if (!b.key || unseen) {
       b.key = key;
+      for (const p of [b.h1, b.by]) for (const an of p.getAnimations()) an.cancel();
       return fill(b);
     }
     b.key = key;
     const parts = [b.h1, b.by];
     for (const p of parts) p.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-12px)" }], { duration: 220, easing: "ease-in", fill: "forwards" });
     setTimeout(() => {
+      // (it has changed again meanwhile: that one fills it in)
+      if (b.key !== key) return;
       fill(b);
       for (const p of parts) p.animate([{ opacity: 0, transform: "translateY(16px)" }, { opacity: 1, transform: "none" }], { duration: 420, easing: GLIDE, fill: "forwards" });
     }, 230);
@@ -713,6 +881,10 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     b.by.style.fontSize = `${Math.max(14, size * 0.42).toFixed(1)}px`;
   };
   let tagsKey = "";
+  let nextSeen = false;
+  const NOTE_FOR = 8000;
+  let noteShown: string | undefined;
+  let noteAt = 0;
   let beatDot: HTMLElement | undefined;
   const renderTitles = (sc: Scene, t: number) => {
     const { tr, b, k } = sc;
@@ -723,28 +895,41 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     const two = sc.phase === "decks" || sc.phase === "join";
     if (mashing) {
       setText(nowTtl.label, "Mashup");
+      nowTtl.label.classList.remove("accent");
       replace(nowTtl, `m|${tr!.songs!.a}|${tr!.songs!.b}`, (bl) => {
-        bl.h1.replaceChildren(tr!.songs!.a, el("span", "x2", " × "), tr!.songs!.b);
+        bl.t.replaceChildren(tr!.songs!.a, el("span", "x2", " × "), tr!.songs!.b);
+        bl.marks.replaceChildren();
         bl.by.textContent = [tr!.songs!.artistA, tr!.songs!.artistB].filter(Boolean).join(" × ");
       });
     } else if (lead) {
-      setText(nowTtl.label, "Now playing");
+      // Over the name: the mix that is seconds away, else what the DJ is busy with (when the records over the cover
+      // aren't saying it), else what it had to say about the last thing asked of it
+      const doing = !two && status.mode !== "follow" && !dig.classList.contains("on") ? status.busy : undefined;
+      const coming = tr && b && lead.id !== b.id && (sc.near || sc.phase === "merged") ? `${NEXT[tr.kind]} ${titleOf(b)}${t < tr.start ? ` · ${mmss(tr.start - t)}` : ""}` : undefined;
+      // (what it had to say stays up for a few seconds: the session keeps it until the next thing is asked)
+      const note = !two && status.note && performance.now() - noteAt < NOTE_FOR ? status.note : undefined;
+      setText(nowTtl.label, coming ?? (doing ? `${doing}…` : (note ?? "Now playing")));
+      nowTtl.label.classList.toggle("accent", !!(coming ?? doing));
       replace(nowTtl, lead.id, fillTrack(lead));
     } else {
       setText(nowTtl.label, status.phase === "starting" ? "Getting ready" : "");
+      nowTtl.label.classList.remove("accent");
       nowTtl.key = "";
-      setText(nowTtl.h1, "");
+      setText(nowTtl.t, "");
+      nowTtl.marks.replaceChildren();
       setText(nowTtl.by, "");
     }
     if (two) {
       placeTtl(nowTtl, lerp(geo.L, geo.C, k), lerp(geo.S + 80, geo.W * 0.8, k), lerp(small, big, k), clamp(1 - Math.sin(Math.PI * k) * 0.6));
-      replace(nextTtl, b!.id, fillTrack(b!));
+      replace(nextTtl, b!.id, fillTrack(b!), !nextSeen);
+      nextSeen = true;
       setText(nextTtl.label, `${NEXT[tr!.kind]} ${mmss(Math.max(0, tr!.start - t))}`);
       nextTtl.label.classList.add("accent");
       placeTtl(nextTtl, lerp(geo.R, geo.C, k), geo.S + 80, small, clamp(1 - k * 3));
     } else {
       placeTtl(nowTtl, geo.C, geo.W * 0.8, big, 1);
       nextTtl.el.style.opacity = "0";
+      nextSeen = false;
     }
     // tempo (as it is heard: a track sped up or slowed down shows it), key, where it's at
     const tags = nowTtl.tags!;
@@ -787,65 +972,105 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
 
   // ------------------ DIGGING ------------------
   // While the DJ looks for music (picking a set, asking TIDAL, finding a song to mash up with), records flick past
+  // over the cover. A record it has pulled out (a song it is trying for a mashup, the one it then puts it together
+  // with) lands on top and stays there for as long as it is busy with it. Only while one cover is on the stage with
+  // no mix on or coming up: two decks, and a mix being played out, are never covered.
+  type Dig = { text: string; hold?: string; pool: string[] };
   let digTimer: ReturnType<typeof setInterval> | undefined;
   let digDots: ReturnType<typeof setInterval> | undefined;
+  let digClear: ReturnType<typeof setTimeout> | undefined;
   let digLabel: HTMLElement | undefined;
+  let digHeld: string | undefined;
   let stack: HTMLElement[] = [];
+  const DEPTH = 6;
+  const place = (i: number) => `translate(${i * 2}px, ${-i * 3}px) rotate(${(i % 2 ? 1 : -1) * i * 1.2}deg)`;
   const restack = () =>
     stack.forEach((c, i) => {
-      c.style.transform = `translate(${i * 2}px, ${-i * 3}px) rotate(${(i % 2 ? 1 : -1) * i * 1.2}deg)`;
+      c.style.transform = place(i);
       c.style.zIndex = String(10 - i);
     });
-  const fillStack = () => {
-    const urls = [...covered.values()].filter((u): u is string => !!u).sort(() => Math.random() - 0.5).slice(0, 6);
-    if (urls.length < 2) return;
-    stack = urls.map((u) => {
-      const card = el("div", "rec");
-      const im = el("img");
-      im.src = u;
-      card.appendChild(im);
-      return card;
-    });
-    digStack.replaceChildren(...stack);
-    restack();
-    clearInterval(digTimer);
-    // the one on top flicks away and goes to the back
-    digTimer = setInterval(() => {
-      const topCard = stack.shift()!;
-      stack.push(topCard);
-      topCard.animate(
-        [
-          { transform: topCard.style.transform, opacity: 1 },
-          { transform: "translate(-70%, -18%) rotate(-16deg)", opacity: 0, offset: 0.55 },
-          { transform: `translate(${(stack.length - 1) * 2}px, ${-(stack.length - 1) * 3}px)`, opacity: 0 },
-        ],
-        { duration: 520, easing: "cubic-bezier(.3,.1,.3,1)" },
-      );
-      for (const c of stack) c.style.transition = `transform .4s ${GLIDE}`;
-      restack();
-    }, 560);
+  const record = (id: string) => {
+    const card = el("div", "rec");
+    card.dataset.id = id;
+    img(id, card);
+    digStack.appendChild(card);
+    return card;
   };
-  const digging = (what: string | undefined) => {
-    const on = !!what;
-    if (on && dig.classList.contains("on")) {
-      setText(digLabel ?? null, what!);
-      if (stack.length < 2) fillStack();
-      return;
+  /** The one on top flicks away and goes to the back */
+  const flick = () => {
+    if (stack.length < 2) return;
+    const topCard = stack.shift()!;
+    stack.push(topCard);
+    topCard.animate(
+      [
+        { transform: topCard.style.transform, opacity: 1 },
+        { transform: "translate(-70%, -18%) rotate(-16deg)", opacity: 0, offset: 0.55 },
+        { transform: place(stack.length - 1), opacity: 0 },
+      ],
+      { duration: 520, easing: "cubic-bezier(.3,.1,.3,1)" },
+    );
+    for (const c of stack) c.style.transition = `transform .4s ${GLIDE}`;
+    restack();
+  };
+  /** A record is pulled out: it lands on top of the others */
+  const pull = (id: string) => {
+    let card = stack.find((c) => c.dataset.id === id);
+    if (card && card === stack[0]) return;
+    if (card) stack.splice(stack.indexOf(card), 1);
+    else card = record(id);
+    stack.unshift(card);
+    for (const c of stack.splice(DEPTH)) c.remove();
+    for (const c of stack) c.style.transition = `transform .4s ${GLIDE}`;
+    restack();
+    card.animate(
+      [
+        { transform: "translate(70%, -18%) rotate(16deg)", opacity: 0 },
+        { transform: place(0), opacity: 1 },
+      ],
+      { duration: 520, easing: GLIDE },
+    );
+  };
+  /** The records that flick past: what is coming up (never what is playing, or has played), as far as their covers are at hand */
+  const fillStack = (pool: string[]) => {
+    const ids = pool.filter((id) => covered.get(id) && !stack.some((c) => c.dataset.id === id)).sort(() => Math.random() - 0.5);
+    if (!ids.length) return;
+    for (const id of ids.slice(0, DEPTH - stack.length)) stack.push(record(id));
+    restack();
+  };
+  const digging = (d: Dig | undefined) => {
+    const on = !!d;
+    if (on !== dig.classList.contains("on")) {
+      dig.classList.toggle("on", on);
+      main.classList.toggle("digging", on);
+      clearInterval(digTimer);
+      digTimer = undefined;
+      clearInterval(digDots);
+      clearTimeout(digClear);
+      digHeld = undefined;
+      const empty = () => {
+        stack = [];
+        digStack.replaceChildren();
+      };
+      // (the records stay as they are while they fade away)
+      if (!on) return void (digClear = setTimeout(empty, 450));
+      empty();
+      digLabel = el("span");
+      const dots = el("i", undefined, "");
+      digText.replaceChildren(digLabel, dots);
+      let n = 0;
+      digDots = setInterval(() => (dots.textContent = ".".repeat((n++ % 3) + 1)), 350);
     }
-    if (on === dig.classList.contains("on")) return;
-    dig.classList.toggle("on", on);
-    main.classList.toggle("digging", on);
-    clearInterval(digTimer);
-    clearInterval(digDots);
-    stack = [];
-    digStack.replaceChildren();
-    if (!on) return;
-    digLabel = el("span", undefined, what!);
-    const dots = el("i", undefined, "");
-    digText.replaceChildren(digLabel, dots);
-    let n = 0;
-    digDots = setInterval(() => (dots.textContent = ".".repeat((n++ % 3) + 1)), 350);
-    fillStack();
+    if (!d) return;
+    setText(digLabel ?? null, d.text);
+    if (stack.length < DEPTH) fillStack(d.pool);
+    if (d.hold) {
+      clearInterval(digTimer);
+      digTimer = undefined;
+      if (digHeld !== d.hold) pull((digHeld = d.hold));
+    } else {
+      digHeld = undefined;
+      digTimer ??= setInterval(flick, 560);
+    }
   };
 
   // ------------------ THE BREAKDOWN ------------------
@@ -1041,14 +1266,22 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       const bpmB = d?.bpmB || sc.b!.bpm;
       if (mashing && arr) {
         const short = (x: StageDeck) => (x.track.title.length > 18 ? `${x.track.title.slice(0, 17)}…` : x.track.title);
-        const poss = (name: string) => (/s$/i.test(name) ? `${name}'` : `${name}'s`);
         const named = (what: string) =>
           what
             .replace(/\bA's\b/g, poss(short(sc.a!)))
             .replace(/\bB's\b/g, poss(short(sc.b!)))
             .replace(/\bA\b/g, short(sc.a!))
             .replace(/\bB\b/g, short(sc.b!));
-        for (const b of arr.blocks) marks.push({ at: b.from, label: named(b.what), strong: b.cut || b === blockAt(arr, t) });
+        // (said once for as long as it stays the same: blocks that follow each other doing the same thing are one stretch)
+        const playing = blockAt(arr, t);
+        let stretch: { at: number; label: string; strong?: boolean } | undefined;
+        let until = -Infinity;
+        for (const b of [...arr.blocks].sort((x, y) => x.from - y.from)) {
+          const label = named(b.what);
+          if (!stretch || stretch.label !== label || b.cut || b.from > until + 0.05) marks.push((stretch = { at: b.from, label, strong: b.cut }));
+          if (b === playing) stretch.strong = true;
+          until = b.to;
+        }
         // who sings where
         for (const b of arr.blocks) {
           for (const { side, y, color } of lanes) {
@@ -1101,7 +1334,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
         if (tr!.mid) marks.push({ at: tr!.mid, label: "Takeover" });
       } else if (tr!.kind === "blend") {
         marks.push({ at: tr!.start, label: d?.style === "filter" ? "Mix in · filtered" : "Mix in" });
-        marks.push({ at: d?.bassAt ?? tr!.swap, label: "Bass swap", strong: true });
+        marks.push({ at: d?.bassAt ?? tr!.swap, label: d?.bassAt !== undefined || tr!.seq ? "Bass swap" : "Bass swap, about here", strong: true });
       } else marks.push({ at: tr!.swap, label: tr!.kind === "drop" ? (d?.move === "brake" ? "Brake · drop" : d?.move === "sweep" ? "Sweep · drop" : "Drop") : tr!.kind === "cut" ? "Cut" : "Handover", strong: true });
       if (d?.glideAt !== undefined && d.glide && d.speed && Math.abs(d.speed - 1) > 0.001) marks.push({ at: d.glideAt + d.glide, label: `Back to ${bpmB.toFixed(0)} BPM` });
       // (a mashup ends on the other song on its own: said above)
@@ -1199,7 +1432,12 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       }
       kept.push(c);
     }
-    for (const c of old.values()) {
+    // (the ones that go are taken out of the row where they are, so that what comes in doesn't queue up behind them
+    // and jump into place once they are gone)
+    const leaving = [...old.values()].map((c) => ({ c, x: c.offsetLeft, y: c.offsetTop }));
+    for (const { c, x, y } of leaving) {
+      c.style.left = `${x}px`;
+      c.style.top = `${y}px`;
       c.classList.add("gone");
       setTimeout(() => c.remove(), 500);
     }
@@ -1246,15 +1484,24 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       lastNowAt = time;
     }
     paused = !!st && time - lastNowAt > 350;
-    const sc = sceneOf(st, transitionNow(status, t), t);
+    for (const d of [st?.current, st?.outgoing, st?.incoming, st?.planned?.deck, ...(st?.upcoming ?? [])]) if (d && !names.has(d.track.id)) names.set(d.track.id, d.track.title);
+    // The mix that is scheduled, or, until it is (which is only seconds ahead), the one that is planned
+    const armed = transitionNow(status, t);
+    const ahead = !armed && status.phase === "playing" && st?.planned && st.planned.transition.start - t <= LEAD ? st.planned.transition : undefined;
+    const sc = sceneOf(st, armed ?? (ahead ? { ...ahead, p: 0 } : undefined), t);
     layout(sc, dt);
     placeCovers(sc, t);
     renderMatch(sc);
+    // Records flick past while the DJ looks for music, with one cover on the stage and no mix on or coming up
+    const busy = status.mode !== "follow" ? status.busy : undefined;
+    const calm = sc.phase === "" || (sc.phase === "one" && !sc.tr);
+    const pool = (st?.upcoming ?? []).map((u) => u.track.id);
+    digging(status.phase === "starting" ? { text: busy ?? "Getting ready", pool } : busy && calm && (lookingForMusic(busy) || status.busyTrack) ? { text: busy, hold: status.busyTrack, pool } : undefined);
     renderTitles(sc, t);
     draw(sc, st, t);
     renderQueue(st);
     followCaption(t);
-    digging(status.phase === "starting" ? "Getting ready" : status.mode !== "follow" && status.busy ? status.busy : undefined);
+    showThumbs(time);
 
     // background: the cover of what is playing (the incoming one once it has taken over)
     const bgUrl = sc.lead ? covered.get(sc.lead.id) : undefined;
@@ -1291,6 +1538,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   let captionShown = "";
   let captionTimer: ReturnType<typeof setInterval> | undefined;
   let segmentShown: string | undefined;
+  let setShown: string | undefined;
   let mashShown = -1;
   const render = (s: Status, first = false) => {
     status = s;
@@ -1299,9 +1547,18 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     setText(whoName, mode === "follow" ? "Transitions only" : mode === "off" ? "DJ" : `DJ ${src.persona()}`);
     setText(whoSet, mode === "dj" ? (s.segment ?? "") : mode === "follow" ? "Mixing whatever you play" : "");
     // a new set (the DJ's pick, a switch-up, a request): its name comes up
+    if (s.note !== noteShown) {
+      noteShown = s.note;
+      // (one that was there before the full screen was opened is old news)
+      noteAt = first ? 0 : performance.now();
+    }
+    // (not the set a mashup's other song goes back into: that one was on already)
     const segment = mode === "dj" ? s.segment : undefined;
     if (segment !== segmentShown) {
-      if (!first && segment && !/^Mashup:/.test(segment)) announce("New set", segment);
+      if (segment && !/^Mashup:/.test(segment)) {
+        if (!first && segment !== setShown) announce("New set", segment);
+        setShown = segment;
+      } else if (!segment) setShown = undefined;
       segmentShown = segment;
     }
     if (s.transition?.kind === "mashup" && s.transition.seq !== mashShown && s.transition.songs) {
@@ -1309,6 +1566,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       mashShown = s.transition.seq;
     }
     switchBtn.style.display = mode === "dj" ? "" : "none";
+    mashBtn.style.display = mode === "dj" ? "" : "none";
     skipBtn.style.display = mode === "dj" ? "" : "none";
     stopBtn.style.display = mode === "dj" ? "" : "none";
     djBtn.style.display = mode === "follow" ? "" : "none";
@@ -1363,13 +1621,68 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     if (!open || e.key !== "Escape") return;
     e.preventDefault();
     e.stopPropagation();
-    close();
+    // (Esc closes the panel first, when it is open over this)
+    if (src.panel.isOpen()) src.panel.close();
+    else close();
   };
+
+  // The buttons go out of sight once the mouse has been still for a while (not while it is on one of them, or the
+  // DJ's panel is open), and are back the moment it moves
+  const REST_AFTER = 3000;
+  let restTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastMouse = "";
+  const stir = () => {
+    root.classList.remove("resting");
+    clearTimeout(restTimer);
+    if (!open) return;
+    restTimer = setTimeout(() => {
+      if (!open) return;
+      if (src.panel.isOpen() || top.querySelector(".btn:hover, .icon:hover")) return stir();
+      root.classList.add("resting");
+    }, REST_AFTER);
+  };
+  const onMouse = (e: MouseEvent) => {
+    // (a mouse that hasn't moved still reports a move when what is under it changes)
+    const at = `${e.screenX},${e.screenY}`;
+    if (e.type === "mousemove" && at === lastMouse) return;
+    lastMouse = at;
+    stir();
+  };
+  root.addEventListener("mousemove", onMouse);
+  root.addEventListener("mousedown", onMouse);
+
+  // TrueTaste's thumbs on what is playing, as they are in the player bar
+  let thumbsAt = 0;
+  let thumbsShown: 1 | -1 | 0 | undefined | null = null;
+  const showThumbs = (now: number, force = false) => {
+    if (!force && now - thumbsAt < 400) return;
+    thumbsAt = now;
+    const v = status.phase === "off" ? undefined : src.feedback.state();
+    if (v === thumbsShown) return;
+    thumbsShown = v;
+    upBtn.style.display = downBtn.style.display = v === undefined ? "none" : "";
+    upBtn.classList.toggle("on", v === 1);
+    downBtn.classList.toggle("on", v === -1);
+    upBtn.title = v === 1 ? "TrueTaste: more like this (click to undo)" : "TrueTaste: more like this";
+    downBtn.title = v === -1 ? "TrueTaste: less like this (click to undo)" : "TrueTaste: less like this (skips the song)";
+  };
+  for (const [b, v] of [
+    [upBtn, 1],
+    [downBtn, -1],
+  ] as const)
+    b.addEventListener("click", () => {
+      src.feedback.give(v);
+      showThumbs(performance.now(), true);
+    });
+  optionsBtn.addEventListener("click", () => src.panel.toggle(optionsBtn));
+
   let offStatus: (() => void) | undefined;
   const openStage = () => {
     if (open) return;
     open = true;
     root.classList.add("open");
+    stir();
+    showThumbs(performance.now(), true);
     queueKey = "";
     tagsKey = "";
     matchKey = "";
@@ -1387,7 +1700,9 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const close = () => {
     if (!open) return;
     open = false;
-    root.classList.remove("open");
+    root.classList.remove("open", "resting");
+    clearTimeout(restTimer);
+    if (src.panel.isOpen()) src.panel.close();
     cancelAnimationFrame(raf);
     raf = 0;
     offStatus?.();
@@ -1399,6 +1714,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
 
   closeBtn.addEventListener("click", close);
   switchBtn.addEventListener("click", () => src.switchUp());
+  mashBtn.addEventListener("click", () => src.mashup());
   skipBtn.addEventListener("click", () => src.skip());
   stopBtn.addEventListener("click", () => src.stop());
   djBtn.addEventListener("click", () => src.start());
