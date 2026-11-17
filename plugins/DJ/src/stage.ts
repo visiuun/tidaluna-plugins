@@ -173,7 +173,7 @@ const css = `
   .${R} .ttl .by { margin-top: 4px; color: ${T.secondary}; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .${R} .tags { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; min-height: 28px; }
   .${R} .tags span { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 12px; border-radius: 1000px; background: ${T.ultraThin}; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .${R} .tags .beat { box-shadow: inset 0 0 0 1.5px rgba(255,255,255,0); }
+  .${R} .tags .beat { width: 6px; height: 6px; border-radius: 50%; background: #fff; opacity: .25; }
 
   .${R} .said { align-self: center; justify-self: center; text-align: center; max-width: 1000px; font-family: ${T.display}; font-weight: 700; font-size: clamp(18px, 1.6vw, 26px); line-height: 1.3; max-height: 2.6em; overflow: hidden; scroll-behavior: smooth; opacity: 0; transition: opacity .3s ease; }
   .${R} .said.on { opacity: 1; }
@@ -885,7 +885,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const NOTE_FOR = 8000;
   let noteShown: string | undefined;
   let noteAt = 0;
-  let beatPill: HTMLElement | undefined;
+  let beatDot: HTMLElement | undefined;
   /** "15 Jun 2012"; only the year when that is all there is (a release dated the first of January is one with only a year on it) */
   const released = (date?: string) => {
     const m = /^(\d{4})(?:-(\d{2})-(\d{2}))?/.exec(date ?? "");
@@ -956,20 +956,20 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
           ...parts.map((part, i) => {
             const s = el("span");
             if (i === 0) {
-              s.classList.add("beat");
-              beatPill = s;
+              beatDot = el("i", "beat");
+              s.append(beatDot);
             }
             s.append(part);
             return s;
           }),
         );
       }
-      // the tempo's outline flashes on the beat
+      // a dot on the tempo blinks on the beat
       if (lead.period > 0 && !paused && lead.started && (lead.startsAt ?? 0) <= t) {
         const beat = Math.floor((lead.pos - lead.phase) / lead.period);
         if (beat !== lastBeat) {
           lastBeat = beat;
-          beatPill?.animate([{ boxShadow: "inset 0 0 0 1.5px rgba(255,255,255,.9)" }, { boxShadow: "inset 0 0 0 1.5px rgba(255,255,255,0)" }], { duration: Math.min(400, lead.period * 900), easing: "ease-out" });
+          beatDot?.animate([{ opacity: 1 }, { opacity: 0.25 }], { duration: Math.min(400, lead.period * 900), easing: "ease-out" });
         }
       }
     } else if (tagsKey) {
