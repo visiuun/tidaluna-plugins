@@ -886,6 +886,14 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   let noteShown: string | undefined;
   let noteAt = 0;
   let beatPill: HTMLElement | undefined;
+  /** "15 Jun 2012"; only the year when that is all there is (a release dated the first of January is one with only a year on it) */
+  const released = (date?: string) => {
+    const m = /^(\d{4})(?:-(\d{2})-(\d{2}))?/.exec(date ?? "");
+    if (!m || Number(m[1]) <= 1900) return "";
+    if (!m[2] || (m[2] === "01" && m[3] === "01")) return m[1];
+    const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][Number(m[2]) - 1];
+    return month ? `${m[3] ? `${Number(m[3])} ` : ""}${month} ${m[1]}` : m[1];
+  };
   const renderTitles = (sc: Scene, t: number) => {
     const { tr, b, k } = sc;
     const mashing = tr?.kind === "mashup" && !!tr.songs && sc.phase === "merged";
@@ -931,13 +939,14 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       nextTtl.el.style.opacity = "0";
       nextSeen = false;
     }
-    // tempo (as it is heard: a track sped up or slowed down shows it), key, where it's at
+    // tempo (as it is heard: a track sped up or slowed down shows it), key, when it came out, where it's at
     const tags = nowTtl.tags!;
     if (lead) {
       const shift = (lead.rate - 1) * 100;
       const parts = [
         `${(lead.bpm * lead.rate).toFixed(0)} BPM${Math.abs(shift) >= 0.1 ? ` (${shift > 0 ? "+" : "−"}${Math.abs(shift).toFixed(1)}%)` : ""}`,
         lead.key ? `${camelot(lead.key)} · ${NOTES[lead.key.tonic]} ${lead.key.mode}` : "",
+        released(lead.track.album?.releaseDate),
         `${mmss(lead.pos)} / ${mmss(lead.duration)}`,
       ].filter(Boolean);
       const key = parts.join("|");
