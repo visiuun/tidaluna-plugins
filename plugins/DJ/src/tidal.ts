@@ -9,6 +9,51 @@ const core = () => window.luna.core!;
 const state = () => lib().redux.store.getState();
 const actions = () => lib().redux.actions as Record<string, (payload?: any) => unknown>;
 
+/**
+ * TIDAL's own now-playing view, brought up for the DJ full screen to show through to (see THROUGH in stage.ts):
+ * that is where other plugins draw their backdrop ("bg"), and where the lyrics are ("lyr": on its lyrics). ""
+ * puts everything back as it was: the view closed again if it was closed, on the tab it was on.
+ * It is asked again and again while the full screen is open (see lookUnder in stage.ts), and sees to it each time:
+ * TIDAL closes its view on its own account (Esc reaches it too), and the full screen then had no lyrics until the
+ * view had been opened by hand.
+ */
+let underEntered = false;
+let underTab: string | undefined;
+let underAsked = 0;
+let underTries = 0;
+export const underNowPlaying = (want: "" | "bg" | "lyr") => {
+  try {
+    const s = state() as { view?: { isNowPlaying?: boolean; showNowPlaying?: boolean }; settings?: { nowPlayingActiveView?: string } };
+    // (whether it is up is `showNowPlaying`: `isNowPlaying` only follows, half a second behind, and was still
+    // saying yes just after the view had been closed, so it was never opened again)
+    const up = !!s.view?.showNowPlaying;
+    const tab = s.settings?.nowPlayingActiveView;
+    // (asked again if it didn't come up, less and less often: with nothing to play, TIDAL has no such view to show)
+    if (up) underTries = 0;
+    if (want && !up && Date.now() - underAsked > Math.min(15000, 1500 * 2 ** underTries)) {
+      underAsked = Date.now();
+      underTries++;
+      actions()["view/ENTER_NOWPLAYING"]?.();
+      underEntered = true;
+    }
+    if (want === "lyr" && tab !== "lyrics") {
+      actions()["settings/SET_NOW_PLAYING_ACTIVE_VIEW"]?.("lyrics");
+      underTab ??= tab ?? "";
+    }
+    if (want !== "lyr" && underTab !== undefined) {
+      // (only if it is still on the lyrics this put it on)
+      if (underTab && tab === "lyrics") actions()["settings/SET_NOW_PLAYING_ACTIVE_VIEW"]?.(underTab);
+      underTab = undefined;
+    }
+    if (!want && underEntered) {
+      if (up) actions()["view/EXIT_NOWPLAYING"]?.();
+      underEntered = false;
+    }
+  } catch (err) {
+    warn("Couldn't bring TIDAL's now-playing view up under the full screen", err);
+  }
+};
+
 type Player = { volume: number; currentTime?: number; updateVolumeLevel?: () => void; name?: string };
 type PlayerModule = { activePlayer?: Player };
 let playerModule: PlayerModule | undefined;

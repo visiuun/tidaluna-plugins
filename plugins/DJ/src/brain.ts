@@ -1155,13 +1155,57 @@ const baseTitle = (t: Track) =>
       .replace(/\s+-\s+.*$/, ""),
   );
 
+/** How far a song would have to be moved to go with another: `semitones` up or down, and its tempo, beyond what that gives, by `joins` (a share of it) */
+type MashMove = { semitones: number; joins: number };
+/** The furthest a song the DJ picks for a mashup is moved: two semitones (which is done by playing it faster or slower, and leaves its sound whole), and 1.2% of its tempo on top of that (which is not: see mashMatch in mixer.page.js) */
+const MASH_SEMITONES = 2;
+const MASH_JOINS = 0.012;
 /**
- * Songs that could be played on top of `a`: the same vibe (what TIDAL's listeners play next to it, and your
- * own music that sits close to it), at its tempo, in its key or the relative one. Best first. This goes by
- * what TIDAL says about each track; whether two really fit is then measured on the audio.
- *   bpm: a's tempo as measured; keys: a's key as TIDAL has it and as measured (either will do)
+ * How `t` could be brought to `bpm` and into one of `keys` (the same key or its relative), with the least
+ * done to it. Moving a song's pitch moves its tempo with it (6% a semitone, as on a record player), so a
+ * song that is a little slower and a little lower is brought up in one move, and what is left of the
+ * tempo is made up separately. A tempo twice or half as fast counts as the same beat: TIDAL has
+ * drum and bass at 87 as often as at 174, and a voice at half the beat sits on it just as well.
+ * Without a key to go by (TIDAL has none for it, or for the song that is playing), only the tempo counts.
+ * `tune`: how far the song that is playing is from concert pitch, in cents. The other one is brought
+ * into tune with it the same way, by its speed (a third of a semitone is 2% of tempo), so for a song
+ * that is tuned sharp the ones that fit are a little slower than it, not at its tempo.
  */
-export const mashupCandidates = async (a: Track, bpm: number, keys: MusicKey[]): Promise<Track[]> => {
+const mashMove = (t: Track, bpm: number, keys: MusicKey[], tune = 0): (MashMove & { keyed: boolean }) | undefined => {
+  if (!t.bpm) return undefined;
+  let speed = bpm / t.bpm;
+  while (speed > Math.SQRT2) speed /= 2;
+  while (speed < Math.SQRT1_2) speed *= 2;
+  const kb = keyOf(t);
+  const mine = keys.map(camelotOf);
+  const keyed = !!kb && mine.length > 0;
+  let best: (MashMove & { keyed: boolean; cost: number }) | undefined;
+  for (let k = -MASH_SEMITONES; k <= MASH_SEMITONES; k++) {
+    // (TIDAL's tempos are whole numbers: half a beat a minute either way is within what it says)
+    const joins = Math.max(0, Math.abs(speed / 2 ** ((100 * k + tune) / 1200) - 1) - 0.5 / t.bpm);
+    if (joins > MASH_JOINS) continue;
+    if (keyed) {
+      const c = camelotOf({ tonic: (((kb!.tonic + k) % 12) + 12) % 12, mode: kb!.mode });
+      if (!mine.some((m) => m.n === c.n)) continue;
+    }
+    const cost = 0.22 * Math.abs(k) + 25 * joins;
+    if (!best || cost < best.cost) best = { semitones: k, joins, keyed, cost };
+  }
+  return best;
+};
+
+/**
+ * Songs that could be played on top of `a`: the same vibe (what TIDAL's listeners play next to it and
+ * next to the songs closest to it, and your own music that sits close to it), at a tempo and in a key
+ * from which they can be brought to this one's (see mashMove). Best first: the ones that need the least
+ * done to them, and are closest to it. This goes by what TIDAL says about each track; whether two
+ * really fit is then measured on the audio.
+ *   bpm: a's tempo as measured; keys: a's key as TIDAL has it and as measured (either will do);
+ *   tune: how far a is from concert pitch, in cents
+ * (It used to take only songs within 1% of the tempo and in the very same key: of a hundred songs
+ * around a pop song, that left two, one, or none.)
+ */
+export const mashupCandidates = async (a: Track, bpm: number, keys: MusicKey[], tune = 0): Promise<Track[]> => {
   await initBrain();
   const p = profile!;
   const pool = new Map<string, number>();
@@ -1169,53 +1213,56 @@ export const mashupCandidates = async (a: Track, bpm: number, keys: MusicKey[]):
   const [similar, radio] = await Promise.all([api.similarTracks(a.id).catch(() => [] as string[]), api.trackMixItems(a.id).catch(() => [] as string[])]);
   similar.forEach((id, i) => add(id, 1 / (1 + i / 20)));
   radio.forEach((id, i) => add(id, 0.9 / (1 + i / 40)));
+  // ...and one step further out: what is played next to the three closest to it
+  const further = await Promise.all(similar.slice(0, 3).map((id) => api.similarTracks(id).catch(() => [] as string[])));
+  for (const list of further) list.forEach((id, i) => add(id, 0.6 / (1 + i / 20)));
   await ensureTracks([...pool.keys()]);
-  // (TIDAL's tempos are whole numbers: a track it has within one of this one can be within reach, 1.2%)
-  const tempoFits = (t: Track | undefined): t is Track => !!t?.bpm && Math.abs(t.bpm / bpm - 1) <= 0.0105;
-  // Your own music at this tempo, as far as its details are known
+  // Your own music that can be brought to this tempo, as far as its details are known
   const va = vectorOf(a.id);
   if (va) {
     for (const id of p.seeds.keys()) {
-      if (!tempoFits(tracks[id])) continue;
+      const t = tracks[id];
+      if (!t || !mashMove(t, bpm, [], tune)) continue;
       const v = vectorOf(id);
       const sim = v ? dot(v, va) : 0;
-      if (sim > 0.5) add(id, 0.3 + 0.5 * sim);
+      if (sim > 0.4) add(id, 0.3 + 0.5 * sim);
     }
   }
-  const mine = keys.map(camelotOf);
   const title = baseTitle(a);
-  const scored: { t: Track; s: number }[] = [];
+  const scored: { t: Track; s: number; move: MashMove }[] = [];
   for (const [id, source] of pool) {
     const t = tracks[id];
-    if (!tempoFits(t) || !eligible(t, true) || t.ai || recentlyPlayed(id, 30 * 60e3)) continue;
+    if (!eligible(t, true) || t.ai || recentlyPlayed(id, 30 * 60e3)) continue;
     // (Another version of the same song is no mashup)
     if (baseTitle(t) === title && t.artists.some((x) => a.artists.some((y) => y.id === x.id))) continue;
-    const kb = keyOf(t);
-    let key = 0.55;
-    if (kb && mine.length) {
-      const c = camelotOf(kb);
-      const same = mine.some((m) => m.n === c.n && m.major === c.major);
-      const relative = mine.some((m) => m.n === c.n);
-      if (!same && !relative) continue;
-      key = same ? 1 : 0.9;
-    }
+    const move = mashMove(t, bpm, keys, tune);
+    if (!move) continue;
     const v = va && vectorOf(id);
     const sim = v ? Math.max(0, dot(v, va!)) : 0.3;
     const liked = p.seeds.has(id) ? 0.15 : 0;
-    const tempo = 0.25 * (1 - Math.abs(t.bpm! / bpm - 1) / 0.0105);
-    scored.push({ t, s: key * (0.5 * source + 0.6 * sim + liked + tempo) });
+    // (a key that is known to fit counts for more than one that is only hoped for)
+    const ease = Math.max(0, 1 - 0.22 * Math.abs(move.semitones) - 25 * move.joins);
+    scored.push({ t, s: (move.keyed ? 1 : 0.5) * (0.5 * source + 0.5 * sim + liked) * (0.4 + 0.6 * ease), move });
   }
   scored.sort((x, y) => y.s - x.s);
   const out: Track[] = [];
+  const moves: MashMove[] = [];
   const perArtist = new Map<string, number>();
-  for (const { t } of scored) {
+  for (const { t, move } of scored) {
     const artist = leadArtist(t);
     if ((perArtist.get(artist) ?? 0) >= 2) continue;
     perArtist.set(artist, (perArtist.get(artist) ?? 0) + 1);
     out.push(t);
-    if (out.length >= 12) break;
+    moves.push(move);
+    if (out.length >= 16) break;
   }
-  log(`Mashup candidates for ${a.title} (${bpm.toFixed(1)} BPM): ${out.length ? out.map((t) => `${t.artists[0]?.name} - ${t.title} (${t.bpm}${t.key ? `, ${t.key} ${t.keyScale?.toLowerCase() ?? ""}` : ""})`).join(" | ") : "none"} [from ${pool.size}]`);
+  log(
+    `Mashup candidates for ${a.title} (${bpm.toFixed(1)} BPM${keys[0] ? `, ${camelotOf(keys[0]).n}${camelotOf(keys[0]).major ? "B" : "A"}` : ""}): ${
+      out.length
+        ? out.map((t, i) => `${t.artists[0]?.name} - ${t.title} (${t.bpm}${t.key ? `, ${t.key} ${t.keyScale?.toLowerCase() ?? ""}` : ""}; ${moves[i].semitones > 0 ? "+" : ""}${moves[i].semitones} st, ${(moves[i].joins * 100).toFixed(1)}%)`).join(" | ")
+        : "none"
+    } [${scored.length} of ${pool.size} within reach]`,
+  );
   return out;
 };
 

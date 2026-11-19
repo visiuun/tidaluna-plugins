@@ -32,13 +32,17 @@ export type Plan = {
   move?: Move;
   // Mashups (see mixer.page.js). The two tracks meet `pre` seconds after the start and play together for
   // `bars1` + `bars2` bars. What has been taken out of them says what one can be (`way`):
-  //   voice: the incoming track's voice (and the outgoing one's, when it sings). The two trade places in
-  //          blocks of eight bars, by who is singing: one's voice over the other's band
+  //   voice: both tracks' voices. One's singer over the other's band, the same way round throughout
+  //          (`bed`: whose band), until the listener turns it round
   //   carry: only the outgoing track's voice (the incoming one has no singer): it goes over the incoming
-  //          track's band where it sings, and the two bands play together where it doesn't
+  //          track, which plays as it is
   //   layer: nothing (nobody sings). The incoming track plays over the outgoing one's bass for `bars1`
   //          bars, then the bass changes hands and the outgoing one leaves over `bars2`
   way?: MashWay;
+  /** For a voice mashup: whose band plays (a: the outgoing track's, under the incoming one's singer; b: the other way round) */
+  bed?: "a" | "b";
+  /** ...and that only that version is worth hearing (the other song has no real singer): it can't be turned round */
+  oneWay?: boolean;
   /** For a mashup: whether each song was heard singing where they meet, before it was set (a: the playing one, b: the other) */
   sings?: { a?: boolean; b?: boolean };
   pre?: number;

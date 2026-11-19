@@ -5,7 +5,7 @@ import { poweredByTrueTaste, suggestions } from "./brain";
 import { openTrueTastePage } from "./native";
 import { persona, settings, VOICES, type Commentary } from "./config";
 import { readingNow } from "./talk/voice";
-import { ask, getStatus, isActive, mashup, mixerClock, onStatus, setTransitionOnly, skip, startSession, stopSession, switchUp, voiceLevel, type Status } from "./session";
+import { ask, flipMashup, getStatus, isActive, mashup, mixerClock, onStatus, setTransitionOnly, skip, startSession, stopSession, switchUp, voiceLevel, type Status } from "./session";
 
 const ROOT = "visiuun-dj";
 const STYLE_ID = `${ROOT}-style`;
@@ -221,7 +221,12 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   const mashBtn = el("button", "pill", "Mashup");
   mashBtn.type = "button";
   mashBtn.title = "Plays another song together with this one: one you name, or one the DJ finds that fits";
-  mashRow.append(mashInput, mashBtn);
+  // ...and while one with two singers plays, its other version
+  const flipBtn = el("button", "pill", "Other version");
+  flipBtn.type = "button";
+  flipBtn.title = "Turns the mashup round: the other song's band, with the other singer over it";
+  flipBtn.style.display = "none";
+  mashRow.append(mashInput, mashBtn, flipBtn);
   const voiceRow = el("div", `${ROOT}-row`);
   const voiceSelect = el("select");
   for (const v of VOICES) {
@@ -443,6 +448,7 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
     askRow.style.display = on ? "" : "none";
     chips.style.display = on ? "" : "none";
     mashRow.style.display = s.phase === "starting" || s.phase === "stopping" ? "none" : "";
+    flipBtn.style.display = s.transition?.kind === "mashup" && s.transition.detail?.way === "voice" && !s.transition.detail.oneWay ? "" : "none";
     primary.textContent = s.phase === "off" || follow ? "Start DJ" : "Switch it up";
     primary.disabled = s.phase === "starting" || s.phase === "stopping";
     skipBtn.style.display = on ? "" : "none";
@@ -492,6 +498,7 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
     void mashup(text);
   };
   mashBtn.addEventListener("click", mash);
+  flipBtn.addEventListener("click", () => void flipMashup());
   mashInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") mash();
     if (e.key === "Escape") setOpen(false);

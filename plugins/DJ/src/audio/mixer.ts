@@ -18,18 +18,26 @@ export type Clip = { key: string; pcm: string; rate: number; duration: number };
 type MapPoint = { t: number; pos: number; rate: number };
 
 /** One track's side of a mashup: its beat, a bar line, which of every four bars starts a phrase, and the stretch of it that may be used (seconds) */
-export type MashSide = { period: number; bar0: number; phrase: number; body: number; from: number; last: number; /** How many of the next phrase lines it may start on (4 if not given) */ starts?: number; /** The most bars the mashup may last */ most?: number };
+export type MashSide = { period: number; bar0: number; phrase: number; body: number; from: number; last: number; /** How many of the next phrase lines it may start on (4 if not given) */ starts?: number; /** The most bars the mashup may last */ most?: number; /** Every how many bars a phrase starts (4 if not given; a track read at double or half time has them elsewhere) */ every?: number };
 /** How two tracks go together (see mashMatch in mixer.page.js) */
 export type MashFit = {
   ok: boolean;
-  /** Why not: the tempos or the tunings are too far apart, or there's no room left in the track */
-  why?: "tempo" | "tuning" | "room" | "ending";
+  /** Why not: the tempos are too far apart, there's no room left in the track, or (said by the session, see mashVerdict) the notes or the drums don't go together */
+  why?: "tempo" | "tuning" | "room" | "ending" | "notes" | "drums";
   /** How well one track's bass fits the other's notes, bar by bar (-1 to 1), and for each of the two parts */
   fit: number;
   halves: [number, number];
   /** The same for the other eleven keys the second track could have been in: the middle one, and how many score lower */
   median: number;
   beaten: number;
+  /** How alike the notes the two are made of are over the whole of it (-1 to 1: the same key or its relative is 0.6 and up), and the most any other key would have made of them */
+  notes: number;
+  notesElsewhere: number;
+  /** How much of each song's notes fall outside the other song's scale there (0-1): the second track's, then the first's */
+  outside: [number, number];
+  /** In how many of the places looked at the two songs' drums could be read against each other */
+  locked: [number, number];
+  bars: number;
   /** How well each track's own bass and top agree (what a perfect fit would score) */
   self: [number, number];
   rhythm: number;
@@ -49,7 +57,7 @@ export type MashFit = {
   clarity: [number, number];
   /** Milliseconds spent reading the two tracks' notes, and on the matching itself */
   ms?: [number, number];
-  ways?: { k: number; joins: number; fit: number }[];
+  ways?: { k: number; joins: number; fit: number; notes: number }[];
   pattern?: number[];
 };
 
@@ -133,8 +141,9 @@ export class Deck {
 
 /** One stretch of a mashup as the mixer decided it (on its clock): how loud each song's two halves are (a voice
  * mashup: `top` its voice, `low` its band; a layered one: `top` all but its bass, `low` its bass), and who sang there */
-export type MashBlock = { from: number; to: number; a: { top: number; low: number }; b: { top: number; low: number }; what: string; sings?: { a: boolean; b: boolean }; cut?: boolean };
-export type MashArrangement = { halves: "voice" | "bass"; from: number; end: number; planned: number; per?: number; bar?: number; blocks: MashBlock[] };
+export type MashBlock = { from: number; to: number; a: { top: number; low: number }; b: { top: number; low: number }; what: string; sings?: { a: boolean; b: boolean }; cut?: boolean; /** it starts where the listener turned the mashup round */ turned?: boolean };
+/** `bed`: whose band plays (a: the song that was playing, with the other's singer over it; b: the other way round); `flippable`: it can be turned round right now */
+export type MashArrangement = { halves: "voice" | "bass"; from: number; end: number; planned: number; per?: number; bar?: number; bed?: "a" | "b"; flippable?: boolean; blocks: MashBlock[] };
 /** How loud a track is, `rate` times a second: its peaks and its average, 0-255 */
 export type Wave = { rate: number; peak: number[]; rms: number[] };
 
@@ -320,6 +329,10 @@ export class Mixer {
   /** How track `b` would best go on top of track `a` (both loaded), and how good a mashup that makes */
   mashMatch(a: string, b: string, A: MashSide, B: MashSide, free: boolean, exact = false) {
     return this.call<MashFit>("mashMatch", { a, b, A, B, free, exact });
+  }
+  /** Turns the mashup that is playing round (the other song's band, the other singer), from the next bar line */
+  mashFlip() {
+    return this.call<{ ok: boolean; bed?: "a" | "b"; at?: number; /** why not: only one version (one), not started (early), in its way out (late), no mashup (none) */ why?: "one" | "early" | "late" | "none" }>("mashFlip", {});
   }
   dropStretch(key: string) {
     return this.call("dropStretch", { key }).catch(() => {});

@@ -2716,7 +2716,7 @@ export const mashupLine = (ours: Track, theirs: Track, seconds: number, tone: To
           `I'm putting it together with ${mine}.`,
           `It goes right on top of ${mine}.`,
           `That one and ${mine}, at the same time.`,
-          `Mixing it into ${mine}, voice for voice.`,
+          `Mixing it into ${mine}.`,
           `It's going over ${mine}.`,
           `I'm laying it over ${mine}.`,
           tone === "hype" && `That and ${mine}, together! Trust me.`,

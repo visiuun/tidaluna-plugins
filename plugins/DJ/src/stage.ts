@@ -40,6 +40,8 @@ export type StageSource = {
   switchUp: () => void;
   /** A mashup of what's playing with a song the DJ picks for it */
   mashup: () => void;
+  /** The other version of the mashup that is playing: the other song's band, and the other singer */
+  flipMashup: () => void;
   /** How TIDAL marks a track: explicit, made with AI, an upload, in Dolby Atmos */
   marks: (trackId: string) => Promise<Marks | undefined>;
   /**
@@ -51,6 +53,11 @@ export type StageSource = {
   panel: { toggle: (anchor: HTMLElement) => void; isOpen: () => boolean; close: () => void };
   skip: () => void;
   stop: () => void;
+  /** What the full screen takes from other plugins, when they are there (see THROUGH): their backdrop, TIDAL's lyrics, 3D Cover's depth on the cover */
+  guests: () => { backdrop: boolean; lyrics: boolean; cover3d: boolean };
+  setLyrics: (on: boolean) => void;
+  /** Has TIDAL's own now-playing view up underneath: for a backdrop drawn in it ("bg"), or on its lyrics ("lyr"); "" puts it back as it was */
+  under: (want: "" | "bg" | "lyr") => void;
 };
 
 export type Marks = { explicit?: boolean; ai?: boolean; upload?: boolean; atmos?: boolean };
@@ -84,15 +91,59 @@ const LEAD = 20;
 const TRAVEL = 2.6;
 const SPLIT_MIN = 7;
 
+// What stays in sight of TIDAL's page while the full screen shows through to it (see THROUGH)
+const LYRICS = '[data-test="now-playing-lyrics"]';
+const BACKDROPS = ".now-playing-background-container, .global-background-container";
+const KEPT = `.now-playing-background-container, .now-playing-background-container *, .global-background-container, .global-background-container *, .visiuun-dj-stage-under, .visiuun-dj-stage-under *, ${LYRICS}, ${LYRICS} *`;
+
 const css = `
   .${R} { position: fixed; inset: 0; z-index: 2147483000; background: #000; color: #fff; overflow: hidden; display: none; font-family: ${T.text}; font-size: 14px; line-height: 20px; font-weight: 500; -webkit-font-smoothing: antialiased; user-select: none; }
   .${R}.open { display: block; animation: ${R}-in .3s ease both; }
   @keyframes ${R}-in { from { opacity: 0; } to { opacity: 1; } }
   .${R} * { box-sizing: border-box; }
-  .${R} .bg { position: absolute; inset: -120px; }
-  .${R} .bg div { position: absolute; inset: 0; background-size: cover; background-position: center; filter: blur(100px) saturate(1.4); opacity: 0; transition: opacity 2s ease; }
-  .${R} .bg div.on { opacity: .7; }
-  .${R} .shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.3) 0%, rgba(0,0,0,.5) 55%, rgba(0,0,0,.85) 100%); }
+  .${R} .bg, .${R}-under .bg { position: absolute; inset: -120px; }
+  .${R} .bg div, .${R}-under .bg div { position: absolute; inset: 0; background-size: cover; background-position: center; filter: blur(100px) saturate(1.4); opacity: 0; transition: opacity 2s ease; }
+  .${R} .bg div.on, .${R}-under .bg div.on { opacity: .7; }
+  .${R} .shade, .${R}-under .shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.3) 0%, rgba(0,0,0,.5) 55%, rgba(0,0,0,.85) 100%); }
+
+  /* THROUGH. What other plugins draw in TIDAL's own now-playing view (Radiant Lyrics: its backdrop, and the lyrics) is not
+     drawn again here: the full screen is see-through there, and everything else of TIDAL's page is out of sight meanwhile.
+     The backdrop is behind all of it. Of the lyrics there is one line, the one being sung, under the song's name: the
+     panel they are in is made a line or two tall and put there (where and how big: see sizeUnder), its other lines
+     unseen, the line in the middle. It is still that panel, and still its line, moving as it is sung. */
+  body.${R}-through #wimp, body.${R}-through #wimp *:not(${KEPT}) { visibility: hidden !important; }
+  /* (...and what lies on the page beside it: the DJ's own caption by the player bar, other plugins' floating things. Not the DJ's panel, which opens over the full screen) */
+  body.${R}-through > :not(#wimp, .${R}, .visiuun-dj-panel, script, style, link), body.${R}-through > :not(#wimp, .${R}, .visiuun-dj-panel, script, style, link) * { visibility: hidden !important; }
+  body.${R}-through.${R}-bg #wimp .now-playing-background-container, body.${R}-through.${R}-bg #wimp .global-background-container { visibility: visible !important; }
+  body.${R}-through #wimp ${LYRICS} { visibility: visible !important; opacity: 0 !important; pointer-events: none !important; transition: opacity .45s ease, transform .35s ease !important; transform-origin: 0 0 !important; }
+  body.${R}-through.${R}-lyr #wimp ${LYRICS} { opacity: 1 !important; }
+  /* (what the panel is in cuts off whatever leaves its place) */
+  body.${R}-through #wimp [data-test="new-now-playing"] :is([class*="_panelWrapper_"], [class*="_contentInner_"]) { overflow: visible !important; }
+  body.${R}-through #wimp ${LYRICS} :is(.rl-wbw-line, [data-test="lyrics-line"]) { text-align: center !important; transform-origin: 50% 50% !important; padding-left: 20px !important; padding-right: 20px !important; }
+  body.${R}-through #wimp ${LYRICS} .rl-wbw-line { transition: opacity .35s ease, scale .7s, filter .4s !important; }
+  body.${R}-through #wimp ${LYRICS} .rl-wbw-line:not(.rl-wbw-line-active) { opacity: 0 !important; }
+  /* (TIDAL's own lines, where no plugin draws them: the one being sung is the one it marks; its dots before the first line stay) */
+  body.${R}-through #wimp ${LYRICS} [data-test="lyrics-line"] { transition: opacity .35s ease !important; }
+  body.${R}-through #wimp ${LYRICS} [data-test="lyrics-line"]:not([data-current]) { opacity: 0 !important; }
+  body.${R}-through #wimp ${LYRICS} [data-test="lyrics-intro"]:not([class*="_active_"]) { opacity: 0 !important; }
+  body.${R}-through #wimp ${LYRICS} [class*="_footer_"] { display: none !important; }
+  body.${R}-through #wimp ${LYRICS} :is(.rl-wbw-bg-container, .rl-wbw-translation) { text-align: center !important; transform-origin: 50% 50% !important; }
+  /* (Radiant Lyrics' three dots for a stretch nobody sings in: in the middle too. They are in a row of their own
+     between two lines, as wide as a line, and it is that row which has them at one end) */
+  body.${R}-through #wimp ${LYRICS} .rl-kf-break { justify-content: center !important; }
+  body.${R}-through #wimp ${LYRICS} button { display: none !important; }
+  .${R} { transition: background-color .6s ease; }
+  .${R} .bg { transition: opacity .6s ease; }
+  .${R}.through { background: transparent; }
+  .${R}.through.guest-bg .bg { opacity: 0; }
+  .${R}.through.guest-bg .shade { background: linear-gradient(180deg, transparent 0, transparent calc(var(--my, 60%) + 90px), rgba(0,0,0,.55) 100%); }
+  /* (with no backdrop of another plugin's, the full screen's own is put under the lyrics, in TIDAL's view, the way
+     a plugin puts its backdrop there: see placeBg) */
+  .${R}-under { position: absolute; left: 0; right: 0; bottom: 0; top: 0; z-index: 0; overflow: hidden; pointer-events: none; background: #000; }
+  body.${R}-through #wimp .${R}-under { visibility: visible !important; }
+  .${R} .icon.toggle { width: 36px; height: 36px; }
+  .${R} .icon.toggle.on { background: #fff; color: #000; }
+  .${R} .icon.toggle.on:hover { background: var(--wave-color-solid-contrast-dark, #e4e4e7); }
 
   /* (one column, the width of the window: a long queue in "Up next" is cut off at its edge, it never widens the page) */
   .${R} .frame { position: absolute; inset: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 64px 1fr 0px 120px 72px; padding: 0 56px 20px; }
@@ -124,14 +175,17 @@ const css = `
   .${R} .btn.primary:hover { background: var(--wave-color-solid-contrast-dark, #e4e4e7); }
 
   .${R} .main { position: relative; min-height: 0; }
-  .${R} .cv { position: absolute; left: 0; top: 0; border-radius: 4px; overflow: hidden; background: #18181b; box-shadow: 0 24px 64px rgba(0,0,0,.5); transform-origin: 50% 50%; will-change: transform, opacity; }
-  .${R} .cv img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .${R} .cv { position: absolute; left: 0; top: 0; transform-origin: 50% 50%; will-change: transform, opacity; }
+  /* (what tilts to the mouse, with the light on it: see TILT. Named as TIDAL names its own, so that what follows TIDAL's cover follows this one) */
+  .${R} .cv .tilt { position: relative; width: 100%; height: 100%; border-radius: 4px; background: #18181b; box-shadow: 0 24px 64px rgba(0,0,0,.5); transform-style: preserve-3d; will-change: transform; }
+  .${R} .cv img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: 4px; }
+  .${R} .cv .glare { position: absolute; inset: 0; border-radius: 4px; pointer-events: none; z-index: 1; opacity: 0; }
   /* a cover that can't be had: the track's name on a plain plate */
   .${R} .cv, .${R} .dig .rec, .${R} .card .ph { container-type: inline-size; }
-  .${R} .blank { position: absolute; inset: 0; display: grid; place-items: center; padding: 8cqw; text-align: center; overflow: hidden; background: linear-gradient(145deg, #2c2c33, #18181b); color: ${T.secondary}; font-family: ${T.display}; font-weight: 700; font-size: clamp(8px, 9cqw, 52px); line-height: 1.1; overflow-wrap: anywhere; }
+  .${R} .blank { position: absolute; inset: 0; display: grid; place-items: center; padding: 8cqw; text-align: center; overflow: hidden; border-radius: 4px; background: linear-gradient(145deg, #2c2c33, #18181b); color: ${T.secondary}; font-family: ${T.display}; font-weight: 700; font-size: clamp(8px, 9cqw, 52px); line-height: 1.1; overflow-wrap: anywhere; }
   .${R} .card .ph { position: relative; }
   .${R} .card .ph .blank { font-size: 0; }
-  .${R} .cv b { position: absolute; left: 10px; bottom: 10px; font-size: 12px; line-height: 16px; font-weight: 600; padding: 4px 10px; border-radius: 1000px; background: rgba(0,0,0,.6); backdrop-filter: blur(12px); opacity: 0; transition: opacity .3s ease; }
+  .${R} .cv b { position: absolute; z-index: 2; left: 10px; bottom: 10px; font-size: 12px; line-height: 16px; font-weight: 600; padding: 4px 10px; border-radius: 1000px; background: rgba(0,0,0,.6); backdrop-filter: blur(12px); opacity: 0; transition: opacity .3s ease; }
   .${R} .cv.tagged b { opacity: 1; }
   /* where the two covers merge: the transition is drawn here, over them (see cover.ts) */
   .${R} .fx { position: absolute; left: 0; top: 0; z-index: 5; pointer-events: none; opacity: 0; transition: opacity .25s ease; }
@@ -209,6 +263,7 @@ const css = `
 
 // (TIDAL's own "close the now-playing view" chevron)
 const ICON_CLOSE = `<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>`;
+const ICON_LYRICS = `<svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h8"/></svg>`;
 const ICON_OPTIONS = `<svg viewBox="0 0 24 24"><path d="M4 7h8.5M19.5 7h.5M4 17h.5M11.5 17H20"/><circle cx="16" cy="7" r="3"/><circle cx="8" cy="17" r="3"/></svg>`;
 // (TrueTaste's thumb)
 const ICON_THUMB = `<svg viewBox="0 0 24 24"><path d="M7 10v11H3V10h4Z"/><path d="M7 10l4.2-7.4c.4-.7 1.3-.9 1.9-.5.9.6 1.3 1.6 1.1 2.6L13.6 9h6c1.2 0 2.1 1.1 1.9 2.3l-1.3 7.5c-.2 1.3-1.3 2.2-2.6 2.2H7"/></svg>`;
@@ -376,6 +431,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   banner.append(bannerLabel, bannerTitle);
   const switchBtn = el("button", "btn primary", "Switch it up");
   const mashBtn = el("button", "btn", "Mashup");
+  const flipBtn = el("button", "btn", "Other version");
   const skipBtn = el("button", "btn", "Skip");
   const djBtn = el("button", "btn primary", "Start the DJ");
   const stopBtn = el("button", "btn", "Stop DJ");
@@ -383,14 +439,20 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const upBtn = el("button", "icon thumb");
   const downBtn = el("button", "icon thumb down");
   const optionsBtn = el("button", "icon");
-  for (const b of [switchBtn, mashBtn, skipBtn, djBtn, stopBtn, closeBtn, upBtn, downBtn, optionsBtn]) b.type = "button";
+  const lyrBtn = el("button", "icon toggle");
+  for (const b of [switchBtn, mashBtn, flipBtn, skipBtn, djBtn, stopBtn, closeBtn, upBtn, downBtn, optionsBtn, lyrBtn]) b.type = "button";
   mashBtn.title = "Mash this song up with one the DJ picks for it";
+  flipBtn.title = "Turn the mashup round: the other song's band, with the other singer over it";
+  flipBtn.style.display = "none";
   closeBtn.title = "Close (Esc)";
   closeBtn.innerHTML = ICON_CLOSE;
   upBtn.innerHTML = downBtn.innerHTML = ICON_THUMB;
   optionsBtn.title = "DJ: requests and options";
   optionsBtn.innerHTML = ICON_OPTIONS;
-  top.append(who, banner, el("div", "sp"), upBtn, downBtn, djBtn, switchBtn, mashBtn, skipBtn, stopBtn, optionsBtn, closeBtn);
+  lyrBtn.title = "Lyrics";
+  lyrBtn.innerHTML = ICON_LYRICS;
+  lyrBtn.style.display = "none";
+  top.append(who, banner, el("div", "sp"), upBtn, downBtn, djBtn, switchBtn, mashBtn, flipBtn, skipBtn, stopBtn, lyrBtn, optionsBtn, closeBtn);
 
   const main = el("div", "main");
   const fx = el("div", "fx");
@@ -423,7 +485,10 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   idle.append(el("h2", undefined, "DJ"), el("p", undefined, "Music picked for you and mixed track into track. Everything the DJ does shows here as it happens."), idleActions);
 
   frame.append(top, main, said, timeline, next);
-  root.append(bg, el("div", "shade"), frame, idle);
+  const shade = el("div", "shade");
+  // (what the background is in when it is under TIDAL's lyrics, not in the full screen: see placeBg)
+  const underWrap = el("div", `${R}-under`);
+  root.append(bg, shade, frame, idle);
   document.body.appendChild(root);
   const g = canvas.getContext("2d")!;
 
@@ -441,6 +506,159 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const asked = new Map<string, ((url: string) => void)[]>();
   const waves = new Map<string, Wave | null>();
   const waveAsked = new Map<string, number>();
+
+  // ------------------ THROUGH TO TIDAL'S OWN VIEW ------------------
+  // Other plugins draw in TIDAL's own now-playing view: Radiant Lyrics its moving backdrop, and the lyrics as it
+  // sets them (TIDAL's own, without it). The full screen doesn't draw any of that again. It has TIDAL's view
+  // brought up underneath, puts everything of TIDAL's page out of sight but those, and is see-through itself:
+  // the backdrop is then what is behind it, and the line being sung shows under the song's name, where the DJ's
+  // own words go when it talks. (First the whole panel of lyrics was shown beside the cover, which moved over
+  // for it: TIDAL's own player with the DJ's things around it, which is not what a DJ's screen should look like.)
+  // The line makes way while the DJ talks, and while a mix is shown.
+  // The panel as it is laid out (tall enough for a line that wraps) and how big it is shown (its type is large);
+  // the room the stage makes for it; and where in that room the middle of the line goes: the middle of the gap
+  // between the tags above and the waveform below (the tags end a little above the room). Where the line is in
+  // its panel is asked of the page, not assumed (see lineRows): what draws the lyrics decides that, by its own
+  // rule (a fifth of the way down, and then some), and a line that wraps is taller. The panel is put so that the
+  // middle of the line, one row or two, other voices under it or not, is in that middle.
+  const LINE = { h: 200, scale: 0.8 };
+  const LINE_ROOM = 86;
+  const LINE_MIDDLE = 34;
+  /** How far under the top of its panel the middle of the line being sung is, as shown (px) */
+  let lineMid = 56;
+  let lastMid = -1;
+  let rowsAt = 0;
+  const lineRows = (now: number) => {
+    if (now - rowsAt < 100) return;
+    rowsAt = now;
+    const panel = lyrShown ? document.querySelector<HTMLElement>(LYRICS) : null;
+    // (the line as it is drawn: with a plugin drawing the lyrics, TIDAL's own line is still on the page, marked and out of sight)
+    // ...or, where nobody is singing, the dots that stand for that: they are a row further down than the line was
+    const line =
+      panel &&
+      ([...panel.querySelectorAll<HTMLElement>('.rl-wbw-line-active, [data-test="lyrics-line"][data-current]')].find((e) => e.offsetHeight > 0) ??
+        [...panel.querySelectorAll<HTMLElement>(".rl-kf-break.rl-kf-break-on")].find((e) => e.offsetHeight > 0));
+    if (!panel || !line) return;
+    const p = panel.getBoundingClientRect();
+    const l = line.getBoundingClientRect();
+    const mid = l.top - p.top + l.height / 2;
+    // (once it has come to rest: the panel scrolls a new line into place, and following it there would be chasing it)
+    if (Math.abs(mid - lastMid) < 1.5 && Math.abs(mid - lineMid) > 1 && mid > 0 && mid < LINE.h * LINE.scale) lineMid = mid;
+    lastMid = mid;
+  };
+  let underFor = "";
+  let lookedAt = 0;
+  let guestBg = false;
+  let want3d = true;
+  /** Where TIDAL has the lyrics' panel (it is moved from there) */
+  let lyrBox: { left: number; top: number } | undefined;
+  let lyrSeen = 0;
+  let lyrSince = 0;
+  let lyrShown = false;
+  // (how big the line's panel is, where it goes, and how far up the backdrop reaches, depend on the window: a rule
+  // for each, in a sheet of their own, rewritten when the numbers change. They were variables on the page's body at
+  // first, set as the layout eased: every one of those restyles every element of TIDAL's page, and it crawled.)
+  const underStyle = document.createElement("style");
+  document.head.appendChild(underStyle);
+  let underKey = "";
+  let npy = 0;
+  /** The line goes at `to` (on the page: its left, top and width as shown) */
+  const sizeUnder = (to?: { left: number; top: number; width: number }) => {
+    const at = to && lyrBox ? [Math.round(to.left - lyrBox.left), Math.round(to.top - lyrBox.top), Math.round(to.width / LINE.scale)] : undefined;
+    const key = `${at?.join(",") ?? ""}|${npy}`;
+    if (key === underKey) return;
+    underKey = key;
+    underStyle.textContent =
+      (at ? `body.${R}-through #wimp ${LYRICS} { width: ${at[2]}px !important; max-width: none !important; height: ${LINE.h}px !important; max-height: ${LINE.h}px !important; transform: translate(${at[0]}px, ${at[1]}px) scale(${LINE.scale}) !important; }\n` : "") +
+      (npy ? `body.${R}-through.${R}-bg #wimp .now-playing-background-container { top: -${npy}px !important; height: calc(100% + ${npy}px) !important; }\n` : "");
+  };
+  /** Where the stage's middle row is on the page (asked now and then, not every frame: asking makes the page lay itself out) */
+  let mainBox = { left: 56, top: 64, width: 0 };
+  const filling = (e: Element) => {
+    const r = e.getBoundingClientRect();
+    return r.width > innerWidth * 0.5 && r.top < innerHeight * 0.5 && r.bottom > innerHeight * 0.5;
+  };
+  /**
+   * Where the full screen's own background is: in it, as a rule. But the lyrics are under the full screen, and with
+   * no backdrop of another plugin's behind them the full screen's own would be over them: then it is put in TIDAL's
+   * view (`view`), under the lyrics, which is how a plugin puts its backdrop there. (It made way for them in a band
+   * at first: a dark stripe across the picture.)
+   */
+  const placeBg = (view: Element | null) => {
+    if (view) {
+      if (underWrap.parentElement !== view) {
+        underWrap.append(bg, shade);
+        view.prepend(underWrap);
+      }
+      // (TIDAL's view starts under its title bar: this goes to the top)
+      const top = `${-Math.max(0, Math.round(view.getBoundingClientRect().top))}px`;
+      if (underWrap.style.top !== top) underWrap.style.top = top;
+    } else if (bg.parentElement !== root) {
+      root.prepend(bg, shade);
+      underWrap.remove();
+    }
+  };
+  const showThrough = (through: boolean) => {
+    placeBg(through && !guestBg ? (document.querySelector(LYRICS)?.closest('[data-test="new-now-playing"]') ?? null) : null);
+    document.body.classList.toggle(`${R}-through`, through);
+    document.body.classList.toggle(`${R}-bg`, through && guestBg);
+    document.body.classList.toggle(`${R}-lyr`, through && lyrShown);
+    root.classList.toggle("through", through);
+    root.classList.toggle("guest-bg", through && guestBg);
+    root.classList.toggle("lyr", through && lyrShown);
+  };
+  const lookUnder = (now: number, calm: boolean) => {
+    if (now - lookedAt < 300) return;
+    lookedAt = now;
+    const want = src.guests();
+    want3d = want.cover3d;
+    const playing = open && status.phase === "playing";
+    // TIDAL's view is only brought up for what is wanted of it and can be had: for the lyrics; for a backdrop only
+    // where a plugin that draws one is there (Radiant Lyrics), and doesn't draw it behind the whole of TIDAL already
+    const drawn = [...document.querySelectorAll(BACKDROPS)].filter((e) => e.childElementCount > 0);
+    const everywhere = drawn.some((e) => e.classList.contains("global-background-container") && filling(e));
+    const drawer = drawn.length > 0 || document.body.classList.contains("rl-backdrop-active");
+    const need = !playing ? "" : want.lyrics ? "lyr" : want.backdrop && drawer && !everywhere ? "bg" : "";
+    // (said each time, not only when it changes: TIDAL closes its view on its own account too, and it is put back up)
+    if (need || underFor) src.under((underFor = need));
+    guestBg = playing && want.backdrop && drawn.some(filling);
+    // (TIDAL's now-playing view starts under its title bar, and the backdrop drawn in it with it: here it goes to the top)
+    const view = document.querySelector(".now-playing-background-container")?.parentElement;
+    npy = view && guestBg ? Math.max(0, Math.round(view.getBoundingClientRect().top)) : 0;
+    const box = main.getBoundingClientRect();
+    mainBox = { left: box.left, top: box.top, width: box.width };
+    const panel = need === "lyr" ? document.querySelector<HTMLElement>(LYRICS) : null;
+    const at = panel?.parentElement;
+    // (lines that follow the song: a plugin's, or TIDAL's own where it has them timed, which is when it shows its dots)
+    if (panel && at && at.offsetWidth > 0 && panel.querySelector('.rl-wbw-line, [data-test="lyrics-intro"]')) {
+      // (where it is laid out, which is where its parent starts: the panel itself is shown somewhere else)
+      const r = at.getBoundingClientRect();
+      if (!lyrBox) lyrSince = now;
+      lyrBox = { left: r.left, top: r.top };
+      lyrSeen = now;
+    }
+    // (a song's lyrics take a moment to arrive: the row for them doesn't open and close between two songs that have them)
+    if (now - lyrSeen > 2500) lyrBox = undefined;
+    // (shown once it has been put in its place: it is brought there from where TIDAL has it, and isn't seen arriving)
+    lyrShown = !!lyrBox && now - lyrSince > 450 && calm && need === "lyr" && !said.classList.contains("on");
+    showThrough(guestBg || !!lyrBox);
+    lyrBtn.style.display = playing ? "" : "none";
+    lyrBtn.classList.toggle("on", want.lyrics);
+    lyrBtn.title = want.lyrics ? "Lyrics: on (the line being sung shows under the song's name, when the song has them)" : "Lyrics: off";
+  };
+  const leaveUnder = () => {
+    if (underFor) src.under((underFor = ""));
+    guestBg = false;
+    lyrBox = undefined;
+    lyrShown = false;
+    npy = 0;
+    showThrough(false);
+    sizeUnder();
+  };
+  lyrBtn.addEventListener("click", () => {
+    src.setLyrics(!src.guests().lyrics);
+    lookedAt = 0;
+  });
 
   const coverFor = (id: string, then: (url: string) => void) => {
     const known = covered.get(id);
@@ -518,6 +736,16 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     const arr = mash?.plan;
     return arr && Math.abs(arr.from - tr.start) < 4 ? arr : undefined;
   };
+  /** While a mashup with two singers plays, the button that asks for one is the button that turns it round */
+  let flipShown = false;
+  const showFlip = (tr: Live | undefined, t: number) => {
+    const arr = tr?.kind === "mashup" ? mashOf(tr) : undefined;
+    const on = !!arr?.flippable && t >= arr.from && t < arr.end - (arr.per ?? 8) * (arr.bar ?? 2) && src.status().mode === "dj";
+    if (on === flipShown) return;
+    flipShown = on;
+    flipBtn.style.display = on ? "" : "none";
+    mashBtn.style.display = on || src.status().mode !== "dj" ? "none" : "";
+  };
 
   // ------------------ WHAT IS ON ------------------
   // The two tracks of the transition, whichever of them the session calls current by now (a mashup's partner is
@@ -536,11 +764,12 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   let split: { pair: string; yes: boolean } | undefined;
   const sceneOf = (st: Stage | undefined, tr: Live | undefined, t: number): Scene => {
     if (!st) return { phase: "", k: 0 };
-    const byId = new Map<string, StageDeck>();
-    // (the next track as it is planned to play, until it has a deck of its own)
-    for (const d of [st.planned?.deck, st.outgoing, st.current, st.incoming]) if (d) byId.set(d.id, d);
-    const a = tr && byId.get(tr.fromId);
-    const b = tr && byId.get(tr.toId);
+    // The two decks of the mix, by what they are to it: the one going out (still the current one before the mix
+    // takes over), and the one coming in (as it is planned to play, until it has a deck of its own). Not looked up
+    // by track alone: a song mixed into itself (the same track twice in a row) is one track on two decks, and the
+    // one going out was drawn with the other's timing, which starts at the mix: nothing before it.
+    const a = tr && [st.outgoing, st.current].find((d) => d?.id === tr.fromId);
+    const b = tr && [st.incoming, st.current, st.planned?.deck].find((d) => d?.id === tr.toId && d !== a);
     if (tr && a && b && a.id !== b.id && t < tr.end && t >= tr.start - LEAD) {
       const lead = t >= tr.swap ? b : a;
       if (t >= tr.start) return { phase: "merged", tr, a, b, lead, k: 1 };
@@ -563,15 +792,25 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   let sNow = 0;
   const layout = (sc: Scene, dt: number) => {
     const H = root.clientHeight;
-    const W = main.clientWidth;
-    const capWant = said.classList.contains("on") ? Math.min(78, said.scrollHeight + 8) : 0;
+    const W = mainBox.width || main.clientWidth;
+    // (the row under the cover: what the DJ says, or the line being sung)
+    const capWant = said.classList.contains("on") ? Math.min(78, said.scrollHeight + 8) : lyrShown ? LINE_ROOM : 0;
     const showing = sc.phase === "decks" || sc.phase === "join" || sc.phase === "merged" || (!!sc.tr && sc.phase === "one");
     const tlWant = showing ? Math.min(270, Math.max(190, H * 0.27)) : Math.min(140, Math.max(96, H * 0.13));
     const k = ease(dt, 5);
     capH += (capWant - capH) * k;
     tlH += (tlWant - tlH) * k;
     const mainH = Math.max(160, H - 64 - 20 - 72 - capH - tlH);
-    frame.style.gridTemplateRows = `64px ${mainH.toFixed(1)}px ${capH.toFixed(1)}px ${tlH.toFixed(1)}px 72px`;
+    // (the line goes where that row will be, by where the layout is going, not where it is on the way there: the
+    // rule that puts it there changes when the layout does, not every frame)
+    const mainWant = Math.max(160, H - 64 - 20 - 72 - Math.max(capWant, lyrBox ? LINE_ROOM : 0) - tlWant);
+    const lineW = Math.min(1100, W * 0.86);
+    // (so that the middle of the line is in the middle of the gap: see LINE_MIDDLE)
+    sizeUnder(lyrBox ? { left: mainBox.left + (W - lineW) / 2, top: 64 + mainWant + LINE_MIDDLE - lineMid, width: lineW } : undefined);
+    const my = `${Math.round(64 + mainWant)}px`;
+    if (root.style.getPropertyValue("--my") !== my) root.style.setProperty("--my", my);
+    const rows = `64px ${mainH.toFixed(1)}px ${capH.toFixed(1)}px ${tlH.toFixed(1)}px 72px`;
+    if (rows !== rowsNow) frame.style.gridTemplateRows = rowsNow = rows;
     const two = sc.phase === "decks" || sc.phase === "join";
     // (room under the cover for its name, artist and tags, with some air before the breakdown: a deck's name is
     // small and has no tags, and grows into the full one as the two come together)
@@ -581,26 +820,42 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     // that lagged behind it would push its name into what the DJ says)
     sNow = !sNow || sWant < sNow ? sWant : sNow + (sWant - sNow) * k;
     const S = Math.round(sNow);
+    // (a cover's box is given a new size once the size has come to rest: on the way there it is scaled, which costs nothing)
+    if (S !== sLast) {
+      sLast = S;
+      sMoved = performance.now();
+    }
+    sStill = performance.now() - sMoved > 220;
     const gap = Math.max(120, Math.min(170, W * 0.11));
     const topY = Math.max(4, Math.round((mainH - S - titleRoom) / 2));
     geo = { W, H: mainH, S, top: topY, C: W / 2, L: W / 2 - S / 2 - gap, R: W / 2 + S / 2 + gap, gap };
     for (const e of [fx, dig]) {
-      e.style.width = e.style.height = `${S}px`;
-      e.style.transform = `translate(${geo.C - S / 2}px, ${topY}px)`;
+      if (e.style.width !== `${S}px` && (sStill || e.classList.contains("on") || !e.style.width)) e.style.width = e.style.height = `${S}px`;
+      const at = `translate(${(geo.C - S / 2).toFixed(1)}px, ${topY}px)`;
+      if (e.style.transform !== at) e.style.transform = at;
     }
-    match.style.width = `${gap * 2 - 24}px`;
-    match.style.height = `${S}px`;
-    match.style.transform = `translate(${geo.C - gap + 12}px, ${topY}px)`;
+    const mw = `${Math.round(gap * 2 - 24)}px`;
+    if (match.style.width !== mw) match.style.width = mw;
+    if (match.style.height !== `${S}px` && (sStill || two || !match.style.height)) match.style.height = `${S}px`;
+    const mt = `translate(${(geo.C - gap + 12).toFixed(1)}px, ${topY}px)`;
+    if (match.style.transform !== mt) match.style.transform = mt;
   };
+  let rowsNow = "";
+  let sLast = 0;
+  let sMoved = 0;
+  let sStill = true;
 
   // ------------------ COVERS ------------------
   type Pose = { x: number; scale: number; opacity: number; z: number };
-  type Cv = { el: HTMLElement; tag: HTMLElement; seen: boolean; intro: boolean; pose?: Pose };
+  type Cv = { el: HTMLElement; tag: HTMLElement; tilt: HTMLElement; glare: HTMLElement; /** how far it is tilted (degrees), where the light on it is (%) and how bright: each on a spring (see TILT) */ rx: Spring; ry: Spring; gx: Spring; gy: Spring; lit: Spring; /** it is the cover that leans to the mouse */ live: boolean; /** the size its box was last given (it is scaled from that to the size it should be) */ base: number; seen: boolean; intro: boolean; pose?: Pose };
   const coverEls = new Map<string, Cv>();
   const setPose = (c: Cv, p: Pose, tag = "") => {
     c.pose = p;
-    if (c.el.style.width !== `${geo.S}px`) c.el.style.width = c.el.style.height = `${geo.S}px`;
-    c.el.style.transform = `translate(${(p.x - geo.S / 2).toFixed(1)}px, ${geo.top}px) scale(${p.scale.toFixed(4)})`;
+    if (c.base !== geo.S && sStill) {
+      c.base = geo.S;
+      c.el.style.width = c.el.style.height = `${geo.S}px`;
+    }
+    c.el.style.transform = `translate(${(p.x - c.base / 2).toFixed(1)}px, ${(geo.top + (geo.S - c.base) / 2).toFixed(1)}px) scale(${((geo.S / c.base) * p.scale).toFixed(4)})`;
     c.el.style.opacity = p.opacity.toFixed(3);
     c.el.style.zIndex = String(p.z);
     if (tag) c.tag.textContent = tag;
@@ -612,11 +867,19 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     if (!c) {
       const e = el("div", "cv");
       const tag = el("b");
-      e.appendChild(tag);
+      const tilt = el("div", "tilt _tilt_dj");
+      const glare = el("div", "glare _glare_dj");
+      tilt.style.transform = "perspective(1000px)";
+      tilt.appendChild(glare);
+      e.append(tag, tilt);
       e.style.width = e.style.height = `${geo.S}px`;
       main.insertBefore(e, fx);
-      img(id, e);
-      c = { el: e, tag, seen: false, intro: true };
+      img(id, tilt);
+      const made: Cv = { el: e, tag, tilt, glare, rx: spring(0), ry: spring(0), gx: spring(50), gy: spring(50), lit: spring(0), live: false, base: geo.S, seen: false, intro: true };
+      glare.style.background = `radial-gradient(circle at 50% 50%, ${LIGHT})`;
+      tilt.addEventListener("mousemove", (ev) => tiltTo(made, ev));
+      tilt.addEventListener("mouseleave", () => tiltBack(made));
+      c = made;
       coverEls.set(id, c);
       const card = cards.querySelector<HTMLElement>(`.card[data-id="${CSS.escape(id)}"] .ph`);
       const box = main.getBoundingClientRect();
@@ -653,6 +916,58 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       (c.el as any).__glide = setTimeout(() => (c.el.style.transition = ""), ms + 50);
     }
   };
+  // TILT. The cover that is on its own leans to the mouse, with a light on it, exactly as TIDAL's own cover does in
+  // its now-playing view, whose way of doing it this is (read out of TIDAL's code): up to 12 degrees, the light
+  // opposite the mouse, both fading out over the last 15% before an edge; on leaving, back to rest. Nothing jumps:
+  // each of the five numbers (two angles, the light's place, its strength) is on a spring of stiffness 200 and
+  // damping 30, which is what makes it follow the hand the way it does (eased straight at the mouse, as this was
+  // at first, it snapped). 3D Cover takes its depth from that lean and its light from that light, read off the
+  // page as it reads TIDAL's: a cover that stood still under it had neither.
+  let frameDt = 0.016;
+  const LIGHT = "rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.12) 10%, rgba(255, 255, 255, 0.08) 20%, rgba(255, 255, 255, 0.04) 35%, rgba(255, 255, 255, 0.02) 50%, rgba(255, 255, 255, 0.005) 65%, transparent 80%";
+  const MAX_TILT = 12;
+  const EDGE = 0.15;
+  type Spring = { x: number; v: number; to: number };
+  const spring = (x: number): Spring => ({ x, v: 0, to: x });
+  /** A step of `dt` seconds; false once it is at rest */
+  const sprung = (s: Spring, dt: number) => {
+    if (s.x === s.to && !s.v) return false;
+    for (let left = dt; left > 1e-6; left -= 1 / 240) {
+      const h = Math.min(left, 1 / 240);
+      s.v += (-200 * (s.x - s.to) - 30 * s.v) * h;
+      s.x += s.v * h;
+    }
+    if (Math.abs(s.x - s.to) < 0.005 && Math.abs(s.v) < 0.05) {
+      s.x = s.to;
+      s.v = 0;
+    }
+    return true;
+  };
+  const tiltTo = (c: Cv, e: MouseEvent) => {
+    if (!c.live) return;
+    const box = c.tilt.getBoundingClientRect();
+    const fx = (e.clientX - box.left) / (box.width || 1);
+    const fy = (e.clientY - box.top) / (box.height || 1);
+    const f = Math.max(0, Math.min(1, Math.min(fx, 1 - fx, fy, 1 - fy) / EDGE));
+    c.rx.to = (0.5 - fy) * MAX_TILT * 2 * f;
+    c.ry.to = (fx - 0.5) * MAX_TILT * 2 * f;
+    c.gx.to = (1 - fx) * 100;
+    c.gy.to = (1 - fy) * 100;
+    c.lit.to = f;
+  };
+  const tiltBack = (c: Cv) => {
+    c.rx.to = c.ry.to = c.lit.to = 0;
+  };
+  const lean = (c: Cv, on: boolean) => {
+    if (c.live && !on) tiltBack(c);
+    c.live = on;
+    const turned = [sprung(c.rx, frameDt), sprung(c.ry, frameDt)].some(Boolean);
+    const moved = [sprung(c.gx, frameDt), sprung(c.gy, frameDt)].some(Boolean);
+    const lit = sprung(c.lit, frameDt);
+    if (turned) c.tilt.style.transform = c.rx.x || c.ry.x ? `perspective(1000px) rotateX(${c.rx.x.toFixed(4)}deg) rotateY(${c.ry.x.toFixed(4)}deg)` : "perspective(1000px)";
+    if (moved) c.glare.style.background = `radial-gradient(circle at ${c.gx.x.toFixed(4)}% ${c.gy.x.toFixed(4)}%, ${LIGHT})`;
+    if (lit) c.glare.style.opacity = c.lit.x.toFixed(4);
+  };
   let phase = "";
   let onStage = "";
   const placeCovers = (sc: Scene, t: number) => {
@@ -676,6 +991,13 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
         setPose(coverEl(b.id), { x: geo.C, scale: 1, opacity: 1, z: 1 });
       }
     }
+    // (3D Cover gives a cover depth under the mouse: here, the one that is on its own and at rest. See 3DCover's index.ts)
+    const still = sc.phase === "one" && !sc.tr && !sc.near && sc.lead && !main.classList.contains("digging") ? sc.lead.id : "";
+    for (const [id, c] of coverEls) {
+      const on = id === still && !c.el.dataset.leaving;
+      lean(c, on);
+      c.el.toggleAttribute("data-3d", on && want3d);
+    }
     fx.classList.toggle("on", sc.phase === "merged");
     if (sc.phase !== phase) {
       if (sc.phase === "decks" || (sc.phase === "one" && phase !== "merged")) glide(900);
@@ -690,7 +1012,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       // (gone: faded where it was)
       c.el.dataset.leaving = "1";
       c.el.style.transition = `transform .7s ${GLIDE}, opacity .5s ease`;
-      if (c.pose) c.el.style.transform = `translate(${(c.pose.x - geo.S / 2).toFixed(1)}px, ${geo.top}px) scale(.94)`;
+      if (c.pose) c.el.style.transform = `translate(${(c.pose.x - c.base / 2).toFixed(1)}px, ${(geo.top + (geo.S - c.base) / 2).toFixed(1)}px) scale(${((geo.S / c.base) * 0.94).toFixed(4)})`;
       c.el.style.opacity = "0";
       setTimeout(() => {
         if (coverEls.get(id)?.el === c.el && c.el.dataset.leaving) {
@@ -738,7 +1060,10 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     }
     if (d?.mash) {
       const f = d.mash.fit;
-      cards.push({ big: [`Notes fit ${Math.round(clamp(f) * 100)}%`], small: `${sc.b.track.title} over ${poss(sc.a.track.title)} bass, bar by bar`, good: f > 0.3 });
+      // (the notes the two are made of: the same key or its relative is 0.6 and up; before that was measured, how one's notes sit on the other's bass)
+      const same = d.mash.notes;
+      if (same !== undefined) cards.push({ big: [`${Math.round(clamp(same) * 100)}% the same notes`], small: "the two are in key with each other", good: same >= 0.6 });
+      else cards.push({ big: [`Notes fit ${Math.round(clamp(f) * 100)}%`], small: `${sc.b.track.title} over ${poss(sc.a.track.title)} bass, bar by bar`, good: f > 0.3 });
       cards.push({ big: ["Drums together"], small: `${Math.round(clamp(d.mash.rhythm) * 100)}% in step${d.mash.shift ? `, moved ${d.mash.shift} beat${Math.abs(d.mash.shift) > 1 ? "s" : ""}` : ""}` });
     }
     if (tr.kind === "blend") {
@@ -750,7 +1075,12 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       const way = d?.way ?? "voice";
       cards.push({
         big: ["Mashup"],
-        small: way === "carry" ? `${poss(sc.a.track.title)} voice over ${poss(sc.b.track.title)} band` : way === "layer" ? `${sc.b.track.title} over ${poss(sc.a.track.title)} bass, then the bass swaps` : `${poss(sc.b.track.title)} voice over ${poss(sc.a.track.title)} band`,
+        small:
+          way === "carry" || (way === "voice" && d?.bed === "b")
+            ? `${poss(sc.a.track.title)} voice over ${poss(sc.b.track.title)} band`
+            : way === "layer"
+              ? `${sc.b.track.title} over ${poss(sc.a.track.title)} bass, then the bass swaps`
+              : `${poss(sc.b.track.title)} voice over ${poss(sc.a.track.title)} band`,
       });
     } else cards.push({ big: [KIND[tr.kind]], small: tr.kind === "drop" ? (d?.move === "brake" ? "the old one brakes to a stop" : d?.move === "sweep" ? "the old one is swept away" : "the new one lands on the one") : tr.kind === "cut" ? "straight over, on the beat" : "one fades into the other" });
     if (d?.nudgeMs !== undefined && tr.kind === "blend") cards.push({ big: ["Drums lined up"], small: `moved ${d.nudgeMs} ms${d.beatShift ? `, ${d.beatShift} beat${d.beatShift > 1 ? "s" : ""} on` : ""}` });
@@ -1323,7 +1653,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
               g.stroke();
             }
             g.restore();
-            marks.push({ at: u0, label: "decided as it comes up, by who sings" });
+            marks.push({ at: u0, label: arr.halves === "voice" ? "the same version to the end (the voices are still being taken out)" : "decided as it comes up" });
           }
         }
         if (mash?.cut) marks.push({ at: mash.cut, label: "cut short: the voices weren't ready", strong: true });
@@ -1343,7 +1673,10 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
         if (tr!.mid) marks.push({ at: tr!.mid, label: "Takeover" });
       } else if (tr!.kind === "blend") {
         marks.push({ at: tr!.start, label: d?.style === "filter" ? "Mix in · filtered" : "Mix in" });
-        marks.push({ at: d?.bassAt ?? tr!.swap, label: d?.bassAt !== undefined || tr!.seq ? "Bass swap" : "Bass swap, about here", strong: true });
+        // (a track that comes in without a bass, a long intro, takes it over only as the other one leaves: that is no
+        // swap to mark, and its mark sat on top of "Out")
+        const bassAt = d?.bassAt ?? tr!.swap;
+        if (bassAt < (d?.outEnd ?? tr!.end) - 2 * (tr!.beat ?? 0.5)) marks.push({ at: bassAt, label: d?.bassAt !== undefined || tr!.seq ? "Bass swap" : "Bass swap, about here", strong: true });
       } else marks.push({ at: tr!.swap, label: tr!.kind === "drop" ? (d?.move === "brake" ? "Brake · drop" : d?.move === "sweep" ? "Sweep · drop" : "Drop") : tr!.kind === "cut" ? "Cut" : "Handover", strong: true });
       if (d?.glideAt !== undefined && d.glide && d.speed && Math.abs(d.speed - 1) > 0.001) marks.push({ at: d.glideAt + d.glide, label: `Back to ${bpmB.toFixed(0)} BPM` });
       // (a mashup ends on the other song on its own: said above)
@@ -1498,6 +1831,9 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     const armed = transitionNow(status, t);
     const ahead = !armed && status.phase === "playing" && st?.planned && st.planned.transition.start - t <= LEAD ? st.planned.transition : undefined;
     const sc = sceneOf(st, armed ?? (ahead ? { ...ahead, p: 0 } : undefined), t);
+    lookUnder(time, sc.phase === "one" && !sc.tr);
+    lineRows(time);
+    frameDt = dt;
     layout(sc, dt);
     placeCovers(sc, t);
     renderMatch(sc);
@@ -1511,6 +1847,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     renderQueue(st);
     followCaption(t);
     showThumbs(time);
+    showFlip(armed, t);
 
     // background: the cover of what is playing (the incoming one once it has taken over)
     const bgUrl = sc.lead ? covered.get(sc.lead.id) : undefined;
@@ -1575,7 +1912,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       mashShown = s.transition.seq;
     }
     switchBtn.style.display = mode === "dj" ? "" : "none";
-    mashBtn.style.display = mode === "dj" ? "" : "none";
+    mashBtn.style.display = mode === "dj" && !flipShown ? "" : "none";
     skipBtn.style.display = mode === "dj" ? "" : "none";
     stopBtn.style.display = mode === "dj" ? "" : "none";
     djBtn.style.display = mode === "follow" ? "" : "none";
@@ -1651,14 +1988,15 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     }, REST_AFTER);
   };
   const onMouse = (e: MouseEvent) => {
+    if (!open) return;
     // (a mouse that hasn't moved still reports a move when what is under it changes)
     const at = `${e.screenX},${e.screenY}`;
     if (e.type === "mousemove" && at === lastMouse) return;
     lastMouse = at;
     stir();
   };
-  root.addEventListener("mousemove", onMouse);
-  root.addEventListener("mousedown", onMouse);
+  window.addEventListener("mousemove", onMouse, true);
+  window.addEventListener("mousedown", onMouse, true);
 
   // TrueTaste's thumbs on what is playing, as they are in the player bar
   let thumbsAt = 0;
@@ -1690,6 +2028,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     if (open) return;
     open = true;
     root.classList.add("open");
+    lookedAt = 0;
     stir();
     showThumbs(performance.now(), true);
     queueKey = "";
@@ -1719,11 +2058,13 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     clearInterval(captionTimer);
     digging(undefined);
     src.fxSurface(undefined);
+    leaveUnder();
   };
 
   closeBtn.addEventListener("click", close);
   switchBtn.addEventListener("click", () => src.switchUp());
   mashBtn.addEventListener("click", () => src.mashup());
+  flipBtn.addEventListener("click", () => src.flipMashup());
   skipBtn.addEventListener("click", () => src.skip());
   stopBtn.addEventListener("click", () => src.stop());
   djBtn.addEventListener("click", () => src.start());
@@ -1734,8 +2075,12 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const dispose = () => {
     close();
     window.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("mousemove", onMouse, true);
+    window.removeEventListener("mousedown", onMouse, true);
     root.remove();
+    underWrap.remove();
     style.remove();
+    underStyle.remove();
   };
   unloads.add(dispose);
   return { open: openStage, close, isOpen: () => open };

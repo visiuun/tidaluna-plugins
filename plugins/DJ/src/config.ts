@@ -35,6 +35,13 @@ export type PluginSettings = {
   voiceEngine: VoiceEngine;
   /** The version Luna's questions were all allowed for (see access.ts): until it changes, nothing is asked first */
   accessFor: string;
+  // What the full screen takes from other plugins, when they are there (see THROUGH in stage.ts)
+  /** The backdrop another plugin draws behind TIDAL's now-playing view (Radiant Lyrics) instead of the full screen's own */
+  stageBackdrop: boolean;
+  /** The line being sung, under the song's name: out of TIDAL's own lyrics panel (Radiant Lyrics' line, when that plugin is there) */
+  stageLyrics: boolean;
+  /** 3D Cover's depth on the full screen's cover */
+  stageCover3d: boolean;
 };
 
 export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("DJ", {
@@ -53,6 +60,9 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("DJ
   cloudVoiceKey: "",
   voiceEngine: "edge",
   accessFor: "",
+  stageBackdrop: true,
+  stageLyrics: true,
+  stageCover3d: true,
 });
 
 // The DJ's voices. `edge` is who reads it online (one of Edge's read-aloud voices), `kokoro` the local model's voice,

@@ -4,8 +4,9 @@ import { closeAnyMixer } from "./audio/mixer";
 import { closeSeparator } from "./audio/stems";
 import { stopRequests } from "./brain";
 import { flushLogNow, log, trace } from "./log";
-import { persona } from "./config";
-import { applyTransitionOnly, getMash, getStage, getWaveform, getStatus, markUnloaded, mashup, onStatus, resumeCarried, setTransitionOnly, skip, startSession, stopSession, switchUp } from "./session";
+import { persona, settings } from "./config";
+import { underNowPlaying } from "./tidal";
+import { applyTransitionOnly, flipMashup, getMash, getStage, getWaveform, getStatus, markUnloaded, mashup, onStatus, resumeCarried, setTransitionOnly, skip, startSession, stopSession, switchUp } from "./session";
 import { mountStage } from "./stage";
 import { resetVoiceQueue } from "./talk/voice";
 import { stopVoiceEngine } from "./native";
@@ -43,6 +44,7 @@ const stage = mountStage(unloads, {
   startFollow: () => setTransitionOnly(true),
   switchUp,
   mashup: () => void mashup(),
+  flipMashup: () => void flipMashup(),
   marks: async (id) => {
     const item = (await window.luna.lib!.MediaItem.fromId(id))?.tidalItem as { explicit?: boolean; ai?: boolean; upload?: boolean; audioModes?: string[] } | undefined;
     return item && { explicit: !!item.explicit, ai: !!item.ai, upload: !!item.upload, atmos: !!item.audioModes?.includes("DOLBY_ATMOS") };
@@ -62,6 +64,10 @@ const stage = mountStage(unloads, {
   },
   skip,
   stop: () => void stopSession("stopped from the full screen"),
+  // What other plugins bring to the full screen (it shows through to them: see THROUGH in stage.ts)
+  guests: () => ({ backdrop: settings.stageBackdrop !== false, lyrics: settings.stageLyrics !== false, cover3d: settings.stageCover3d !== false }),
+  setLyrics: (on) => (settings.stageLyrics = on),
+  under: underNowPlaying,
 });
 ui = mountUi(unloads, () => stage.open());
 mountCoverFx(unloads);

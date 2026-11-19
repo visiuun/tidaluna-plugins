@@ -149,7 +149,11 @@ export type TransitionDetail = {
   keyB?: { tonic: number; mode: "major" | "minor" };
   /** A mashup: how the other song was made to fit (its tempo times `speed`, moved `semitones`), how well its notes fit
    * this song's bass (-1 to 1), how well the drums agree, and by how many beats it was moved for them */
-  mash?: { speed: number; semitones: number; fit: number; rhythm: number; shift: number };
+  mash?: { speed: number; semitones: number; fit: number; /** how alike the notes the two are made of are (-1 to 1) */ notes?: number; rhythm: number; shift: number };
+  /** A voice mashup: whose band plays when it starts (a: the playing song's, under the other's singer; b: the other way round) */
+  bed?: "a" | "b";
+  /** ...and that there is only that version: only one of the two has a real singer */
+  oneWay?: boolean;
 };
 /** Whether what the DJ is busy with is looking for music (the full-screen view flicks through records while it does) */
 export const lookingForMusic = (busy: string | undefined) =>
@@ -217,18 +221,115 @@ type Prep = { forId: string; fromId: string; plan?: Plan; stretchKey?: string; w
 const TICK_MS = 200;
 /** How far TIDAL's own position (and with it the lyrics) may be from the sound before it is put right, seconds */
 const SYNC_SLACK = 0.11;
-// A mashup the DJ picks itself has to be this good (see mashQuality); one that is this good ends the search
-const MASH_OK = 0.4;
-const MASH_GREAT = 0.75;
 /**
- * How good a mashup of two tracks would be, from what was measured (see mashMatch in mixer.page.js).
- * Everything is taken relative to how well the two tracks' own bass and notes agree, which is what a
- * perfect fit scores (about 1 then): how close the fit comes to that, and how far it stands out from the
- * same two tracks in the wrong keys. Something is added for drum patterns that sit on each other, and
- * taken off when the key isn't among the best three of the twelve. (A voice sits on a band in its key far
- * more easily than one band's bass sits under another's chords, so the bar is no higher than it has to be:
- * what the voice really needs, that there is singing in the stretch, is checked once it has been taken out.)
+ * Whether two tracks make a mashup worth hearing, from what was measured (see mashMatch in mixer.page.js),
+ * and how good a one. A song the DJ picks itself has to pass on every count:
+ *   in key: the two are made of the same notes over the stretch they share (`notes`: the same key or its
+ *     relative is 0.6 and up, a key further off 0.2), in no other key nearly as much, without too many
+ *     of either's notes outside the other's scale (a song in a minor key over one in the major key on
+ *     the same note shares its root and fifth, and grates on its third: more than 36 in a hundred is
+ *     too many, and 30 where the key doesn't stand out clearly), and bar by bar each one's notes sit
+ *     on the other's bass, both ways round, better than in nine of the other keys. Where the key is
+ *     beyond doubt (the same notes at 0.7 and up, 0.2 clear of any other key), the bass only has to
+ *     not say otherwise: a garage tune's bass is a few low notes and a lot of air, and says little;
+ *   on the beat: the two songs' drums could be read against each other, to the millisecond, in at least
+ *     two of the places looked at, with readings that agree (where they can't, the other song's beat
+ *     is only where its own grid says, and a grid that is a little out is a singer who is early all
+ *     the way). Not in every place: where one of the two has a break, there are no drums to read.
+ * `again`: the pair has passed once and is measured a second time, on the stretch it will really play
+ *   and to the fraction of a millisecond: there it only has to hold up, a little under the bar it
+ *   cleared (or a pair right at the bar would pass and fail by turns).
+ * (Before, one number stood for the notes: how well one's notes sat on the other's bass, against how the
+ * same two did in the wrong keys. Over 8,600 pairs of songs from a music library it came out at 0.23 for
+ * pairs in the same key and 0.20 for pairs two steps apart on the wheel: it could hardly tell them apart,
+ * and what it let through was often out of key. The notes the two are made of tell them apart: 0.65
+ * against 0.19.)
  */
+const MASH_GREAT = 0.62;
+const mashVerdict = (f: MashFit, again = false): { ok: boolean; quality: number; why?: "notes" | "drums" } => {
+  const clamp = (v: number) => Math.max(0, Math.min(1, v));
+  const apart = f.notes - f.notesElsewhere;
+  const slack = again ? 0.04 : 0;
+  const clear = f.notes >= 0.7 - slack && apart >= 0.2 - slack;
+  const inKey =
+    f.notes >= 0.62 - slack &&
+    apart >= 0.08 - slack &&
+    Math.max(f.outside[0], f.outside[1]) <= (apart >= 0.2 ? 0.36 : 0.3) + slack &&
+    f.beaten >= (clear ? 6 : again ? 8 : 9) &&
+    f.fit >= (clear ? 0.1 : 0.16) - slack &&
+    Math.min(f.halves[0], f.halves[1]) >= (clear ? 0.05 : 0.1) - slack;
+  const onBeat = f.locked[0] >= 2;
+  const quality = 0.45 * clamp((f.notes - 0.5) / 0.4) + 0.25 * clamp(apart / 0.4) + 0.15 * clamp((f.fit - f.median) / 0.12) + 0.15 * clamp(f.rhythm / 0.4) - 0.04 * Math.abs(f.semitones) - 6 * Math.abs(f.joins);
+  return { ok: inKey && onBeat, quality, why: !inKey ? "notes" : !onBeat ? "drums" : undefined };
+};
+/**
+ * A track's beat as a mashup needs it: one tempo, a bar line, which bars start a phrase, and up to where
+ * that holds. Where the track keeps one grid from start to end, that is it. A grid that is nearly that
+ * (the same bar the DJ's blends go by: beats within 30 ms of it, more than half of them on it) will do
+ * as well: a mashup has where the two songs' drums really hit measured on the audio, in several
+ * places, and a pair whose drums can't be read against each other is turned down (see mashVerdict).
+ * Failing that (a free intro, a break out of time), it is the longest run of the track's bars, from
+ * `from` on, that a straight line goes through: the beat only has to hold for as long as the mashup
+ * lasts. Before, anything short of the perfect grid simply "had no steady beat", which was one in
+ * six of the songs tried, and now and then the one that was playing.
+ */
+export const mashGrid = (an: Analysis, from = 0): { period: number; bar0: number; phrase: number; last: number } | undefined => {
+  if (an.steady && an.grid) return { period: an.grid.period, bar0: an.bars[0] ?? an.firstBeat, phrase: an.phrasePhase, last: an.lastSound };
+  const bars = an.bars;
+  const g = an.grid;
+  if (g && g.resid < 0.03 && g.inlierShare > 0.5 && bars.length) return { period: g.period, bar0: g.phase + Math.round((bars[0] - g.phase) / g.period) * g.period, phrase: an.phrasePhase, last: an.lastSound };
+  // (bars are read off the tracked beats, to a fortieth of a second each: a line through a run of them is far finer)
+  const TOL = 0.016;
+  const fit = (m0: number, m1: number) => {
+    const n = m1 - m0;
+    let sx = 0;
+    let sy = 0;
+    let sxx = 0;
+    let sxy = 0;
+    for (let m = m0; m < m1; m++) {
+      const x = m - m0;
+      sx += x;
+      sy += bars[m];
+      sxx += x * x;
+      sxy += x * bars[m];
+    }
+    const slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+    const at = (sy - slope * sx) / n;
+    let sq = 0;
+    let worst = 0;
+    for (let m = m0; m < m1; m++) {
+      const d = Math.abs(bars[m] - at - slope * (m - m0));
+      sq += d * d;
+      if (d > worst) worst = d;
+    }
+    return { slope, at, rms: Math.sqrt(sq / n), worst };
+  };
+  const holds = (f: { rms: number; worst: number }) => f.rms <= TOL && f.worst <= 0.045;
+  let best: { m0: number; m1: number; slope: number; at: number } | undefined;
+  let m0 = Math.max(
+    0,
+    bars.findIndex((t) => t >= from - 0.01),
+  );
+  while (m0 + 24 <= bars.length) {
+    let m1 = m0 + 16;
+    let f = fit(m0, m1);
+    if (!holds(f)) {
+      m0 += 4;
+      continue;
+    }
+    while (m1 < bars.length) {
+      const longer = fit(m0, m1 + 1);
+      if (!holds(longer)) break;
+      f = longer;
+      m1++;
+    }
+    if (!best || m1 - m0 > best.m1 - best.m0) best = { m0, m1, slope: f.slope, at: f.at };
+    m0 = m1;
+  }
+  if (!best || best.m1 - best.m0 < 40 || !(best.slope > 0.8 && best.slope < 8)) return undefined;
+  return { period: best.slope / 4, bar0: best.at, phrase: (((an.phrasePhase - best.m0) % 4) + 4) % 4, last: Math.min(an.lastSound, best.at + best.slope * (best.m1 - best.m0)) };
+};
+
 /** About how many seconds it is from asking for a mashup to its start: finding the song, and the first pieces through the vocal separator */
 const MASH_LEAD = 30;
 /**
@@ -240,14 +341,9 @@ let pieceSeconds = 3.2;
 let piecesTimed = 4;
 /** ...and how much longer than that each piece is allowed to take, when working out how soon a mashup can start */
 const PIECE_SLACK = 1.1;
-const mashQuality = (f: MashFit) => {
-  const own = f.self.filter((v) => v > 0.05);
-  const scale = own.length ? own.reduce((x, y) => x + y, 0) / own.length : 0.25;
-  return 0.5 * (f.fit / scale) + 0.5 * ((f.fit - f.median) / scale) + 0.1 * Math.max(0, f.rhythm) - (f.beaten < 9 ? 0.2 : 0);
-};
 const describeFit = (f: MashFit) =>
   f.ok
-    ? `notes fit ${f.fit.toFixed(2)} (halves ${f.halves.map((v) => v.toFixed(2)).join("/")}; other keys' middle ${f.median.toFixed(2)}, beats ${f.beaten} of 11; own ${f.self.map((v) => v.toFixed(2)).join("/")}), drums ${f.rhythm.toFixed(2)}, ${f.tempo.map((v) => v.toFixed(2)).join(" vs ")} BPM, tuned ${f.tuning.join(" vs ")} cents (clarity ${f.clarity.join("/")}), ${f.semitones} semitones, joins ${(f.joins * 100).toFixed(1)}%, off ${f.off.toFixed(0)} cents, drum lags ${f.lags.join("/") || "none"} ms${f.shift ? `, moved ${f.shift} beat(s)` : ""}, took ${f.ms?.join(" + ") ?? "?"} ms`
+    ? `same notes ${f.notes.toFixed(2)} (any other key at best ${f.notesElsewhere.toFixed(2)}; outside the other's scale ${f.outside.map((v) => v.toFixed(2)).join("/")}), on each other's bass ${f.fit.toFixed(2)} (${f.halves.map((v) => v.toFixed(2)).join("/")}; other keys' middle ${f.median.toFixed(2)}, beats ${f.beaten} of 11; own ${f.self.map((v) => v.toFixed(2)).join("/")}), drums ${f.rhythm.toFixed(2)} (read in ${f.locked[0]} of ${f.locked[1]} places), ${f.bars} bars, ${f.tempo.map((v) => v.toFixed(2)).join(" vs ")} BPM, tuned ${f.tuning.join(" vs ")} cents (clarity ${f.clarity.join("/")}), ${f.semitones} semitones, joins ${(f.joins * 100).toFixed(1)}%, off ${f.off.toFixed(0)} cents, drum lags ${f.lags.join("/") || "none"} ms${f.shift ? `, moved ${f.shift} beat(s)` : ""}, took ${f.ms?.join(" + ") ?? "?"} ms`
     : `no (${f.why}): ${f.tempo?.map((v) => v.toFixed(2)).join(" vs ")} BPM, tuned ${f.tuning?.join(" vs ")} cents`;
 /** The "set" every track belongs to in transitions-only mode */
 const FOLLOW_SEGMENT: Segment = { kind: "more", key: "queue", title: "Transitions only", tracks: [], facts: {} };
@@ -335,6 +431,8 @@ class Session {
   private cutting = 0;
   /** A mashup is being put together */
   private mashing = false;
+  /** A mashup was asked for with too little of the song left: it is waiting for the next one */
+  private mashNext = false;
   /** This session was started by asking for a mashup */
   forMashup = false;
   /** Until when (on the mixer's clock) a mashup is playing out: nothing else is started over it */
@@ -1152,6 +1250,8 @@ class Session {
       beatShift: sched.beatShift,
       move: plan.kind === "drop" ? (sched.move ?? plan.move) : undefined,
       way: plan.way,
+      bed: plan.bed,
+      oneWay: plan.oneWay,
       bars1: plan.bars1,
       bars2: plan.bars2,
       sings: plan.sings,
@@ -1440,18 +1540,21 @@ class Session {
 
   /**
    * A mashup of the song that's on with another, which becomes the next track. Without `query` the DJ
-   * finds the song: same vibe, same tempo, same key, and of those the one whose notes actually fit this
-   * one's bar by bar. With `query` it is the song you named, moved in tempo and pitch as far as it takes
-   * to fit. It lasts for as long as the two songs have room for (see mashMatch in mixer.page.js), the
-   * two trading places as it goes: who sings where decides what is heard (the other song's voice over
-   * this one's band, this one's voice over the other's band, or, where nobody sings, one band on top of
-   * the other; see MASHUPS in mixer.page.js). Voices are found and taken out by a neural network (see
-   * audio/stems.js), a few seconds of sound at a time, at about the pace the music plays: this song's
-   * from the moment a mashup is asked for, the other's once it is found, and the rest while it plays.
-   * The DJ says what it is doing meanwhile.
+   * finds the song: the same vibe, at a tempo and in a key it can be brought to this one's from by its
+   * speed alone (up to two semitones, with the tempo that goes with them and next to nothing more),
+   * and of those one that is really in key and on the beat with this one, measured on the audio (see
+   * mashVerdict), and that has a singer, or goes with this one's (see `hasLead`). With `query` it is
+   * the song you named, moved as far as it takes. It lasts for as long as the two songs have room
+   * for (see mashMatch in mixer.page.js), and it is one thing from start to end: one song's singer over
+   * the other song's band, whichever of the two ways round is the better one (see `bed`, below); the
+   * other way round is a press of a button away (see flipMashup). Voices are found and taken out by a
+   * neural network (see audio/stems.js), a few seconds of sound at a time, at about the pace the music
+   * plays: this song's from the moment a mashup is asked for, the other's once it is found, and the
+   * rest while it plays. The DJ says what it is doing meanwhile.
    */
   async mashup(query?: string) {
     if (this.follow || this.stopped) return;
+    if (this.mashNext) return setStatus({ note: "The mashup comes with the next song: too little of this one is left" });
     if (this.busyCutting() || this.pending) return setStatus({ note: "One moment, still busy with the last thing" });
     this.mashing = true;
     setStatus({ busy: query ? "Finding that song" : "Looking for a song that goes with this one", note: undefined });
@@ -1506,27 +1609,75 @@ class Session {
         const last = cur.deck.map[cur.deck.map.length - 1];
         return !!last && last.rate === 1 && last.t <= this.mixer.now;
       };
-      while (!this.stopped && !settled() && Date.now() - since < 30000) await new Promise((r) => setTimeout(r, 250));
+      const until = async (ok: () => boolean, ms: number) => {
+        const from = Date.now();
+        while (!this.stopped && !ok() && Date.now() - from < ms) await new Promise((r) => setTimeout(r, 250));
+      };
+      await until(settled, 30000);
+      // Too little of this song left (a mashup takes half a minute to get going, and sixteen bars at the
+      // least): then it is a mashup of the next one, as soon as that is playing on its own. (Asked for
+      // near the end of a song, which is where a DJ that was just started for a mashup often is, it
+      // used to say so and do nothing.)
+      {
+        const on = this.current;
+        const an = on?.deck.analysis;
+        const left = on && an ? an.lastSound - on.deck.positionAt(this.mixer.now) : 0;
+        if (on && an && settled() && left <= MASH_LEAD + 18 * 4 * (an.grid?.period ?? 60 / (an.bpm || 120))) {
+          log(`Mashup: only ${left.toFixed(0)}s of ${on.item.track.title} left, so it will be of the next song`);
+          setStatus({ busy: "Too little of this song left: the mashup comes with the next one" });
+          // (until then the DJ carries on as usual: it has a next song to find and to mix in)
+          this.mashing = false;
+          this.mashNext = true;
+          try {
+            await until(() => this.current !== on && settled(), (left + 60) * 1000);
+          } finally {
+            this.mashNext = false;
+          }
+          if (this.stopped) return;
+          if (this.current === on || !settled() || this.busyCutting()) return void setStatus({ note: "The next song didn't come in time for a mashup. Try again" });
+          this.mashing = true;
+          setStatus({ busy: query ? "Finding that song" : "Looking for a song that goes with this one" });
+        }
+      }
       const cur = this.current;
       if (this.stopped) return;
       if (!cur || !settled()) return void setStatus({ note: "Nothing to mash up yet: wait until a song is playing on its own" });
       const track = cur.item.track;
       const a = cur.deck.analysis;
-      if (!a.steady || !a.grid) return void setStatus({ note: "This one has no steady beat to build a mashup on" });
+      const here = () => cur.deck.positionAt(this.mixer.now);
+      const gridA = mashGrid(a, here());
+      if (!gridA) {
+        log(`Mashup: ${track.title} doesn't hold a beat from here on`);
+        return void setStatus({ note: "This one has no steady beat to build a mashup on" });
+      }
+      // (up to where this song's beat holds: nothing of the mashup is planned past that)
+      const endA = gridA.last;
+      if (!a.steady) log(`Mashup: ${track.title} holds no single beat from start to end; from here to ${endA.toFixed(0)}s it does, at ${(60 / gridA.period).toFixed(2)} BPM`);
       const sr = 44100;
-      const beat = a.grid.period;
+      const beat = gridA.period;
       const bar = 4 * beat;
       const pre = 4 * beat;
       const ease = 2 * beat;
-      const side = (an: Analysis, from: number): MashSide => ({ period: an.grid!.period, bar0: an.bars[0] ?? an.firstBeat, phrase: an.phrasePhase, body: an.introEnd, from, last: an.lastSound });
+      const sideA = (from: number): MashSide => ({ period: gridA.period, bar0: gridA.bar0, phrase: gridA.phrase, body: a.introEnd, from, last: endA });
       // (The other song is left with its own ending to play, not joined so late that it is nearly over)
-      const other = (an: Analysis): MashSide => ({ ...side(an, 0), last: Math.min(an.lastSound, an.outroStart + 4 * an.grid!.period) });
-      const here = () => cur.deck.positionAt(this.mixer.now);
+      // (...and with its beat read at double or half time where that is what brings it within reach of
+      // this one's: a voice at 87 over drum and bass at 174. Its bars are then half or twice as long,
+      // and its phrases start on other ones)
+      const other = (an: Analysis, g: NonNullable<ReturnType<typeof mashGrid>>): MashSide => {
+        const s: MashSide = { period: g.period, bar0: g.bar0, phrase: g.phrase, body: Math.max(an.introEnd, g.bar0), from: 0, last: Math.min(g.last, an.outroStart + 4 * g.period) };
+        const fold = Math.round(Math.log2(s.period / beat));
+        if (fold === 1) return { ...s, period: s.period / 2, phrase: 2 * s.phrase, every: 8 };
+        if (fold === -1) return { ...s, period: s.period * 2, bar0: s.bar0 + (s.phrase % 2) * 4 * s.period, phrase: (s.phrase - (s.phrase % 2)) / 2, every: 2 };
+        return s;
+      };
       const still = () => !this.stopped && this.current === cur && !this.pending && !this.awaiting;
       // It takes sixteen bars at the least, and about half a minute to get going
-      const enough = () => a.lastSound - here() > MASH_LEAD + 18 * bar;
+      const enough = () => endA - here() > MASH_LEAD + 18 * bar;
       const tooLate = "Not enough of this song left for a mashup (it takes about half a minute to get going). Try it earlier in the next one";
-      if (!enough()) return void setStatus({ note: tooLate });
+      if (!enough()) {
+        log(`Mashup: not enough of ${track.title} left`);
+        return void setStatus({ note: tooLate });
+      }
       const movedOn = () => {
         waiting = false;
         if (!this.stopped) setStatus({ note: "The song moved on before the mashup was ready" });
@@ -1577,7 +1728,7 @@ class Session {
       // half minute of this one is done. Only its voice is kept: its band is what is left of the song
       // when the voice is taken out of it as it plays (see the transition).
       const A = stems(`${tag}a`, { id: track.id }, Math.round((here() + 26) * sr), false);
-      const lastA = Math.floor((a.lastSound * sr - A.base) / STEM_PIECE) - 1;
+      const lastA = Math.floor((endA * sr - A.base) / STEM_PIECE) - 1;
       this.piecing = true;
       void (async () => {
         await engine;
@@ -1596,6 +1747,17 @@ class Session {
       const SUNG = 0.15;
       const sung = (voice: number[]) => voice.filter((v) => v >= SUNG).length / Math.max(1, voice.length) >= 0.4;
       const tenths = (voice: number[]) => voice.map((v) => Math.min(9, Math.round(v * 10))).join("");
+      // A singer to build a mashup on is more than that: a lead voice, 0.3 of the sound or more in nearly
+      // half of the seconds heard. Vocal chops and samples come out at 0.2 or so, and a mashup made of
+      // those is two instrumentals with what the separator left behind brought up to the level of a
+      // singer (it sounded like it).
+      const LEAD = 0.3;
+      const hasLead = (voice: number[]) => voice.length >= 4 && voice.filter((v) => v >= LEAD).length / voice.length >= 0.45;
+      /** Whether this song has such a singer, going by what has been taken out of it so far (undefined: too little to say) */
+      const leadHere = () => {
+        const known = [...A.voice.values()].flat();
+        return known.length >= 10 ? hasLead(known) : undefined;
+      };
 
       let candidates: Track[];
       if (query) {
@@ -1604,27 +1766,37 @@ class Session {
         candidates = [found];
       } else {
         const keys = [keyOf(track), a.key.conf > 0.02 ? { tonic: a.key.tonic, mode: a.key.mode } : undefined].filter((k): k is NonNullable<typeof k> => !!k);
-        candidates = (await mashupCandidates(track, a.grid.bpm, keys)).slice(0, 7);
-        if (!candidates.length) return void sorry("Found nothing at this tempo and in this key that fits the vibe");
+        candidates = await mashupCandidates(track, 60 / beat, keys, a.tuning);
+        if (!candidates.length) return void sorry("Found nothing around this song that can be brought to its tempo and key");
       }
 
-      // Each candidate is measured against the song on the audio itself. The ones that really fit are
-      // kept, best first.
-      type Pick = { track: Track; loaded: Loaded; quality: number };
+      // Each candidate is measured against the song on the audio itself. The ones that really go with
+      // it are kept, best first. Three are on their way at a time (most of what a candidate costs is
+      // waiting for TIDAL), and the search has a limit (see `patience`): every second spent looking is a second
+      // less of the song for the mashup.
+      // A mashup needs a singer, so each one that passes is listened to as well: two pieces of it
+      // through the separator, from where the two would meet (six seconds of work). The search goes on
+      // until there is a pair with a singer in it, this song's or the other's.
+      type Pick = { track: Track; loaded: Loaded; quality: number; /** it has a singer where the two would meet (undefined: not listened to) */ voiced?: boolean };
       let picks: Pick[] = [];
       let why: MashFit["why"];
       const searching = Date.now();
+      const spent = () => Date.now() - searching;
+      const rank = (p: Pick) => p.quality + (p.voiced ? 0.3 : 0);
+      const withSinger = () => picks.some((p) => p.voiced) || (picks.length > 0 && leadHere() === true);
+      // (how long the search may go on for a pair with a singer in it: 22 seconds, and up to twice that
+      // where the song has so much left that fifty bars of mashup would still follow)
+      const patience = Math.max(22000, Math.min(45000, (endA - here() - MASH_LEAD - 50 * bar) * 1000));
       for (const [i, c] of candidates.entries()) {
         if (!still()) return movedOn();
         if (!enough()) break;
-        // (A good one ends the search once it has taken a while: every second spent looking is a
-        // second less of the song for the mashup)
-        if (picks[0] && Date.now() - searching > 4500) break;
+        // (once there is one that will do, a little longer for a better one, no more)
+        if (spent() > (withSinger() ? 9000 : patience)) break;
         setStatus({ busy: `Trying it with ${c.title}`, busyTrack: c.id });
         let loaded: Loaded;
         try {
           const job = fetch(c);
-          if (candidates[i + 1]) void fetch(candidates[i + 1]);
+          for (const ahead of candidates.slice(i + 1, i + 3)) void fetch(ahead);
           loaded = await job;
         } catch (err) {
           warn(`Mashup: couldn't load ${c.title}`, err);
@@ -1632,24 +1804,46 @@ class Session {
         }
         if (!still()) return movedOn();
         const b = loaded.analysis;
-        if (!b.steady || !b.grid) {
+        const gridB = mashGrid(b);
+        if (!gridB) {
           log(`Mashup: ${c.title} has no steady beat`);
           why ??= "tempo";
           this.dropExtra(c.id);
           continue;
         }
         // (How well the two go together is judged on the stretch they would actually play together)
-        const fit = await this.mixer.mashMatch(track.id, c.id, side(a, here() + MASH_LEAD), other(b), !!query);
-        const quality = fit.ok ? mashQuality(fit) : -1;
-        log(`Mashup: ${track.title} × ${c.title}: ${describeFit(fit)}${fit.ok ? `, quality ${quality.toFixed(2)}` : ""}`);
-        if (!fit.ok) why ??= fit.why;
-        // (A song you named is taken as it comes; one the DJ picks has to clear the bar)
-        if (fit.ok && (query || quality >= MASH_OK)) {
-          picks.push({ track: c, loaded, quality });
-          picks.sort((x, y) => y.quality - x.quality);
+        const fit = await this.mixer.mashMatch(track.id, c.id, sideA(here() + MASH_LEAD), other(b, gridB), !!query);
+        const verdict = fit.ok ? mashVerdict(fit) : undefined;
+        log(`Mashup: ${track.title} × ${c.title}: ${describeFit(fit)}${verdict ? `: ${verdict.ok ? "yes" : `no (${verdict.why})`}, quality ${verdict.quality.toFixed(2)}` : ""}`);
+        // (A song you named is taken as it comes; one the DJ picks has to be in key and on the beat)
+        if (verdict && (query || verdict.ok)) {
+          let voiced: boolean | undefined;
+          if (!query && fit.ok) {
+            setStatus({ busy: `Listening for a singer in ${c.title}`, busyTrack: c.id });
+            waitedFor++;
+            try {
+              await engine;
+              const probe = stems(`${tag}p${i}`, { id: c.id }, Math.max(0, Math.round(fit.bPos * sr)), false);
+              const heard: number[] = [];
+              for (const k of [0, 2]) heard.push(...(await pieceOf(probe, k).catch(() => [] as number[])));
+              void this.mixer.stemDrop(probe.name);
+              if (heard.length) voiced = hasLead(heard);
+              log(`Mashup: ${c.title} ${voiced ? "has a singer" : "has no singer to speak of"} there (voice in each second sampled, in tenths: ${tenths(heard)})`);
+            } catch (err) {
+              warn(`Mashup: couldn't listen to ${c.title}`, err);
+            } finally {
+              waitedFor--;
+            }
+            if (!still()) return movedOn();
+          }
+          picks.push({ track: c, loaded, quality: verdict.quality, voiced });
+          picks.sort((x, y) => rank(y) - rank(x));
           for (const dropped of picks.splice(3)) this.dropExtra(dropped.track.id);
-        } else this.dropExtra(c.id);
-        if (picks[0] && (picks[0].quality >= MASH_GREAT - 0.005 || Date.now() - searching > 4500)) break;
+        } else {
+          why ??= verdict?.why ?? fit.why;
+          this.dropExtra(c.id);
+        }
+        if (picks[0] && picks[0].quality >= MASH_GREAT && (query || picks[0].voiced || leadHere() === true)) break;
       }
       if (!still()) return movedOn();
       if (picks.length) {
@@ -1710,11 +1904,18 @@ class Session {
       // and the other doesn't either, the next best is tried, and only when none of them sings is it
       // the best one after all, the two bands on top of each other.
       const tries = [...picks.map((pick) => ({ pick, plain: !!query || picks.length === 1 })), ...(query || picks.length < 2 ? [] : [{ pick: picks[0], plain: true }])];
+      const failed = new Set<Pick>();
       for (const { pick, plain } of tries) {
+        if (failed.has(pick)) continue;
         if (!still()) return movedOn();
         if (!enough()) break;
         const partner = pick.track;
         const b = pick.loaded.analysis;
+        // (a song that was heard to have no singer, with one that has none either: no mashup of voices
+        // will come of it. It is passed over, and should it be all there is, its band goes on top of
+        // this one's without being listened to a second time, which is a quarter of a minute)
+        const voiceless = !query && pick.voiced === false && leadHere() === false;
+        if (voiceless && !plain) continue;
         setStatus({ busy: `Putting it together with ${partner.title}`, busyTrack: partner.id });
         // Where: as soon as what has to be there by then can be. That is the other song at this one's
         // tempo and two pieces of its voice, to hear whether it sings (some seven seconds), and then
@@ -1724,12 +1925,22 @@ class Session {
         let lead = busy + 2;
         for (let k = 0; k < 6; k++, lead += 4 * bar) {
           const from = here() + lead + pre;
-          const room = Math.min(128, Math.floor(((a.lastSound - from) / bar - 1) / 8) * 8);
+          const room = Math.min(128, Math.floor(((endA - from) / bar - 1) / 8) * 8);
           if (room < 16 || affordable(needsFor(from, room, "voice", seemsToSing()), lead, room, 4) >= Math.min(room, 64)) break;
         }
-        const fit = await this.mixer.mashMatch(track.id, partner.id, { ...side(a, here() + lead + pre), starts: 2 }, other(b), !!query, true);
+        const gridB = mashGrid(b);
+        if (!gridB) continue;
+        const fit = await this.mixer.mashMatch(track.id, partner.id, { ...sideA(here() + lead + pre), starts: 2 }, other(b, gridB), !!query, true);
         if (!fit.ok) {
           why = fit.why;
+          continue;
+        }
+        // (the stretch it would really play, now that that is known, has to go together as well)
+        const sure = mashVerdict(fit, true);
+        if (!query && !sure.ok) {
+          log(`Mashup: ${track.title} × ${partner.title}, where it would play: ${describeFit(fit)}: no (${sure.why})`);
+          why = sure.why;
+          failed.add(pick);
           continue;
         }
         const whole = fit.bars1 + fit.bars2;
@@ -1751,14 +1962,14 @@ class Session {
         // Who sings where the two meet decides how it starts, and what has to be taken out at all.
         // The other song: its first two pieces, and if nobody sings in those, one from further on
         // (they are pieces the mashup needs anyway, if it sings)
-        setStatus({ busy: `Listening for a singer in ${partner.title}`, busyTrack: partner.id });
+        if (!voiceless) setStatus({ busy: `Listening for a singer in ${partner.title}`, busyTrack: partner.id });
         const heardB: number[] = [];
         const loudB: number[] = [];
         const heardA: number[] = [];
         // (nothing is made ahead meanwhile: these are waited for)
         waitedFor++;
         try {
-          for (const i of new Set([0, Math.min(1, allB - 1), Math.max(1, Math.min(allB - 1, Math.floor(allB * 0.4)))])) {
+          for (const i of voiceless ? [] : new Set([0, Math.min(1, allB - 1), Math.max(1, Math.min(allB - 1, Math.floor(allB * 0.4)))])) {
             if (i > 1 && sung(heardB)) break;
             const voice = await pieceOf(B, i);
             const from = i === 0 ? Math.floor(pre) : 0;
@@ -1781,8 +1992,41 @@ class Session {
         const sungB = loudB.filter((_, k) => heardB[k] >= SUNG).sort((x, y) => x - y);
         const voiceLevel = sungB.length ? sungB[sungB.length >> 1] : 0;
         const singsA = sung(heardA);
-        const way: MashWay = singsB ? "voice" : singsA ? "carry" : "layer";
-        log(`Mashup: ${partner.title} ${singsB ? "sings" : "doesn't sing"} there (voice in each second sampled, in tenths: ${tenths(heardB)}), ${track.title} ${singsA ? "does" : "doesn't"} (${tenths(heardA)})`);
+        // Which version: the other song's singer over this song's band (`bed` a), or this song's
+        // singer over the other's band (b). It takes a real singer (see `hasLead`): with one in only one
+        // of the two songs there is only the one version; with one in each, it is the other song's
+        // singer over the band that is already playing (a new voice simply comes in, and the band
+        // that plays is untouched), unless this song's singer sits clearly better on the other's bass
+        // (the two halves of the fit) and sings more of the time. It stays that version to the end,
+        // unless you turn it round. With no real singer in either, a song the DJ picked is no mashup
+        // of voices at all: the next best is tried, and failing that the two bands go on top of each
+        // other. (A song you named is taken with whatever voice it has.)
+        const leadB = hasLead(heardB);
+        const leadA = hasLead(heardA);
+        const share = (voice: number[]) => voice.filter((v) => v >= LEAD).length / Math.max(1, voice.length);
+        const theirs = fit.halves[0] + 0.1 * share(heardB);
+        const ours = fit.halves[1] + 0.1 * share(heardA);
+        let way: MashWay;
+        let bed: "a" | "b";
+        if (leadB) {
+          way = "voice";
+          bed = leadA && ours > theirs + 0.05 ? "b" : "a";
+        } else if (leadA) {
+          way = singsB ? "voice" : "carry";
+          bed = "b";
+        } else if (query) {
+          way = singsB ? "voice" : singsA ? "carry" : "layer";
+          bed = way === "voice" ? "a" : "b";
+        } else {
+          way = "layer";
+          bed = "b";
+        }
+        const oneWay = way === "voice" && !(leadA && leadB);
+        log(
+          `Mashup: ${partner.title} ${leadB ? "has a singer" : singsB ? "has a voice in it, no singer to speak of" : "doesn't sing"} there (voice in each second sampled, in tenths: ${tenths(heardB)}), ${track.title} ${leadA ? "has one" : singsA ? "has a voice in it, no singer" : "doesn't sing"} (${tenths(heardA)})${
+            way === "layer" ? "" : `: ${bed === "a" ? `${partner.title}'s voice over ${track.title}'s band` : `${track.title}'s voice over ${partner.title}'s band`}${leadA && leadB ? ` is the better version (${(bed === "a" ? theirs : ours).toFixed(2)} against ${(bed === "a" ? ours : theirs).toFixed(2)} the other way round)` : ", the only version there is"}`
+          }`,
+        );
         const leave = () => {
           void this.mixer.stemDrop(B.name);
           if (stretchKey) void this.mixer.dropStretch(stretchKey);
@@ -1813,15 +2057,17 @@ class Session {
         const { pos: aPos, bars: total, need } = best;
         const [i0, i1] = rangeA(aPos, total);
         const countB = Math.ceil(((pre + total * bar + 1) * sr) / STEM_PIECE);
-        // (the last of it is its way out: the last sixteen bars of a long one, eight of a short one)
-        const outBars = total >= 48 ? 16 : 8;
+        // (the last eight bars of it are its way out)
+        const outBars = 8;
 
         const moves = `${fit.semitones ? `, ${fit.semitones > 0 ? "+" : ""}${fit.semitones} semitone${Math.abs(fit.semitones) > 1 ? "s" : ""}` : ""}, tempo ${((fit.speed - 1) * 100).toFixed(2)}%`;
         const how =
           (way === "voice"
-            ? `${total} bars in which the two trade places, eight bars at a time by who is singing: one song's voice over the other's band`
+            ? bed === "a"
+              ? `${total} bars of ${partner.title}'s voice over ${track.title}'s band, the last ${outBars} the way out`
+              : `${total} bars of ${track.title}'s voice over ${partner.title}'s band, the last ${outBars} the way out`
             : way === "carry"
-              ? `${total} bars of ${track.title}'s voice over ${partner.title}'s band where it sings, the two bands together where it doesn't (${partner.title} has no singer there)`
+              ? `${total} bars of ${track.title}'s voice over ${partner.title} (which has no singer there), the last ${outBars} the way out`
               : `no singer in either: ${total - outBars} bars of ${partner.title} on top of ${track.title}'s bass, then ${outBars} the other way round`) + moves;
         const plan: Plan = {
           kind: "mashup",
@@ -1834,6 +2080,8 @@ class Session {
           period: beat,
           speed: fit.speed,
           way,
+          bed,
+          oneWay,
           sings: { a: singsA, b: singsB },
           voiceLevel,
           pre,
@@ -1853,7 +2101,7 @@ class Session {
           this.known.set(partner.id, item);
           const at = this.planned.indexOf(cur.item.segment);
           this.planned.splice(at >= 0 ? at + 1 : this.planned.length, 0, segment);
-          this.prep = { forId: partner.id, fromId: track.id, plan, stretchKey, mash: { speed: fit.speed, semitones: fit.semitones, fit: fit.fit, rhythm: fit.rhythm, shift: fit.shift } };
+          this.prep = { forId: partner.id, fromId: track.id, plan, stretchKey, mash: { speed: fit.speed, semitones: fit.semitones, fit: fit.fit, notes: fit.notes, rhythm: fit.rhythm, shift: fit.shift } };
           this.immediate = false;
           this.lateVoice = undefined;
           this.syncQueue();
@@ -1952,7 +2200,9 @@ class Session {
         why === "ending" || !enough()
           ? tooLate
           : !query
-            ? "Nothing fits this one cleanly enough for a mashup. Try another song, or name one"
+            ? why === "drums"
+              ? "Nothing that is in key with this one sits on its beat cleanly enough. Try another song, or name one"
+              : "Nothing around this one is in key with it cleanly enough for a mashup. Try another song, or name one"
             : why === "tempo"
               ? `${name} is too far from this one in tempo to mash up`
               : why === "room"
@@ -1981,6 +2231,26 @@ class Session {
       }
       if (!this.stopped && !this.prep?.plan?.pre) setStatus({ busy: undefined });
     }
+  }
+
+  /**
+   * The other version of the mashup that is playing: the band that plays makes way for the other song's,
+   * and the singer for the other song's singer, from the next bar line on (see `flip` in mixer.page.js).
+   * Only where both songs have a singer, and not in its last eight bars, which are its way out.
+   */
+  async flipMashup() {
+    if (this.stopped) return;
+    const tr = getStatus().transition;
+    if (tr?.kind !== "mashup" || this.mixer.now > tr.end) return void setStatus({ note: "No mashup is playing" });
+    if (tr.detail?.way !== "voice" || tr.detail.oneWay) return void setStatus({ note: tr.detail?.way === "layer" ? "Neither of these two has a singer: there is no other version" : "Only one of these two has a singer: there is no other version" });
+    const r = await this.mixer.mashFlip().catch(() => ({ ok: false }) as Awaited<ReturnType<Mixer["mashFlip"]>>);
+    if (!r.ok) {
+      log(`Mashup: not turned round (${r.why ?? "the mixer didn't answer"})`);
+      return void setStatus({ note: r.why === "one" ? "Only one of these two has a singer: there is no other version" : r.why === "early" ? "It hasn't started yet" : r.why === "late" ? "Too late to turn it round: this is its way out" : "No mashup is playing" });
+    }
+    const names = tr.songs ? (r.bed === "a" ? `${tr.songs.b}'s voice over ${tr.songs.a}'s band` : `${tr.songs.a}'s voice over ${tr.songs.b}'s band`) : "the other version";
+    log(`Mashup turned round ${Math.max(0, (r.at ?? this.mixer.now) - this.mixer.now).toFixed(1)}s from now: ${names}`);
+    setStatus({ note: `The other version: ${names}` });
   }
 
   /** Replaces what's coming with `segment`, has the DJ introduce it over the current track, and stays with its sound */
@@ -2402,6 +2672,11 @@ export const skip = () => session?.skip();
 export const voiceLevel = () => session?.voiceLevel() ?? 0;
 /** What the full-screen view shows (see stage.ts): nothing while the DJ is off */
 export const getStage = () => (session && !session.stopped ? session.stage() : undefined);
+/** The other version of the mashup that is playing (see Session.flipMashup) */
+export const flipMashup = async () => {
+  await session?.flipMashup();
+};
+
 /** A mashup under way, block by block as the mixer decides it, and how the taking out of the voices keeps up */
 export const getMash = () => (session && !session.stopped && !session.mixer.gone && getStatus().transition?.kind === "mashup" ? session.mixer.feedState() : Promise.resolve(undefined));
 /** A track's waveform for the full-screen view, once it is loaded in the mixer */

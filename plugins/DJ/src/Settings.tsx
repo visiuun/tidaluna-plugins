@@ -64,6 +64,22 @@ const Overview = () => {
   );
 };
 
+/** The plugins the DJ works with: it shows what they make, it doesn't make it again */
+const Credits = () => (
+  <div style={{ opacity: 0.75, fontSize: 12, lineHeight: "18px", padding: "8px 0 12px" }}>
+    <div style={{ fontWeight: 700, marginBottom: 2 }}>Works with</div>
+    <div>
+      <b>Radiant Lyrics</b> by meowarex (radiant-lyrics.org): the backdrop and the lyrics on the full screen are Radiant Lyrics' own, shown through it.
+    </div>
+    <div>
+      <b>3D Cover</b> by visiuun: the depth on the full screen's cover.
+    </div>
+    <div>
+      <b>TrueTaste</b> by visiuun: the thumbs on the full screen, and what the DJ knows of your listening.
+    </div>
+  </div>
+);
+
 export const Settings = () => {
   // Read from window.luna rather than imported (see 3DCover): avoids dependency registration issues on live reload
   const { LunaButtonSetting, LunaNumberSetting, LunaSelectItem, LunaSelectSetting, LunaSettings, LunaSwitchSetting } = window.luna.ui!;
@@ -83,12 +99,12 @@ export const Settings = () => {
     settings[key] = val;
     setState({ ...settings });
   };
-  const toggle = (key: "homeCard" | "captions" | "allowExplicit" | "coverFx" | "transitionOnly", title: string, desc: string) => (
+  const toggle = (key: "homeCard" | "captions" | "allowExplicit" | "coverFx" | "transitionOnly" | "stageBackdrop" | "stageLyrics" | "stageCover3d", title: string, desc: string) => (
     <LunaSwitchSetting
       title={title}
       desc={desc}
-      checked={state[key]}
-      value={state[key]}
+      checked={state[key] !== false}
+      value={state[key] !== false}
       onChange={(e: any, checked?: boolean) => {
         const on = typeof checked === "boolean" ? checked : (e?.target?.checked ?? !state[key]);
         set(key, on);
@@ -194,6 +210,11 @@ export const Settings = () => {
       {toggle("captions", "Captions", "Show what the DJ is saying above the DJ button")}
       {toggle("homeCard", "DJ card on Home", "Show the DJ at the top of TIDAL's Home page")}
       {toggle("allowExplicit", "Allow explicit", "Include tracks marked explicit")}
+
+      {toggle("stageLyrics", "Full screen: lyrics", "The line being sung, under the song's name: the real line out of TIDAL's lyrics (Radiant Lyrics' own when that plugin is on, word by word as it draws them). It makes way while the DJ talks and while a mix is shown")}
+      {toggle("stageBackdrop", "Full screen: Radiant Lyrics backdrop", "With Radiant Lyrics on, its moving cover backdrop is what is behind the full screen, in place of the DJ's own")}
+      {toggle("stageCover3d", "Full screen: 3D cover", "With 3D Cover on, the cover on the full screen has its depth when the mouse is over it")}
+      <Credits />
 
       <LunaSecureTextSetting
         title="Cloud voice (optional)"

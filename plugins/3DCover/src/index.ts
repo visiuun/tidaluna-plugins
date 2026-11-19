@@ -17,6 +17,16 @@ const CANVAS_CLASS = "luna-3d-cover-canvas";
 const SPINNER_CLASS = "luna-3d-cover-spinner";
 // Only the big cover in the now playing view
 const PLAYER_COVER = 'img[data-test="now-playing-artwork"]';
+// ...and the one on the DJ plugin's full screen, which lies over the whole window while it is open (TIDAL's own
+// cover is under it then, and out of reach). The DJ marks the cover that is on its own and at rest: not the
+// two decks of a mix, nor a cover a transition is being drawn on. What that cover is, its own picture says:
+// the DJ's song changes at the moment its mix does, which is not always when TIDAL's does.
+const STAGE = ".visiuun-dj-stage";
+const STAGE_COVER = `${STAGE}.open .cv[data-3d] img`;
+const stageOpen = () => !!document.querySelector(`${STAGE}.open`);
+const onStage = (img: Element) => !!img.closest(STAGE);
+/** Whether this is still the cover to draw on: on the DJ's full screen, the one it marks; else TIDAL's, while nothing lies over it */
+const inPlace = (img: Element) => (onStage(img) ? img.matches(STAGE_COVER) : !stageOpen());
 const COVER_RE = /resources\.tidal\.com\/images\/([0-9a-f/-]+?)\/(\d+)x(\d+)\.(jpg|png|webp)/i;
 const TILT_CONTAINER = '[class*="_tilt_"]';
 // TIDAL's light over the tilted cover: a radial gradient whose centre follows the tilt
@@ -135,7 +145,7 @@ let trackSeq = 0;
 // 250 MB each time, which used to be spent on every song whether or not the cover was on the screen.
 // The playing cover's is made when the window is back or the view is opened (see checkPointer).
 const coverOnPage = () => {
-  for (const img of document.querySelectorAll<HTMLImageElement>(PLAYER_COVER)) if (img.isConnected && img.offsetWidth > 0) return true;
+  for (const img of document.querySelectorAll<HTMLImageElement>(`${PLAYER_COVER}, ${STAGE_COVER}`)) if (img.isConnected && img.offsetWidth > 0) return true;
   return false;
 };
 /** The playing cover whose depth map has been asked for (so that it is asked for once) */
@@ -272,12 +282,12 @@ let cachedImg: HTMLImageElement | null = null;
 const isShown = (img: HTMLImageElement) => img.isConnected && img.offsetWidth > 0 && img.complete && img.naturalWidth > 0;
 let lastMiss = 0;
 const getPlayerCover = () => {
-  if (cachedImg && isShown(cachedImg)) return cachedImg;
+  if (cachedImg && isShown(cachedImg) && inPlace(cachedImg)) return cachedImg;
   cachedImg = null;
   // Not on the now playing view: don't re-scan the DOM on every mouse move
   const now = performance.now();
   if (now - lastMiss < 250) return null;
-  const imgs = document.querySelectorAll<HTMLImageElement>(PLAYER_COVER);
+  const imgs = document.querySelectorAll<HTMLImageElement>(stageOpen() ? STAGE_COVER : PLAYER_COVER);
   // Newest is last in the DOM
   for (let i = imgs.length - 1; i >= 0; i--) {
     if (isShown(imgs[i])) return (cachedImg = imgs[i]);
@@ -351,7 +361,7 @@ const scheduleFrame = () => {
 const frame = (now: number) => {
   rafId = 0;
   if (!active?.ready) return;
-  if (!active.img.isConnected || (playingCover && active.coverId !== playingCover.id)) {
+  if (!active.img.isConnected || !inPlace(active.img) || (!onStage(active.img) && playingCover && active.coverId !== playingCover.id)) {
     cachedImg = null;
     teardown();
     return checkPointer();
@@ -444,7 +454,8 @@ const leave = () => {
 };
 
 const prepare = async (state: Active) => {
-  const cover = playingCover ?? coverFromUrl(state.img.currentSrc || state.img.src);
+  const shown = coverFromUrl(state.img.currentSrc || state.img.src);
+  const cover = onStage(state.img) ? shown : (playingCover ?? shown);
   if (!cover) return teardown();
   state.coverId = cover.id;
 
@@ -474,7 +485,7 @@ const prepare = async (state: Active) => {
 
 const activate = (img: HTMLImageElement) => {
   teardown();
-  const cover = playingCover?.id;
+  const cover = onStage(img) ? coverFromUrl(img.currentSrc || img.src)?.id : playingCover?.id;
   if (cover && failed.id === cover && performance.now() - failed.at < RETRY_AFTER_MS) return;
   const tiltEl = img.closest<HTMLElement>(TILT_CONTAINER);
   const glareEl = tiltEl?.querySelector<HTMLElement>(GLARE) ?? null;
