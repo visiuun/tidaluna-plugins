@@ -448,7 +448,7 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
     askRow.style.display = on ? "" : "none";
     chips.style.display = on ? "" : "none";
     mashRow.style.display = s.phase === "starting" || s.phase === "stopping" ? "none" : "";
-    flipBtn.style.display = s.transition?.kind === "mashup" && s.transition.detail?.way === "voice" && !s.transition.detail.oneWay ? "" : "none";
+    flipBtn.style.display = s.transition?.kind === "mashup" && s.transition.detail?.way === "voice" ? "" : "none";
     primary.textContent = s.phase === "off" || follow ? "Start DJ" : "Switch it up";
     primary.disabled = s.phase === "starting" || s.phase === "stopping";
     skipBtn.style.display = on ? "" : "none";

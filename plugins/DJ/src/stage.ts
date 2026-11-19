@@ -1053,7 +1053,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     const semis = d?.mash?.semitones ?? 0;
     if (kA && kB && semis) {
       const moved: Key = { tonic: (((kB.tonic + semis) % 12) + 12) % 12, mode: kB.mode };
-      cards.push({ big: [camelot(kB), el("i", undefined, "→"), camelot(moved)], small: `moved ${Math.abs(semis)} semitone${Math.abs(semis) > 1 ? "s" : ""} ${semis > 0 ? "up" : "down"} into ${camelot(kA)}'s key`, good: true });
+      cards.push({ big: [camelot(kB), el("i", undefined, "→"), camelot(moved)], small: `${d?.mash?.voice ? "the singer moved" : "moved"} ${Math.abs(semis)} semitone${Math.abs(semis) > 1 ? "s" : ""} ${semis > 0 ? "up" : "down"} into ${camelot(kA)}'s key`, good: true });
     } else if (kA && kB) {
       const fit = keyFit(kA, kB);
       cards.push({ big: [camelot(kA), el("i", undefined, "→"), camelot(kB)], small: fit, good: fit !== "different keys" });

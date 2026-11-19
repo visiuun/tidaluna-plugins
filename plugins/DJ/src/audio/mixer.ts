@@ -46,6 +46,8 @@ export type MashFit = {
   joins: number;
   speed: number;
   off: number;
+  /** How far its singer is moved on its own to be in key, the song itself staying where it is (cents; 0: not) */
+  voice: number;
   bars1: number;
   bars2: number;
   aPos: number;
@@ -319,6 +321,10 @@ export class Mixer {
   stemIn(job: string, name: string, what: { id?: string; key?: string }, from: number, piece: { skip: number; keep: number; index: number; band: boolean }) {
     return this.call<{ seconds: number; voice: number[]; /** how loud the voice is in each second (RMS) */ level: number[] }>("stemIn", { job, name, ...what, from, ...piece });
   }
+  /** The voices of the set `name` are wanted `cents` higher as well (lower, below zero; 0: no longer): a singer brought into the other song's key */
+  stemShift(name: string, cents: number) {
+    return this.call("stemShift", { name, cents }).catch(() => {});
+  }
   stemDrop(name: string) {
     return this.call("stemDrop", { name }).catch(() => {});
   }
@@ -332,7 +338,7 @@ export class Mixer {
   }
   /** Turns the mashup that is playing round (the other song's band, the other singer), from the next bar line */
   mashFlip() {
-    return this.call<{ ok: boolean; bed?: "a" | "b"; at?: number; /** why not: only one version (one), not started (early), in its way out (late), no mashup (none) */ why?: "one" | "early" | "late" | "none" }>("mashFlip", {});
+    return this.call<{ ok: boolean; bed?: "a" | "b"; at?: number; /** why not: only one version (one), not started (early), in its way out (late), still turning from the last time (busy), no mashup (none) */ why?: "one" | "early" | "late" | "busy" | "none" }>("mashFlip", {});
   }
   dropStretch(key: string) {
     return this.call("dropStretch", { key }).catch(() => {});

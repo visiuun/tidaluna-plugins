@@ -149,11 +149,9 @@ export type TransitionDetail = {
   keyB?: { tonic: number; mode: "major" | "minor" };
   /** A mashup: how the other song was made to fit (its tempo times `speed`, moved `semitones`), how well its notes fit
    * this song's bass (-1 to 1), how well the drums agree, and by how many beats it was moved for them */
-  mash?: { speed: number; semitones: number; fit: number; /** how alike the notes the two are made of are (-1 to 1) */ notes?: number; rhythm: number; shift: number };
+  mash?: { speed: number; semitones: number; /** ...of which by its singer alone, the song staying where it is (cents) */ voice?: number; fit: number; /** how alike the notes the two are made of are (-1 to 1) */ notes?: number; rhythm: number; shift: number };
   /** A voice mashup: whose band plays when it starts (a: the playing song's, under the other's singer; b: the other way round) */
   bed?: "a" | "b";
-  /** ...and that there is only that version: only one of the two has a real singer */
-  oneWay?: boolean;
 };
 /** Whether what the DJ is busy with is looking for music (the full-screen view flicks through records while it does) */
 export const lookingForMusic = (busy: string | undefined) =>
@@ -343,7 +341,7 @@ let piecesTimed = 4;
 const PIECE_SLACK = 1.1;
 const describeFit = (f: MashFit) =>
   f.ok
-    ? `same notes ${f.notes.toFixed(2)} (any other key at best ${f.notesElsewhere.toFixed(2)}; outside the other's scale ${f.outside.map((v) => v.toFixed(2)).join("/")}), on each other's bass ${f.fit.toFixed(2)} (${f.halves.map((v) => v.toFixed(2)).join("/")}; other keys' middle ${f.median.toFixed(2)}, beats ${f.beaten} of 11; own ${f.self.map((v) => v.toFixed(2)).join("/")}), drums ${f.rhythm.toFixed(2)} (read in ${f.locked[0]} of ${f.locked[1]} places), ${f.bars} bars, ${f.tempo.map((v) => v.toFixed(2)).join(" vs ")} BPM, tuned ${f.tuning.join(" vs ")} cents (clarity ${f.clarity.join("/")}), ${f.semitones} semitones, joins ${(f.joins * 100).toFixed(1)}%, off ${f.off.toFixed(0)} cents, drum lags ${f.lags.join("/") || "none"} ms${f.shift ? `, moved ${f.shift} beat(s)` : ""}, took ${f.ms?.join(" + ") ?? "?"} ms`
+    ? `same notes ${f.notes.toFixed(2)} (any other key at best ${f.notesElsewhere.toFixed(2)}; outside the other's scale ${f.outside.map((v) => v.toFixed(2)).join("/")}), on each other's bass ${f.fit.toFixed(2)} (${f.halves.map((v) => v.toFixed(2)).join("/")}; other keys' middle ${f.median.toFixed(2)}, beats ${f.beaten} of 11; own ${f.self.map((v) => v.toFixed(2)).join("/")}), drums ${f.rhythm.toFixed(2)} (read in ${f.locked[0]} of ${f.locked[1]} places), ${f.bars} bars, ${f.tempo.map((v) => v.toFixed(2)).join(" vs ")} BPM, tuned ${f.tuning.join(" vs ")} cents (clarity ${f.clarity.join("/")}), ${f.semitones} semitones${f.voice ? ` (the singer alone, ${f.voice} cents)` : ""}, joins ${(f.joins * 100).toFixed(1)}%, off ${f.off.toFixed(0)} cents, drum lags ${f.lags.join("/") || "none"} ms${f.shift ? `, moved ${f.shift} beat(s)` : ""}, took ${f.ms?.join(" + ") ?? "?"} ms`
     : `no (${f.why}): ${f.tempo?.map((v) => v.toFixed(2)).join(" vs ")} BPM, tuned ${f.tuning?.join(" vs ")} cents`;
 /** The "set" every track belongs to in transitions-only mode */
 const FOLLOW_SEGMENT: Segment = { kind: "more", key: "queue", title: "Transitions only", tracks: [], facts: {} };
@@ -1251,7 +1249,6 @@ class Session {
       move: plan.kind === "drop" ? (sched.move ?? plan.move) : undefined,
       way: plan.way,
       bed: plan.bed,
-      oneWay: plan.oneWay,
       bars1: plan.bars1,
       bars2: plan.bars2,
       sings: plan.sings,
@@ -1501,7 +1498,9 @@ class Session {
    * when the line ends, if it was said.
    */
   private async mashSay(line: GenericKind | { text: string }, by?: number): Promise<number | undefined> {
-    if (settings.commentary === "off" || this.stopped) return undefined;
+    // (only where the DJ talks about its sets at all: with "only a hello and a goodbye" it said what it had
+    // found for a mashup all the same)
+    if (!talksSets() || this.stopped) return undefined;
     try {
       const voice = await voiceState();
       if (!voice.usable) return undefined;
@@ -1950,7 +1949,7 @@ class Session {
         let stretchKey: string | undefined;
         if (moved) {
           // (A track moved in pitch finds its way back to its own slowly, so it isn't heard doing so)
-          const glide = fit.semitones || Math.abs(fit.joins) > 0.01 ? 28 : 16;
+          const glide = (fit.semitones && !fit.voice) || Math.abs(fit.joins) > 0.01 ? 28 : 16;
           stretchKey = await this.mixer.stretch(partner.id, x0, fit.speed, Math.round(hold * sr), Math.round(glide * sr), fit.pitch);
         }
         if (!still()) return movedOn();
@@ -1958,6 +1957,12 @@ class Session {
         // gone: at this song's tempo already, so its voice comes out ready to be sung over it
         const B = stems(`${tag}b${tries.findIndex((t) => t.pick === pick && t.plain === plain)}`, stretchKey ? { key: stretchKey } : { id: partner.id }, stretchKey ? 0 : x0, true);
         const allB = Math.ceil(((hold + 1) * sr) / STEM_PIECE);
+        // Where it is the singer alone that is brought into key (two songs at one tempo, a semitone or two
+        // apart: see the ways in mashMatch), the voices are wanted moved as well as as they are: the other
+        // song's by that much, this song's (for the other version) as far the other way
+        const cents = fit.voice || 0;
+        void this.mixer.stemShift(A.name, -cents);
+        void this.mixer.stemShift(B.name, cents);
 
         // Who sings where the two meet decides how it starts, and what has to be taken out at all.
         // The other song: its first two pieces, and if nobody sings in those, one from further on
@@ -1994,7 +1999,7 @@ class Session {
         const singsA = sung(heardA);
         // Which version: the other song's singer over this song's band (`bed` a), or this song's
         // singer over the other's band (b). It takes a real singer (see `hasLead`): with one in only one
-        // of the two songs there is only the one version; with one in each, it is the other song's
+        // of the two songs it starts as that one's version; with one in each, it is the other song's
         // singer over the band that is already playing (a new voice simply comes in, and the band
         // that plays is untouched), unless this song's singer sits clearly better on the other's bass
         // (the two halves of the fit) and sings more of the time. It stays that version to the end,
@@ -2021,10 +2026,9 @@ class Session {
           way = "layer";
           bed = "b";
         }
-        const oneWay = way === "voice" && !(leadA && leadB);
         log(
           `Mashup: ${partner.title} ${leadB ? "has a singer" : singsB ? "has a voice in it, no singer to speak of" : "doesn't sing"} there (voice in each second sampled, in tenths: ${tenths(heardB)}), ${track.title} ${leadA ? "has one" : singsA ? "has a voice in it, no singer" : "doesn't sing"} (${tenths(heardA)})${
-            way === "layer" ? "" : `: ${bed === "a" ? `${partner.title}'s voice over ${track.title}'s band` : `${track.title}'s voice over ${partner.title}'s band`}${leadA && leadB ? ` is the better version (${(bed === "a" ? theirs : ours).toFixed(2)} against ${(bed === "a" ? ours : theirs).toFixed(2)} the other way round)` : ", the only version there is"}`
+            way === "layer" ? "" : `: ${bed === "a" ? `${partner.title}'s voice over ${track.title}'s band` : `${track.title}'s voice over ${partner.title}'s band`}${leadA && leadB ? ` is the better version (${(bed === "a" ? theirs : ours).toFixed(2)} against ${(bed === "a" ? ours : theirs).toFixed(2)} the other way round)` : ", the one with a singer heard in it so far"}`
           }`,
         );
         const leave = () => {
@@ -2032,7 +2036,8 @@ class Session {
           if (stretchKey) void this.mixer.dropStretch(stretchKey);
         };
         if (way !== "voice") void this.mixer.stemDrop(B.name);
-        if (way === "layer" && !plain) {
+        // (...and two bands on top of each other have to be in one key as they are)
+        if (way === "layer" && (!plain || cents)) {
           leave();
           continue;
         }
@@ -2060,7 +2065,9 @@ class Session {
         // (the last eight bars of it are its way out)
         const outBars = 8;
 
-        const moves = `${fit.semitones ? `, ${fit.semitones > 0 ? "+" : ""}${fit.semitones} semitone${Math.abs(fit.semitones) > 1 ? "s" : ""}` : ""}, tempo ${((fit.speed - 1) * 100).toFixed(2)}%`;
+        const moves = cents
+          ? `, the singers moved ${cents > 0 ? "+" : ""}${(cents / 100).toFixed(2)} semitones into key (the voice alone), tempo ${((fit.speed - 1) * 100).toFixed(2)}%`
+          : `${fit.semitones ? `, ${fit.semitones > 0 ? "+" : ""}${fit.semitones} semitone${Math.abs(fit.semitones) > 1 ? "s" : ""}` : ""}, tempo ${((fit.speed - 1) * 100).toFixed(2)}%`;
         const how =
           (way === "voice"
             ? bed === "a"
@@ -2081,7 +2088,7 @@ class Session {
           speed: fit.speed,
           way,
           bed,
-          oneWay,
+          voiceCents: cents,
           sings: { a: singsA, b: singsB },
           voiceLevel,
           pre,
@@ -2101,7 +2108,7 @@ class Session {
           this.known.set(partner.id, item);
           const at = this.planned.indexOf(cur.item.segment);
           this.planned.splice(at >= 0 ? at + 1 : this.planned.length, 0, segment);
-          this.prep = { forId: partner.id, fromId: track.id, plan, stretchKey, mash: { speed: fit.speed, semitones: fit.semitones, fit: fit.fit, notes: fit.notes, rhythm: fit.rhythm, shift: fit.shift } };
+          this.prep = { forId: partner.id, fromId: track.id, plan, stretchKey, mash: { speed: fit.speed, semitones: fit.semitones, voice: cents, fit: fit.fit, notes: fit.notes, rhythm: fit.rhythm, shift: fit.shift } };
           this.immediate = false;
           this.lateVoice = undefined;
           this.syncQueue();
@@ -2122,10 +2129,9 @@ class Session {
         log(`Mashup set: ${track.title} × ${partner.artists[0]?.name} - ${partner.title} in ${wait.toFixed(1)}s, ${((Date.now() - since) / 1000).toFixed(0)}s after it was asked for (${how}; ${whole} bars had room; ${need.filter((n) => !n.spare).length} pieces still to make at ${pieceSeconds.toFixed(1)}s each, ${A.voice.size} of ${track.title} made ahead; ${describeFit(fit)})`);
         setTimeout(() => !this.stopped && this.prep?.plan === plan && setStatus({ busy: `Mashup with ${partner.title} coming up`, busyTrack: partner.id }), Math.max(0, wait - 5) * 1000);
         // The DJ says what it found, and, if there is still a while to go after that, that it starts
-        if (settings.commentary !== "off") {
+        if (chatty) {
           void (async () => {
             const end = await say({ text: mashupLine(track, partner, wait, persona().tone) }, heardAt - 0.4);
-            if (!chatty && end !== undefined) return;
             // (so that it ends as the mashup begins: its two seconds, and the second the music takes to make way)
             const at = heardAt - 3.6;
             if (at < Math.max(this.mixer.now, end ?? 0) + 1.5) return;
@@ -2242,11 +2248,11 @@ class Session {
     if (this.stopped) return;
     const tr = getStatus().transition;
     if (tr?.kind !== "mashup" || this.mixer.now > tr.end) return void setStatus({ note: "No mashup is playing" });
-    if (tr.detail?.way !== "voice" || tr.detail.oneWay) return void setStatus({ note: tr.detail?.way === "layer" ? "Neither of these two has a singer: there is no other version" : "Only one of these two has a singer: there is no other version" });
+    if (tr.detail?.way !== "voice") return void setStatus({ note: tr.detail?.way === "layer" ? "Neither of these two has a singer: there is no other version" : "Only one of these two has a voice to take out: there is no other version" });
     const r = await this.mixer.mashFlip().catch(() => ({ ok: false }) as Awaited<ReturnType<Mixer["mashFlip"]>>);
     if (!r.ok) {
       log(`Mashup: not turned round (${r.why ?? "the mixer didn't answer"})`);
-      return void setStatus({ note: r.why === "one" ? "Only one of these two has a singer: there is no other version" : r.why === "early" ? "It hasn't started yet" : r.why === "late" ? "Too late to turn it round: this is its way out" : "No mashup is playing" });
+      return void setStatus({ note: r.why === "one" ? "Only one of these two has a singer: there is no other version" : r.why === "early" ? "It hasn't started yet" : r.why === "busy" ? "It is turning round already" : r.why === "late" ? "Too late to turn it round: this is its way out" : "No mashup is playing" });
     }
     const names = tr.songs ? (r.bed === "a" ? `${tr.songs.b}'s voice over ${tr.songs.a}'s band` : `${tr.songs.a}'s voice over ${tr.songs.b}'s band`) : "the other version";
     log(`Mashup turned round ${Math.max(0, (r.at ?? this.mixer.now) - this.mixer.now).toFixed(1)}s from now: ${names}`);
@@ -2259,7 +2265,9 @@ class Session {
     this.cutting = Date.now();
     let clip: Clip | null = null;
     let text = "";
-    if (settings.commentary !== "off" && !(alreadyAnswered && !talk?.ready)) {
+    // (an answer to what you asked for is said unless the voice is off; a switch-up is the DJ's own doing,
+    // and is only talked about where it talks about its sets: not with "only a hello and a goodbye")
+    if ((stock === "request" ? settings.commentary !== "off" : talksSets()) && !(alreadyAnswered && !talk?.ready)) {
       // The line written for this set if it's ready, else a stock one, so there's never a wait
       clip = talk?.ready ?? null;
       text = talk?.text ?? "";

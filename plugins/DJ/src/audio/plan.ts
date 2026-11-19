@@ -41,8 +41,8 @@ export type Plan = {
   way?: MashWay;
   /** For a voice mashup: whose band plays (a: the outgoing track's, under the incoming one's singer; b: the other way round) */
   bed?: "a" | "b";
-  /** ...and that only that version is worth hearing (the other song has no real singer): it can't be turned round */
-  oneWay?: boolean;
+  /** ...and how far the incoming track's singer is moved in pitch, on its own, to be in the outgoing track's key (cents; the outgoing track's singer, over the incoming band, as far the other way) */
+  voiceCents?: number;
   /** For a mashup: whether each song was heard singing where they meet, before it was set (a: the playing one, b: the other) */
   sings?: { a?: boolean; b?: boolean };
   pre?: number;

@@ -1156,7 +1156,7 @@ const baseTitle = (t: Track) =>
   );
 
 /** How far a song would have to be moved to go with another: `semitones` up or down, and its tempo, beyond what that gives, by `joins` (a share of it) */
-type MashMove = { semitones: number; joins: number };
+type MashMove = { semitones: number; joins: number; /** how much is done to it (0: nothing) */ cost: number; /** it is its singer that is moved, on its own: the song stays at its tempo and pitch */ voice?: boolean };
 /** The furthest a song the DJ picks for a mashup is moved: two semitones (which is done by playing it faster or slower, and leaves its sound whole), and 1.2% of its tempo on top of that (which is not: see mashMatch in mixer.page.js) */
 const MASH_SEMITONES = 2;
 const MASH_JOINS = 0.012;
@@ -1179,7 +1179,7 @@ const mashMove = (t: Track, bpm: number, keys: MusicKey[], tune = 0): (MashMove 
   const kb = keyOf(t);
   const mine = keys.map(camelotOf);
   const keyed = !!kb && mine.length > 0;
-  let best: (MashMove & { keyed: boolean; cost: number }) | undefined;
+  let best: (MashMove & { keyed: boolean }) | undefined;
   for (let k = -MASH_SEMITONES; k <= MASH_SEMITONES; k++) {
     // (TIDAL's tempos are whole numbers: half a beat a minute either way is within what it says)
     const joins = Math.max(0, Math.abs(speed / 2 ** ((100 * k + tune) / 1200) - 1) - 0.5 / t.bpm);
@@ -1191,6 +1191,19 @@ const mashMove = (t: Track, bpm: number, keys: MusicKey[], tune = 0): (MashMove 
     const cost = 0.22 * Math.abs(k) + 25 * joins;
     if (!best || cost < best.cost) best = { semitones: k, joins, keyed, cost };
   }
+  // ...or left at its tempo, where that is this one's already (within 3%, by speed), with only its singer
+  // moved into key: a song at the same tempo a semitone or two away can't be reached by speed (a semitone
+  // is 6% of tempo), and a voice on its own can be moved in pitch cleanly (see shiftVoice in mixer.page.js)
+  if (Math.abs(speed - 1) <= 0.03 + 0.5 / t.bpm)
+    for (let k = -MASH_SEMITONES; k <= MASH_SEMITONES; k++) {
+      if (!keyed && k) continue;
+      if (keyed) {
+        const c = camelotOf({ tonic: (((kb!.tonic + k) % 12) + 12) % 12, mode: kb!.mode });
+        if (!mine.some((m) => m.n === c.n)) continue;
+      }
+      const cost = 0.12 + 0.2 * Math.abs(k);
+      if (!best || cost < best.cost) best = { semitones: k, joins: 0, keyed, cost, voice: true };
+    }
   return best;
 };
 
@@ -1241,7 +1254,7 @@ export const mashupCandidates = async (a: Track, bpm: number, keys: MusicKey[], 
     const sim = v ? Math.max(0, dot(v, va!)) : 0.3;
     const liked = p.seeds.has(id) ? 0.15 : 0;
     // (a key that is known to fit counts for more than one that is only hoped for)
-    const ease = Math.max(0, 1 - 0.22 * Math.abs(move.semitones) - 25 * move.joins);
+    const ease = Math.max(0, 1 - move.cost);
     scored.push({ t, s: (move.keyed ? 1 : 0.5) * (0.5 * source + 0.5 * sim + liked) * (0.4 + 0.6 * ease), move });
   }
   scored.sort((x, y) => y.s - x.s);
@@ -1259,7 +1272,7 @@ export const mashupCandidates = async (a: Track, bpm: number, keys: MusicKey[], 
   log(
     `Mashup candidates for ${a.title} (${bpm.toFixed(1)} BPM${keys[0] ? `, ${camelotOf(keys[0]).n}${camelotOf(keys[0]).major ? "B" : "A"}` : ""}): ${
       out.length
-        ? out.map((t, i) => `${t.artists[0]?.name} - ${t.title} (${t.bpm}${t.key ? `, ${t.key} ${t.keyScale?.toLowerCase() ?? ""}` : ""}; ${moves[i].semitones > 0 ? "+" : ""}${moves[i].semitones} st, ${(moves[i].joins * 100).toFixed(1)}%)`).join(" | ")
+        ? out.map((t, i) => `${t.artists[0]?.name} - ${t.title} (${t.bpm}${t.key ? `, ${t.key} ${t.keyScale?.toLowerCase() ?? ""}` : ""}; ${moves[i].semitones > 0 ? "+" : ""}${moves[i].semitones} st${moves[i].voice ? " by its singer" : ""}, ${(moves[i].joins * 100).toFixed(1)}%)`).join(" | ")
         : "none"
     } [${scored.length} of ${pool.size} within reach]`,
   );
