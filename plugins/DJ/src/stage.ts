@@ -237,7 +237,10 @@ const css = `
   .${R} .timeline { position: relative; min-height: 0; }
   .${R} .timeline canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 
-  .${R} .next { display: flex; align-items: center; gap: 24px; min-height: 0; }
+  /* ("Up next" goes out of sight with the buttons while the mouse is still, and is back for as long as there is
+     something to see in it: a mix near or on, the DJ picking music, a change in the row itself. See showNext) */
+  .${R} .next { display: flex; align-items: center; gap: 24px; min-height: 0; transition: opacity .6s ease; }
+  .${R}.resting:not(.eventful) .next { opacity: 0; }
   .${R} .next h3 { margin: 0; flex: none; font-family: ${T.display}; font-size: 17px; line-height: 24px; font-weight: 700; }
   .${R} .cards { position: relative; flex: 1; min-width: 0; display: flex; gap: 24px; overflow: hidden; height: 100%; align-items: center; -webkit-mask: linear-gradient(90deg, #000 88%, transparent); mask: linear-gradient(90deg, #000 88%, transparent); }
   .${R} .card { flex: none; width: 220px; display: flex; gap: 12px; align-items: center; transition: transform .6s ${GLIDE}, opacity .4s ease; }
@@ -1737,12 +1740,37 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
 
   // ------------------ UP NEXT ------------------
   let queueKey = "";
+  // "Up next" is out of sight while the mouse is still (see `resting`), except for as long as something happens
+  // that it is part of, and a few seconds after: a mix that is near (the next cover comes out of it) or on, the DJ
+  // getting ready or picking music (a new set's tracks land in it), a change in the part of the row that shows
+  const NEXT_AHEAD = 4;
+  const NEXT_HOLD = 4000;
+  const NEXT_CHANGED = 7000;
+  let nextUntil = 0;
+  let nextFront = "";
+  let eventful = false;
+  const showNext = (time: number, happening: boolean) => {
+    if (happening) nextUntil = Math.max(nextUntil, time + NEXT_HOLD);
+    const on = time < nextUntil;
+    if (on === eventful) return;
+    eventful = on;
+    root.classList.toggle("eventful", on);
+  };
   const renderQueue = (st: Stage | undefined) => {
     // (the one beside the cover as the next deck is on the stage already)
     const list = (st?.upcoming ?? []).filter((u) => u.track.id !== onStage);
     const key = list.map((u) => u.track.id + u.set).join(",") + (st?.follow ? "f" : "") + (st ? "" : "-");
     if (key === queueKey) return;
     queueKey = key;
+    // (a change in what is in sight of the row: one added at an end that is cut off isn't one)
+    const front = list
+      .slice(0, Math.max(1, Math.ceil(cards.clientWidth / 244)))
+      .map((u) => u.track.id + u.set)
+      .join(",");
+    if (front !== nextFront) {
+      nextFront = front;
+      nextUntil = Math.max(nextUntil, performance.now() + NEXT_CHANGED);
+    }
     // (the ones that stay move to their new places from where they were; new ones come in one after another)
     const before = new Map<string, DOMRect>();
     const old = new Map<string, HTMLElement>();
@@ -1845,6 +1873,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     renderTitles(sc, t);
     draw(sc, st, t);
     renderQueue(st);
+    showNext(time, !!armed || status.phase === "starting" || dig.classList.contains("on") || (status.phase === "playing" && !!st?.planned && st.planned.transition.start - t <= LEAD + NEXT_AHEAD));
     followCaption(t);
     showThumbs(time);
     showFlip(armed, t);
