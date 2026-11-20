@@ -162,7 +162,7 @@ const css = `
   .${R} .top .btn, .${R} .top .icon { transition: opacity .4s ease, background-color .15s ease; }
   .${R}.resting { cursor: none; }
   .${R}.resting .top .btn, .${R}.resting .top .icon { opacity: 0; pointer-events: none; }
-  .${R} .who { display: flex; align-items: baseline; gap: 10px; color: ${T.secondary}; white-space: nowrap; min-width: 0; overflow: hidden; transition: opacity .3s ease; }
+  .${R} .who { display: flex; align-items: baseline; gap: 10px; color: ${T.secondary}; white-space: nowrap; min-width: 0; overflow: hidden; transition: opacity .4s ease; }
   .${R} .who strong { color: #fff; font-weight: 600; }
   .${R} .who span { overflow: hidden; text-overflow: ellipsis; }
   .${R} .banner { position: absolute; left: 0; top: 50%; display: flex; align-items: baseline; gap: 14px; pointer-events: none; white-space: nowrap; opacity: 0; transform: translateY(-50%); }
@@ -241,6 +241,8 @@ const css = `
      something to see in it: a mix near or on, the DJ picking music, a change in the row itself. See showNext) */
   .${R} .next { display: flex; align-items: center; gap: 24px; min-height: 0; transition: opacity .6s ease; }
   .${R}.resting:not(.eventful) .next { opacity: 0; }
+  /* (...and so does the DJ's name with its set, top left) */
+  .${R}.resting:not(.eventful) .who { opacity: 0; }
   .${R} .next h3 { margin: 0; flex: none; font-family: ${T.display}; font-size: 17px; line-height: 24px; font-weight: 700; }
   .${R} .cards { position: relative; flex: 1; min-width: 0; display: flex; gap: 24px; overflow: hidden; height: 100%; align-items: center; -webkit-mask: linear-gradient(90deg, #000 88%, transparent); mask: linear-gradient(90deg, #000 88%, transparent); }
   .${R} .card { flex: none; width: 220px; display: flex; gap: 12px; align-items: center; transition: transform .6s ${GLIDE}, opacity .4s ease; }
