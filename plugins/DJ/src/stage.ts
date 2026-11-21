@@ -87,6 +87,8 @@ const GLIDE = "cubic-bezier(.2, .8, .2, 1)";
  * comes up with less than SPLIT_MIN to go (one asked for right now: a switch-up, a request) isn't worth moving the
  * covers apart for, only to bring them back together at once: the next cover goes under the playing one instead.
  */
+/** How far past the top of the page what is moved up to it goes (px): see where the backdrop is moved up */
+const OVER = 2;
 const LEAD = 20;
 const TRAVEL = 2.6;
 const SPLIT_MIN = 7;
@@ -575,7 +577,11 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     underKey = key;
     underStyle.textContent =
       (at ? `body.${R}-through #wimp ${LYRICS} { width: ${at[2]}px !important; max-width: none !important; height: ${LINE.h}px !important; max-height: ${LINE.h}px !important; transform: translate(${at[0]}px, ${at[1]}px) scale(${LINE.scale}) !important; }\n` : "") +
-      (npy ? `body.${R}-through.${R}-bg #wimp .now-playing-background-container { top: -${npy}px !important; height: calc(100% + ${npy}px) !important; }\n` : "");
+      // (a little further up than the title bar is tall: on a screen scaled by 125% the bar is 37.5 of its pixels, the
+      // view under it starts on a whole one, and a backdrop moved up by exactly the bar began one pixel down from the
+      // top: a line across the top of the screen, of what is behind it, which is the backdrop the plugin draws behind
+      // all of TIDAL)
+      (npy ? `body.${R}-through.${R}-bg #wimp .now-playing-background-container { top: -${npy + OVER}px !important; height: calc(100% + ${npy + OVER}px) !important; }\n` : "");
   };
   /** Where the stage's middle row is on the page (asked now and then, not every frame: asking makes the page lay itself out) */
   let mainBox = { left: 56, top: 64, width: 0 };
@@ -596,7 +602,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
         view.prepend(underWrap);
       }
       // (TIDAL's view starts under its title bar: this goes to the top)
-      const top = `${-Math.max(0, Math.round(view.getBoundingClientRect().top))}px`;
+      const top = `${-Math.max(0, Math.round(view.getBoundingClientRect().top)) - OVER}px`;
       if (underWrap.style.top !== top) underWrap.style.top = top;
     } else if (bg.parentElement !== root) {
       root.prepend(bg, shade);
