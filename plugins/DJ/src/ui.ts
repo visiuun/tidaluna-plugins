@@ -83,10 +83,11 @@ const css = `
   .${ROOT}-caption.show { opacity: 1; transform: none; }
   .${ROOT}-caption b { display: block; font-size: 10px; letter-spacing: .8px; text-transform: uppercase; opacity: .6; margin-bottom: 3px; font-weight: 700; }
 
-  /* The panel, in TIDAL's own look: its fonts and colours (its design tokens, with their values as fallbacks), a solid
-     card like its menus, no outlines, white for what matters most and grey for the rest */
+  /* The panel, in TIDAL's own look: its fonts and colours (its design tokens, with their values as fallbacks), on pure
+     black (an OLED screen shows nothing there) with a hairline edge, no outlines inside, white for what matters most
+     and grey for the rest */
   .${ROOT}-panel { --dj-text: "Square Sans Text VF", "Square Sans Text", Helvetica, Arial, sans-serif; --dj-display: "Square Sans Display VF", "Square Sans Display", Helvetica, Arial, sans-serif; --dj-fill: var(--wave-color-opacity-contrast-fill-ultra-thin, #ffffff1a); --dj-fill-hover: var(--wave-color-opacity-contrast-fill-thin, #ffffff33); --dj-grey: var(--wave-color-solid-contrast-darker, #afafb6); --dj-grey2: var(--wave-color-solid-contrast-darkest, #787887); --dj-accent: var(--wave-color-solid-accent-fill, #33ffee);
-    position: fixed; z-index: 2147483600; width: 360px; padding: 20px; border-radius: 12px; background: var(--wave-color-solid-base-brighter, #1f1f23); color: #fff; box-shadow: 0 16px 48px rgba(0,0,0,.6); font-family: var(--dj-text); font-size: 14px; line-height: 20px; font-weight: 500; -webkit-font-smoothing: antialiased; display: none; }
+    position: fixed; z-index: 2147483600; width: 360px; padding: 20px; border-radius: 12px; background: #000; color: #fff; border: 1px solid rgba(255,255,255,.12); box-shadow: 0 16px 48px rgba(0,0,0,.8); font-family: var(--dj-text); font-size: 14px; line-height: 20px; font-weight: 500; -webkit-font-smoothing: antialiased; display: none; }
   .${ROOT}-panel.open { display: block; }
   .${ROOT}-panel.over { z-index: 2147483600; }
   .${ROOT}-panel h3 { margin: 0; font-family: var(--dj-display); font-size: 20px; line-height: 28px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
@@ -115,7 +116,7 @@ const css = `
   .${ROOT}-reader { margin: 2px 0 0; text-align: right; font-size: 12px; line-height: 16px; color: var(--dj-grey2); }
   .${ROOT}-row select { flex: 0 1 220px; min-width: 0; height: 36px; border-radius: 8px; border: 0; background: var(--dj-fill) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23afafb6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center / 16px; color: #fff; font: inherit; font-size: 13px; padding: 0 32px 0 12px; appearance: none; -webkit-appearance: none; cursor: pointer; text-overflow: ellipsis; outline: none; }
   .${ROOT}-row select:hover { background-color: var(--dj-fill-hover); }
-  .${ROOT}-row select option { background: #1f1f23; color: #fff; }
+  .${ROOT}-row select option { background: #000; color: #fff; }
   .${ROOT}-mode { display: flex; align-items: center; gap: 14px; margin-top: 18px; padding: 14px 0 0; border-top: 1px solid var(--dj-fill); }
   .${ROOT}-mode div { flex: 1; min-width: 0; }
   .${ROOT}-mode strong { display: block; font-size: 14px; font-weight: 600; }
