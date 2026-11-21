@@ -17,6 +17,7 @@ export type PluginSettings = {
   breakout: boolean; // foreground can cross the cover's border
   autoTilt: boolean; // the cover sways slowly on its own while the mouse isn't on it
   autoTiltAmount: number; // 5-100, share of a full tilt
+  autoTiltRev: number; // which default of autoTiltAmount has been applied
 };
 
 export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("3DCover", {
@@ -31,13 +32,19 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("3D
   preloadNext: true,
   breakout: true,
   autoTilt: true,
-  autoTiltAmount: 35,
+  autoTiltAmount: 50,
+  autoTiltRev: 2,
 });
 
 // Older builds could store a React element here from the select's onChange
 if (settings.model !== "small" && settings.model !== "base") settings.model = "small";
 if (typeof settings.autoTilt !== "boolean") settings.autoTilt = true;
-if (!Number.isFinite(settings.autoTiltAmount)) settings.autoTiltAmount = 35;
+if (!Number.isFinite(settings.autoTiltAmount)) settings.autoTiltAmount = 50;
+// 1.0.18 and 1.0.19 swayed at 35 by default: those left at it get the stronger new default, once
+if (settings.autoTiltRev !== 2) {
+  if (settings.autoTiltAmount === 35) settings.autoTiltAmount = 50;
+  settings.autoTiltRev = 2;
+}
 
 export const Settings = () => {
   // Read from window.luna rather than imported, for the same reason as @luna/lib in index.ts
