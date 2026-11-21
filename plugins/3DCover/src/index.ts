@@ -3,6 +3,7 @@ import type { MediaItem } from "@luna/lib";
 import { type DepthMap, closeDepthCache, disposeDepthWorker, getCachedDepth, getDepth, isAbort, loadCoverBitmap, setInferenceLogger, setInfoLogger } from "./depth";
 import { backgroundFor, clearBackgrounds, reachFor } from "./background";
 import { clearSurfaces, surfaceFor } from "./lighting";
+import { CoverLoader, LOADER_CSS } from "./loader";
 import { ParallaxRenderer, overflowFor } from "./renderer";
 import { settings } from "./Settings";
 
@@ -14,7 +15,6 @@ export const unloads = new Set<LunaUnload>();
 
 const STYLE_ID = "luna-3d-cover-styles";
 const CANVAS_CLASS = "luna-3d-cover-canvas";
-const SPINNER_CLASS = "luna-3d-cover-spinner";
 // Only the big cover in the now playing view
 const PLAYER_COVER = 'img[data-test="now-playing-artwork"]';
 // ...and the one on the DJ plugin's full screen, which lies over the whole window while it is open (TIDAL's own
@@ -32,7 +32,8 @@ const TILT_CONTAINER = '[class*="_tilt_"]';
 // TIDAL's light over the tilted cover: a radial gradient whose centre follows the tilt
 const GLARE = '[class*="_glare_"]';
 const GLARE_AT = /circle at\s+(-?[\d.]+)%\s+(-?[\d.]+)%/;
-const SPINNER_DELAY_MS = 350;
+// A cover that takes longer than this to be ready gets the loading line round it
+const LOADER_DELAY_MS = 350;
 const LEAVE_TIMEOUT_MS = 1500;
 // Smallest tilt treated as "full" deflection until TIDAL's real maximum has been seen
 const TILT_MIN_REF = Math.sin((4 * Math.PI) / 180);
@@ -53,18 +54,7 @@ style.textContent = `
     display: block;
   }
   .${CANVAS_CLASS}.visible { opacity: 1; }
-  .${SPINNER_CLASS} {
-    position: absolute !important;
-    pointer-events: none !important;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    border: 2px solid rgba(255, 255, 255, 0.25);
-    border-top-color: rgba(255, 255, 255, 0.9);
-    animation: luna-3d-cover-spin 0.8s linear infinite;
-    z-index: 2;
-  }
-  @keyframes luna-3d-cover-spin { to { transform: rotate(360deg); } }
+  ${LOADER_CSS}
 `;
 document.getElementById(STYLE_ID)?.remove();
 document.head.appendChild(style);
@@ -75,9 +65,8 @@ const renderer = new ParallaxRenderer();
 renderer.canvas.className = CANVAS_CLASS;
 unloads.add(() => renderer.dispose());
 
-const spinner = document.createElement("div");
-spinner.className = SPINNER_CLASS;
-unloads.add(() => spinner.remove());
+const loader = new CoverLoader();
+unloads.add(() => loader.remove());
 
 type Active = {
   img: HTMLImageElement;
@@ -87,7 +76,7 @@ type Active = {
   ready: boolean;
   leaving: boolean;
   leaveStart: number;
-  spinnerTimer?: number;
+  loaderTimer?: number;
 };
 
 let active: Active | null = null;
@@ -361,12 +350,6 @@ const syncPlacement = (img: HTMLImageElement) => {
   c.style.zIndex = cs.zIndex === "auto" ? "" : cs.zIndex;
 };
 
-const showSpinner = (img: HTMLImageElement) => {
-  img.insertAdjacentElement("afterend", spinner);
-  spinner.style.left = `${img.offsetLeft + img.offsetWidth - 22}px`;
-  spinner.style.top = `${img.offsetTop + 8}px`;
-};
-
 // ------------------ RENDER LOOP ------------------
 const scheduleFrame = () => {
   if (!rafId) rafId = requestAnimationFrame(frame);
@@ -463,7 +446,7 @@ let failed = { id: "", at: 0 };
 
 const teardown = () => {
   if (!active) return;
-  clearTimeout(active.spinnerTimer);
+  clearTimeout(active.loaderTimer);
   active = null;
   cancelAnimationFrame(rafId);
   rafId = 0;
@@ -474,7 +457,7 @@ const teardown = () => {
   drawn.dirty = true;
   renderer.canvas.classList.remove("visible");
   renderer.canvas.remove();
-  spinner.remove();
+  loader.remove();
 };
 
 // Keep rendering while the cover eases back to neutral, then hand back to the real <img>
@@ -482,7 +465,6 @@ const teardown = () => {
 const leave = () => {
   if (!active || active.leaving) return;
   if (!active.ready && !autoOn()) return teardown();
-  spinner.remove();
   active.leaving = true;
   active.leaveStart = performance.now();
   scheduleFrame();
@@ -495,16 +477,15 @@ const prepare = async (state: Active) => {
   state.coverId = cover.id;
 
   if (!getCachedDepth(cover.id, settings.model)) {
-    // (only for someone hovering it: a cover that will sway on its own appears when it's ready)
-    state.spinnerTimer = window.setTimeout(() => active === state && !state.leaving && showSpinner(state.img), SPINNER_DELAY_MS);
+    state.loaderTimer = window.setTimeout(() => active === state && loader.show(state.img), LOADER_DELAY_MS);
   }
 
   try {
     const [image, depth] = await Promise.all([getBitmap(cover), buildDepth(cover)]);
     if (active !== state) return;
 
-    clearTimeout(state.spinnerTimer);
-    spinner.remove();
+    clearTimeout(state.loaderTimer);
+    loader.hide();
     renderer.setSource(image, depth);
     drawn.dirty = true;
 
@@ -549,11 +530,7 @@ const checkPointer = () => {
   if (!inside(r, pointer.x, pointer.y)) return leave();
 
   if (!active) activate(img);
-  else if (active.leaving) {
-    active.leaving = false;
-    spinner.remove();
-    if (!active.ready && !getCachedDepth(active.coverId, settings.model)) showSpinner(active.img);
-  }
+  else if (active.leaving) active.leaving = false;
   if (!active) return;
 
   // Normalized pointer position [-1, 1] relative to the cover centre (same as the Python app)
