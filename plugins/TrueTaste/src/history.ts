@@ -105,6 +105,41 @@ const poll = () => {
   current.lastPos = pos;
 };
 
+let stopWatchingLikes: (() => void) | undefined;
+type Store = { getState: () => any; subscribe: (fn: () => void) => () => void };
+/** Notes likes and unlikes as TIDAL's list of liked tracks changes (see startTracking); returns the way to stop */
+export const watchLikes = (store: Store) => {
+  let seen: Set<string> | undefined;
+  let list: unknown;
+  const check = () => {
+    const fav = store.getState()?.favorites;
+    if (!fav?.isLoaded || !Array.isArray(fav.tracks) || fav.tracks === list) return;
+    list = fav.tracks;
+    const now = new Set<string>(fav.tracks.map(String));
+    // (the list as it first comes is what you had: nothing to note)
+    if (!seen) return void (seen = now);
+    const added = [...now].filter((id) => !seen!.has(id));
+    const removed = [...seen].filter((id) => !now.has(id));
+    seen = now;
+    if (!added.length && !removed.length) return;
+    const yours = added.length + removed.length <= 25;
+    const at = Date.now();
+    for (const id of added) {
+      state.likes[id] = at;
+      delete state.unlikes[id];
+      if (yours && state.recommended[id]) {
+        learnFromOutcome(id, 1, 2.5);
+        writeLog(`Feedback on pick ${id}: liked`);
+      }
+    }
+    for (const id of removed) state.unlikes[id] = at;
+    if (yours) writeLog(`Likes: ${added.length ? `+${added.join(", +")}` : ""}${added.length && removed.length ? " " : ""}${removed.length ? `-${removed.join(", -")}` : ""}`);
+    markDirty("state");
+  };
+  check();
+  return store.subscribe(check);
+};
+
 export const startTracking = (unloads: Set<LunaUnload>) => {
   const { MediaItem, PlayState, redux } = lib();
 
@@ -131,25 +166,12 @@ export const startTracking = (unloads: Set<LunaUnload>) => {
   const timer = setInterval(poll, POLL_MS);
   unloads.add(() => clearInterval(timer));
 
-  // Hearts. The action is a toggle, so the direction comes from what we know is already liked
-  redux.intercept("content/TOGGLE_FAVORITE_ITEMS" as any, unloads, (payload: any) => {
-    for (const { itemId, itemType } of payload?.items ?? []) {
-      if (itemType !== "track") continue;
-      const id = String(itemId);
-      const wasLiked = id in state.likes && !(id in state.unlikes && state.unlikes[id] > state.likes[id]);
-      if (wasLiked && !payload.forceFavorite) {
-        state.unlikes[id] = Date.now();
-      } else {
-        state.likes[id] = Date.now();
-        delete state.unlikes[id];
-        if (state.recommended[id]) {
-          learnFromOutcome(id, 1, 2.5);
-          writeLog(`Feedback on pick ${id}: liked`);
-        }
-      }
-      markDirty("state");
-    }
-  });
+  // Hearts: TIDAL's own list of your liked tracks, watched for what comes and goes. (Watching the heart action
+  // itself missed some: Luna only sees the actions TIDAL's code builds after Luna has hooked into it, and a like
+  // can also come from a context menu, another device, or another plugin.) A whole batch at once is TIDAL
+  // reloading the list, not you: those are noted, but don't train the ranker.
+  stopWatchingLikes = watchLikes(redux.store);
+  unloads.add(() => stopWatchingLikes?.());
 
   // Closing TIDAL or reloading the plugin isn't a skip: drop the song in progress instead of recording it
   unloads.add(() => (current = null));

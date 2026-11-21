@@ -63,6 +63,20 @@ const syncLibrary = async () => {
   }
   // Hearts made since the last sync but not yet visible in the API
   for (const [id, at] of Object.entries(state.likes)) if (!(id in likes) && at > (state.librarySyncAt ?? 0)) likes[id] = at;
+  // ...and the ones TIDAL's API leaves out: it counts every liked track but only hands over the ones that can be
+  // played in your country (about one in ten of a big library). TIDAL's app has all of them: they are known to
+  // you (never "discovered"), with no weight as taste (nothing is known about them but the id)
+  let unplayable = 0;
+  try {
+    for (const raw of (window.luna.lib!.redux.store.getState() as any).favorites?.tracks ?? []) {
+      const id = String(raw);
+      if (id in likes) continue;
+      likes[id] = 1;
+      // (liked, as TIDAL has it now: an older unlike of it is out of date)
+      delete state.unlikes[id];
+      unplayable++;
+    }
+  } catch {}
   state.likes = likes;
   state.favArtists = (await api.favoriteArtistIds(2000).catch(() => null)) ?? state.favArtists;
 
@@ -123,7 +137,7 @@ const syncLibrary = async () => {
   state.librarySyncAt = now;
   markDirty("state");
   log(
-    `Library: ${favs.length} liked, ${state.favArtists.length} artists, ${lists.length} playlists (${ownCount} yours) with ${Object.keys(own).length + Object.keys(followed).length} tracks, ${keys.size} distinct songs by ${Object.keys(libraryArtists).length} artists, ${recent?.tracks.length ?? 0} recently played, ${state.events.length} tracked listens`,
+    `Library: ${favs.length} liked${unplayable ? ` (+${unplayable} not playable in your country)` : ""}, ${state.favArtists.length} artists, ${lists.length} playlists (${ownCount} yours) with ${Object.keys(own).length + Object.keys(followed).length} tracks, ${keys.size} distinct songs by ${Object.keys(libraryArtists).length} artists, ${recent?.tracks.length ?? 0} recently played, ${state.events.length} tracked listens`,
   );
 };
 
