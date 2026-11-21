@@ -42,6 +42,7 @@ const TILT_MIN_REF = Math.sin((4 * Math.PI) / 180);
 const AUTO_FPS = 30;
 const AUTO_FADE_MS = 700; // how long the sway takes to give way to the mouse, and to come back
 const AUTO_CHECK_MS = 500; // how often to look for a cover to sway when none is
+const AUTO_PLAY_FADE_MS = 2500; // how long the sway takes to come to rest on pause, and to get going again on play
 
 // ------------------ STYLES ------------------
 const style = document.createElement("style");
@@ -90,10 +91,22 @@ let lastDraw = 0;
 // How much of the auto tilt's sway is in the picture: 1 with the mouse away, 0 with it on the cover
 let autoWeight = 0;
 const autoOn = () => settings.autoTilt && settings.autoTiltAmount > 0;
+// The sway goes with the music: on pause it slows and settles flat, on play it picks up from where it stopped.
+// `swayPlay` is how much it's going (0 at rest, 1 in full), `swayClock` the sway's own time, in ms.
+const isPlaying = () => !!window.luna.lib?.PlayState.playing;
+let swayPlay = isPlaying() ? 1 : 0;
+let swayClock = 0;
+const advanceSway = (dt: number) => {
+  const goal = isPlaying() ? 1 : 0;
+  swayPlay += Math.sign(goal - swayPlay) * Math.min(Math.abs(goal - swayPlay), dt / AUTO_PLAY_FADE_MS);
+  const k = swayPlay * swayPlay * (3 - 2 * swayPlay); // smoothstep
+  swayClock += dt * k;
+  return k;
+};
 // Two slow waves that never quite repeat, so it doesn't look like a loop
-const sway = (now: number) => {
-  const t = now / 1000;
-  const a = settings.autoTiltAmount / 100;
+const sway = (clock: number, k: number) => {
+  const t = clock / 1000;
+  const a = (settings.autoTiltAmount / 100) * k;
   return { x: a * Math.sin((t * 2 * Math.PI) / 7), y: a * 0.85 * Math.sin((t * 2 * Math.PI) / 10.5 + 1.3) };
 };
 
@@ -419,7 +432,8 @@ const frame = (now: number) => {
   const autoGoal = active.leaving && autoOn() ? 1 : 0;
   autoWeight += Math.sign(autoGoal - autoWeight) * Math.min(Math.abs(autoGoal - autoWeight), dtAuto / AUTO_FADE_MS);
   const aw = autoWeight * autoWeight * (3 - 2 * autoWeight); // smoothstep
-  const s = aw > 0 ? sway(now) : null;
+  const play = advanceSway(dtAuto);
+  const s = aw > 0 ? sway(swayClock, play) : null;
   if (s) n = { x: n.x + s.x * aw, y: n.y + s.y * aw };
   // The whole cover tilts with it (the sway is where the mouse would be)
   if (active.tiltEl?.isConnected) writeSwayTilt(active.tiltEl, s && { x: s.x * aw, y: s.y * aw });
@@ -451,6 +465,11 @@ const frame = (now: number) => {
       trace.err.withContext("draw")(err);
       return teardown();
     }
+  }
+  // Swaying, paused, and settled: no more frames until it plays again or something changes (see autoTimer)
+  if (active.leaving && autoOn() && autoWeight >= 1 && swayPlay === 0 && !isPlaying()) {
+    lastFrame = 0;
+    return;
   }
   scheduleFrame();
 };
@@ -594,7 +613,11 @@ const checkAutoTilt = () => {
   if (playingCover && generatedFor !== playingCover.id) generate(playingCover, trackAbort.signal, "auto tilt");
   activate(img, false);
 };
-const autoTimer = setInterval(checkAutoTilt, AUTO_CHECK_MS);
+const autoTimer = setInterval(() => {
+  checkAutoTilt();
+  // A cover at rest on pause: start again on play, and keep its place if the page has moved meanwhile
+  if (active?.ready && !rafId && !document.hidden) scheduleFrame();
+}, AUTO_CHECK_MS);
 unloads.add(() => clearInterval(autoTimer));
 
 window.addEventListener("pointermove", onPointerMove, { passive: true });
