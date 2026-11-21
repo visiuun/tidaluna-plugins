@@ -367,6 +367,61 @@ const restoreTilt = () => {
   tiltOwn = { el: null, tidal: "", written: "", sway: null };
 };
 
+// TIDAL's light (its glare: a soft white spot whose centre and strength follow the mouse) goes with the sway
+// too, where TIDAL would put it for a mouse that tilts the cover as far, and the same way round TIDAL's writes.
+const TIDAL_TILT_PER_MOUSE = 24; // deg of TIDAL's tilt from the cover's centre to its edge (maxTilt 12 × 2)
+type GlareStyle = { background: string; opacity: string };
+type GlareSway = { x: number; y: number; opacity: number; weight: number };
+let glareOwn: { el: HTMLElement | null; tidal: GlareStyle; written: GlareStyle; sway: GlareSway | null } = { el: null, tidal: { background: "", opacity: "" }, written: { background: "", opacity: "" }, sway: null };
+const glareNow = (el: HTMLElement): GlareStyle => ({ background: el.style.background, opacity: el.style.opacity });
+const sameGlare = (a: GlareStyle, b: GlareStyle) => a.background === b.background && a.opacity === b.opacity;
+const glareWatch = new MutationObserver(() => {
+  const { el } = glareOwn;
+  if (el && !sameGlare(glareNow(el), glareOwn.written)) composeGlare(el);
+});
+unloads.add(() => glareWatch.disconnect());
+const adoptGlare = (el: HTMLElement) => {
+  if (glareOwn.el !== el) {
+    restoreGlare();
+    glareOwn = { el, tidal: glareNow(el), written: { background: "", opacity: "" }, sway: null };
+    glareWatch.observe(el, { attributes: true, attributeFilter: ["style"] });
+  } else if (!sameGlare(glareNow(el), glareOwn.written)) glareOwn.tidal = glareNow(el);
+};
+const composeGlare = (el: HTMLElement) => {
+  adoptGlare(el);
+  const { tidal, sway } = glareOwn;
+  let next = tidal;
+  if (sway && sway.weight > 0) {
+    const at = GLARE_AT.exec(tidal.background);
+    const tidalOpacity = parseFloat(tidal.opacity);
+    const mix = (a: number, b: number) => a + (b - a) * sway.weight;
+    const x = mix(at ? parseFloat(at[1]) : 50, sway.x);
+    const y = mix(at ? parseFloat(at[2]) : 50, sway.y);
+    const background = tidal.background.replace(/circle( at [^,]+)?,/, `circle at ${x.toFixed(2)}% ${y.toFixed(2)}%,`);
+    next = { background, opacity: mix(Number.isNaN(tidalOpacity) ? 0 : tidalOpacity, sway.opacity).toFixed(3) };
+  }
+  if (el.style.background !== next.background) el.style.background = next.background;
+  if (el.style.opacity !== next.opacity) el.style.opacity = next.opacity;
+  glareOwn.written = glareNow(el);
+};
+/** TIDAL's light as the mouse would leave it for a sway tilt `m` (as given to writeSwayTilt), in by `weight` */
+const writeSwayGlare = (el: HTMLElement, m: { x: number; y: number } | null, opacity: number, weight: number) => {
+  // The mouse that would tilt the cover this far: TIDAL puts the light opposite it
+  adoptGlare(el);
+  const mouse = m ? { x: (m.x * SWAY_MAX_TILT) / TIDAL_TILT_PER_MOUSE, y: (m.y * SWAY_MAX_TILT) / TIDAL_TILT_PER_MOUSE } : { x: 0, y: 0 };
+  glareOwn.sway = m ? { x: (0.5 - mouse.x) * 100, y: (0.5 - mouse.y) * 100, opacity, weight } : null;
+  composeGlare(el);
+};
+const restoreGlare = () => {
+  const { el, tidal, written } = glareOwn;
+  glareWatch.disconnect();
+  if (el && sameGlare(glareNow(el), written) && !sameGlare(written, tidal)) {
+    el.style.background = tidal.background;
+    el.style.opacity = tidal.opacity;
+  }
+  glareOwn = { el: null, tidal: { background: "", opacity: "" }, written: { background: "", opacity: "" }, sway: null };
+};
+
 const readTilt = (el: HTMLElement) => {
   const tf = tidalTransform(el);
   if (!tf || tf === "none") return { x: 0, y: 0 };
@@ -454,6 +509,8 @@ const frame = (now: number) => {
   if (s) n = { x: n.x + s.x * aw, y: n.y + s.y * aw };
   // The whole cover tilts with it (the sway is where the mouse would be)
   if (active.tiltEl?.isConnected) writeSwayTilt(active.tiltEl, s && { x: s.x * aw, y: s.y * aw });
+  // ...and TIDAL's light with it, as bright as under the mouse while it sways in full, out as it comes to rest
+  if (active.glareEl?.isConnected) writeSwayGlare(active.glareEl, s && { x: s.x * aw, y: s.y * aw }, play, aw);
 
   const neutral = Math.abs(n.x) < 0.003 && Math.abs(n.y) < 0.003;
   if (active.leaving && autoGoal === 0 && autoWeight === 0 && (neutral || now - active.leaveStart > LEAVE_TIMEOUT_MS)) return teardown();
@@ -464,7 +521,7 @@ const frame = (now: number) => {
   // Skip redundant draws while the cover is resting
   if (drawn.dirty || Math.abs(n.x - drawn.x) > 1e-4 || Math.abs(n.y - drawn.y) > 1e-4 || w !== drawn.w || h !== drawn.h) {
     try {
-      const light = lightPosition(active, { x: n.x * flip, y: n.y * flip }, aw);
+      const light = lightPosition(active, { x: n.x * flip, y: n.y * flip });
       renderer.draw({
         nx: n.x * flip,
         ny: n.y * flip,
@@ -493,17 +550,15 @@ const frame = (now: number) => {
 
 // The lighting uses TIDAL's own light (its glare's centre), so both move together. Without one, a
 // light on the side opposite the tilt that swings in from outside the cover as the tilt grows.
-// While the cover sways on its own (weight `auto`) TIDAL's light is out, so the light is our own.
-const lightPosition = (state: Active, n: { x: number; y: number }, auto = 0) => {
+// While the cover sways on its own TIDAL's light sways with it (see writeSwayGlare), so it's still the one used.
+const lightPosition = (state: Active, n: { x: number; y: number }) => {
   const len = Math.hypot(n.x, n.y) || 1;
   const reach = 1.1 - 0.8 * Math.min(1, len);
   const own = { x: 0.5 - (n.x / len) * reach, y: 0.5 - (n.y / len) * reach, glare: 0 };
   const at = state.glareEl?.isConnected ? GLARE_AT.exec(state.glareEl.style.background) : null;
-  if (!at || auto >= 1) return own;
+  if (!at) return own;
   const opacity = parseFloat(state.glareEl!.style.opacity);
-  const tidal = { x: parseFloat(at[1]) / 100, y: parseFloat(at[2]) / 100, glare: Number.isNaN(opacity) ? 1 : opacity };
-  const mix = (a: number, b: number) => a + (b - a) * auto;
-  return { x: mix(tidal.x, own.x), y: mix(tidal.y, own.y), glare: mix(tidal.glare, own.glare) };
+  return { x: parseFloat(at[1]) / 100, y: parseFloat(at[2]) / 100, glare: Number.isNaN(opacity) ? 1 : opacity };
 };
 
 // ------------------ LIFECYCLE ------------------
@@ -512,6 +567,7 @@ let failed = { id: "", at: 0 };
 
 const teardown = () => {
   restoreTilt();
+  restoreGlare();
   if (!active) return;
   clearTimeout(active.loaderTimer);
   active = null;
