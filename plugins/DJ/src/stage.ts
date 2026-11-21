@@ -1887,6 +1887,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
 
   // The volume: TIDAL's own (the DJ's music follows it). Dragged, clicked, or the mouse wheel over it
   let volDrag: number | undefined;
+  let wheelLeft = 0;
   let volHeld: { percent: number; until: number } | undefined;
   const setVol = (p: number) => {
     const percent = Math.round(clamp(p, 0, 100));
@@ -1922,9 +1923,16 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     (e) => {
       e.preventDefault();
       const now = volHeld && Date.now() < volHeld.until ? volHeld.percent : src.player.volume().percent;
-      // (a notch of the wheel is 5 %; a touchpad's small steps add up to the same)
-      const step = Math.abs(e.deltaY) >= 50 ? 5 * Math.sign(-e.deltaY) : -e.deltaY / 10;
-      setVol(now + step);
+      // (a notch of the wheel is 5 %, 1 % with Shift held; a touchpad's small steps add up to the same. With Shift
+      // the browser may turn the wheel sideways, so whichever way it moved counts)
+      const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      const notch = e.shiftKey ? 1 : 5;
+      // (small steps are added up until they make a whole percent: one by one they would be rounded away)
+      wheelLeft += Math.abs(delta) >= 50 ? notch * Math.sign(-delta) : (-delta / 50) * notch;
+      const whole = Math.trunc(wheelLeft);
+      if (!whole) return;
+      wheelLeft -= whole;
+      setVol(now + whole);
     },
     { passive: false },
   );
