@@ -326,28 +326,45 @@ const tiltMax = { x: TILT_MIN_REF, y: TILT_MIN_REF };
 // same: its own rotation goes after TIDAL's in that transform, as if the mouse were where the sway is. What
 // TIDAL last wrote is kept apart (anything there that isn't ours is TIDAL's), so the parallax still reads
 // TIDAL's tilt alone, and TIDAL's own value goes back when the sway is gone.
-const TIDAL_MAX_TILT = 12; // deg, TIDAL's maxTilt
 const TIDAL_PERSPECTIVE = "perspective(1000px)";
-let tiltOwn: { el: HTMLElement | null; tidal: string; written: string } = { el: null, tidal: "", written: "" };
+// The sway tilts the cover less than the mouse can: at a full sway, this many degrees (TIDAL's mouse tilt goes to 12)
+const SWAY_MAX_TILT = 5;
+let tiltOwn: { el: HTMLElement | null; tidal: string; written: string; sway: { x: number; y: number } | null } = { el: null, tidal: "", written: "", sway: null };
+// TIDAL writes its tilt on every frame of its spring (as the mouse comes on or goes off the cover), while the sway
+// is drawn at 30 frames a second: each of TIDAL's writes gets the sway put back on at once, before the frame is
+// painted, or the cover jumps between the two from frame to frame (a shake)
+const tiltWatch = new MutationObserver(() => {
+  const { el } = tiltOwn;
+  if (el && el.style.transform !== tiltOwn.written) composeTilt(el);
+});
+unloads.add(() => tiltWatch.disconnect());
 const tidalTransform = (el: HTMLElement) => {
   if (tiltOwn.el !== el) {
     restoreTilt();
-    tiltOwn = { el, tidal: el.style.transform, written: "" };
+    tiltOwn = { el, tidal: el.style.transform, written: "", sway: null };
+    tiltWatch.observe(el, { attributes: true, attributeFilter: ["style"] });
   } else if (el.style.transform !== tiltOwn.written) tiltOwn.tidal = el.style.transform;
   return tiltOwn.tidal;
 };
-/** Tilt the cover as the mouse would at `m` ([-1, 1] from the centre), on top of TIDAL's tilt; null for TIDAL's alone */
-const writeSwayTilt = (el: HTMLElement, m: { x: number; y: number } | null) => {
+const composeTilt = (el: HTMLElement) => {
   const tidal = tidalTransform(el);
+  const m = tiltOwn.sway;
   const base = !tidal || tidal === "none" ? TIDAL_PERSPECTIVE : tidal.includes("perspective(") ? tidal : `${TIDAL_PERSPECTIVE} ${tidal}`;
-  const next = m ? `${base} rotateX(${(-m.y * TIDAL_MAX_TILT).toFixed(3)}deg) rotateY(${(m.x * TIDAL_MAX_TILT).toFixed(3)}deg)` : tidal;
+  const next = m ? `${base} rotateX(${(-m.y * SWAY_MAX_TILT).toFixed(3)}deg) rotateY(${(m.x * SWAY_MAX_TILT).toFixed(3)}deg)` : tidal;
   if (el.style.transform !== next) el.style.transform = next;
   tiltOwn.written = el.style.transform;
 };
+/** Tilt the cover as the mouse would at `m` ([-1, 1] from the centre), on top of TIDAL's tilt; null for TIDAL's alone */
+const writeSwayTilt = (el: HTMLElement, m: { x: number; y: number } | null) => {
+  tidalTransform(el);
+  tiltOwn.sway = m;
+  composeTilt(el);
+};
 const restoreTilt = () => {
   const { el, tidal, written } = tiltOwn;
+  tiltWatch.disconnect();
   if (el && el.style.transform === written && written !== tidal) el.style.transform = tidal;
-  tiltOwn = { el: null, tidal: "", written: "" };
+  tiltOwn = { el: null, tidal: "", written: "", sway: null };
 };
 
 const readTilt = (el: HTMLElement) => {
