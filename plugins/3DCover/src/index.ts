@@ -3,6 +3,7 @@ import type { MediaItem } from "@luna/lib";
 import { type DepthMap, closeDepthCache, disposeDepthWorker, getCachedDepth, getDepth, isAbort, loadCoverBitmap, setInferenceLogger, setInfoLogger } from "./depth";
 import { backgroundFor, clearBackgrounds, reachFor } from "./background";
 import { clearSurfaces, surfaceFor } from "./lighting";
+import { pictureBox } from "./box";
 import { CoverLoader, LOADER_CSS } from "./loader";
 import { ParallaxRenderer, overflowFor } from "./renderer";
 import { settings } from "./Settings";
@@ -333,20 +334,19 @@ const syncPlacement = (img: HTMLImageElement) => {
   const c = renderer.canvas;
   if (c.previousElementSibling !== img) img.insertAdjacentElement("afterend", c);
   const cs = getComputedStyle(img);
-  const w = img.offsetWidth;
-  const h = img.offsetHeight;
+  // On the picture, which can be smaller than the <img> (see box.ts)
+  const b = pictureBox(img);
   // The canvas is larger than the cover so foreground can cross its border; the shader draws the
   // cover's rounded frame, since CSS rounding would apply to the larger canvas
-  const r = parseFloat(cs.borderTopLeftRadius) || 0;
   const overflow = settings.breakout ? overflowFor(settings.intensity, settings.focal / 100) : 0;
-  const pad = renderer.resize(w, h, overflow, cs.borderTopLeftRadius.includes("%") ? (r / 100) * w : r);
-  c.style.left = `${img.offsetLeft - pad.x}px`;
-  c.style.top = `${img.offsetTop - pad.y}px`;
-  c.style.width = `${w + 2 * pad.x}px`;
-  c.style.height = `${h + 2 * pad.y}px`;
+  const pad = renderer.resize(b.w, b.h, overflow, b.radius);
+  c.style.left = `${img.offsetLeft + b.x - pad.x}px`;
+  c.style.top = `${img.offsetTop + b.y - pad.y}px`;
+  c.style.width = `${b.w + 2 * pad.x}px`;
+  c.style.height = `${b.h + 2 * pad.y}px`;
   c.style.transform = cs.transform === "none" ? "" : cs.transform;
   const [originX, originY] = cs.transformOrigin.split(" ").map(parseFloat);
-  c.style.transformOrigin = `${originX + pad.x}px ${originY + pad.y}px`;
+  c.style.transformOrigin = `${originX - b.x + pad.x}px ${originY - b.y + pad.y}px`;
   c.style.zIndex = cs.zIndex === "auto" ? "" : cs.zIndex;
 };
 

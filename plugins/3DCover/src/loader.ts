@@ -1,3 +1,5 @@
+import { pictureBox } from "./box";
+
 // While a cover's depth map is being made: a white line that runs round the cover's edge, just outside it,
 // over a faint outline of the whole edge. It sits beside the <img>, in the same tilted box, so it tilts with it.
 
@@ -50,21 +52,19 @@ export class CoverLoader {
   show(img: HTMLImageElement) {
     clearTimeout(this.hideTimer);
     if (this.el.previousElementSibling !== img) img.insertAdjacentElement("afterend", this.el);
-    const w = img.offsetWidth;
-    const h = img.offsetHeight;
+    // Round the picture, which can be smaller than the <img> (see box.ts)
+    const { x, y, w, h, radius } = pictureBox(img);
     const cs = getComputedStyle(img);
-    const r = parseFloat(cs.borderTopLeftRadius) || 0;
-    const radius = cs.borderTopLeftRadius.includes("%") ? (r / 100) * w : r;
     const pad = OUTSET + STROKE;
     Object.assign(this.el.style, {
-      left: `${img.offsetLeft - pad}px`,
-      top: `${img.offsetTop - pad}px`,
+      left: `${img.offsetLeft + x - pad}px`,
+      top: `${img.offsetTop + y - pad}px`,
       width: `${w + 2 * pad}px`,
       height: `${h + 2 * pad}px`,
       transform: cs.transform === "none" ? "" : cs.transform,
     });
     const [originX, originY] = cs.transformOrigin.split(" ").map(parseFloat);
-    this.el.style.transformOrigin = `${originX + pad}px ${originY + pad}px`;
+    this.el.style.transformOrigin = `${originX - x + pad}px ${originY - y + pad}px`;
     this.el.setAttribute("viewBox", `0 0 ${w + 2 * pad} ${h + 2 * pad}`);
     for (const rect of this.rects) {
       rect.setAttribute("x", `${STROKE}`);
