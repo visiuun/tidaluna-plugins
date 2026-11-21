@@ -124,7 +124,7 @@ let disabledUntil = 0;
 let lastFailure: string | undefined;
 
 /** The line as one engine reads it: 16-bit mono samples (base64) and their rate */
-const read = async (engine: Engine, job: Job): Promise<{ pcm: string; rate: number }> => {
+const read = async (engine: Engine, job: Job): Promise<{ pcm: string; rate: number; device?: string }> => {
   if (engine === "cloud") return cloudSpeak(settings.cloudVoiceKey.trim(), job.text, job.p.cloud, STYLE[job.p.tone]);
   if (engine === "local") return kokoroSpeak(job.text, job.p.kokoro, job.p.speed);
   return { pcm: await mp3ToPcm((await edgeSpeak(job.text, job.p.edge, job.p.speed, job.p.edgePitch ?? 0)).mp3), rate: RATE };
@@ -154,7 +154,7 @@ const generate = async (job: Job): Promise<Clip | null> => {
         edgeFailure = undefined;
         edgeFails = 0;
       }
-      log(`Voice: ${buffer.duration.toFixed(1)}s of speech in ${((Date.now() - t0) / 1000).toFixed(1)}s (${ENGINE_NAME[engine]}): "${job.text}"`);
+      log(`Voice: ${buffer.duration.toFixed(1)}s of speech in ${((Date.now() - t0) / 1000).toFixed(1)}s (${ENGINE_NAME[engine]}${r.device === "webgpu" ? ", on the graphics card" : r.device === "wasm" ? ", on the processor" : ""}): "${job.text}"`);
       return buffer;
     } catch (err) {
       const why = String((err as Error)?.message ?? err);

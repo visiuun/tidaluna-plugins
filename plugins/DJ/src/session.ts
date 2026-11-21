@@ -1912,7 +1912,7 @@ class Session {
         }, 700);
         try {
           const started = await engine;
-          log(`Vocal separator ready (${started.threads} threads, ${started.ms} ms)`);
+          log(`Vocal separator ready (${started.backend === "webgpu" ? "on the graphics card" : `${started.threads} processor threads`}, ${started.ms} ms)`);
         } catch (err) {
           warn("The vocal separator couldn't be started", err);
           return void sorry("Couldn't get the vocal separator going, so no mashup for now");

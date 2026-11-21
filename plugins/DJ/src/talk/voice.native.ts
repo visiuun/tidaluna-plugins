@@ -172,7 +172,27 @@ const bootstrap = `(async () => {
   window.__speak = async (text, voice, speed) => {
     if (!tts) {
       window.__voiceState = "loading";
-      tts = await mod.KokoroTTS.from_pretrained(${JSON.stringify(MODEL)}, { dtype: "fp32", device: "wasm" });
+      // On the graphics card where there is one (TIDAL started with --enable-unsafe-webgpu): about 9 times faster
+      // than the processor (tried in TIDAL's own Electron: 0.9 s against 8.4 s for a 6 s line, the same sound)
+      let gpu = false;
+      try {
+        gpu = !!(await navigator.gpu?.requestAdapter());
+      } catch {}
+      if (gpu) {
+        try {
+          tts = await mod.KokoroTTS.from_pretrained(${JSON.stringify(MODEL)}, { dtype: "fp32", device: "webgpu" });
+          // (its first line sets the card up, some seconds: a word said to nobody, so a real line isn't kept waiting)
+          await tts.generate("Hello there.", { voice, speed: 1 });
+          window.__voiceDevice = "webgpu";
+        } catch (err) {
+          console.warn("DJ voice: the graphics card didn't work out, using the processor", err);
+          tts = undefined;
+        }
+      }
+      if (!tts) {
+        tts = await mod.KokoroTTS.from_pretrained(${JSON.stringify(MODEL)}, { dtype: "fp32", device: "wasm" });
+        window.__voiceDevice = "wasm";
+      }
       window.__voiceState = "ready";
     }
     const sentences = (text.match(/[^.!?]+[.!?]+["')]*|[^.!?]+$/g) || [text]).map((s) => s.trim()).filter(Boolean);
@@ -200,7 +220,7 @@ const bootstrap = `(async () => {
     const bytes = new Uint8Array(pcm.buffer);
     let bin = "";
     for (let i = 0; i < bytes.length; i += 32768) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
-    return { rate, pcm: btoa(bin) };
+    return { rate, pcm: btoa(bin), device: window.__voiceDevice };
   };
   return true;
 })()`;
@@ -281,7 +301,7 @@ const withTimeout = <T>(promise: Promise<T>, ms: number, what: string) =>
 
 // ------------------ API (called from the page) ------------------
 /** Speech for `text` as 16-bit mono PCM, base64 */
-export const kokoroSpeak = async (text: string, voice: string, speed: number): Promise<{ rate: number; pcm: string }> => {
+export const kokoroSpeak = async (text: string, voice: string, speed: number): Promise<{ rate: number; pcm: string; device?: string }> => {
   if (!getElectron()) throw new Error("The local voice isn't available in this version of TidaLuna");
   clearTimeout(idleTimer);
   running++;
@@ -294,7 +314,7 @@ export const kokoroSpeak = async (text: string, voice: string, speed: number): P
     const result = await withTimeout(Promise.race([current.view.webContents.executeJavaScript(call), current.died]), JOB_TIMEOUT_MS, "Speaking");
     lastError = undefined;
     everReady = true;
-    return result as { rate: number; pcm: string };
+    return result as { rate: number; pcm: string; device?: string };
   } catch (err: any) {
     lastError = String(err?.message ?? err);
     if (host === current) closeHost();

@@ -8,19 +8,47 @@
   let ort;
   let session;
   let loading;
+  let backend = "wasm";
+  const hasGpu = async () => {
+    try {
+      return !!(await navigator.gpu?.requestAdapter());
+    } catch {
+      return false;
+    }
+  };
   const ready = () =>
     (loading ??= (async () => {
       const t0 = performance.now();
       state.stage = "loading";
-      ort = await import(location.origin + "/lib/ort.wasm.min.mjs");
-      ort.env.wasm.wasmPaths = location.origin + "/lib/";
-      // Most of the processor, not all of it: the music is playing meanwhile
-      ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 2)) : 1;
       const res = await fetch("/lib/model.onnx");
       if (!res.ok) throw new Error((await res.text().catch(() => "")) || "Couldn't get the separation model (HTTP " + res.status + ")");
-      session = await ort.InferenceSession.create(new Uint8Array(await res.arrayBuffer()), { executionProviders: ["wasm"], graphOptimizationLevel: "all" });
+      const model = new Uint8Array(await res.arrayBuffer());
+      // On the graphics card where there is one (about 30 times faster, and the processor is left to the
+      // music), else on most of the processor, not all of it: the music is playing meanwhile
+      if (await hasGpu()) {
+        try {
+          ort = await import(location.origin + "/lib/ort.webgpu.min.mjs");
+          ort.env.wasm.wasmPaths = location.origin + "/lib/";
+          ort.env.wasm.numThreads = 1;
+          session = await ort.InferenceSession.create(model, { executionProviders: ["webgpu"], graphOptimizationLevel: "all" });
+          // (its first run sets the card up, some seconds: done now, not in the middle of a mashup)
+          const n = Stems.SHAPE.reduce((a, b) => a * b, 1);
+          await session.run({ [session.inputNames[0]]: new ort.Tensor("float32", new Float32Array(n), Stems.SHAPE) });
+          backend = "webgpu";
+        } catch (err) {
+          console.warn("Vocal separator: the graphics card didn't work out, using the processor", err);
+          session = undefined;
+        }
+      }
+      if (!session) {
+        ort = await import(location.origin + "/lib/ort.wasm.min.mjs");
+        ort.env.wasm.wasmPaths = location.origin + "/lib/";
+        ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 2)) : 1;
+        session = await ort.InferenceSession.create(model, { executionProviders: ["wasm"], graphOptimizationLevel: "all" });
+        backend = "wasm";
+      }
       state.stage = "ready";
-      return { threads: ort.env.wasm.numThreads, ms: Math.round(performance.now() - t0) };
+      return { threads: ort.env.wasm.numThreads, ms: Math.round(performance.now() - t0), backend };
     })().catch((err) => {
       loading = undefined;
       state.stage = "idle";
@@ -61,7 +89,7 @@
       } finally {
         state.stage = "ready";
       }
-      return { ms: Math.round(performance.now() - t0), seconds: n / 44100, threads: ort.env.wasm.numThreads };
+      return { ms: Math.round(performance.now() - t0), seconds: n / 44100, threads: ort.env.wasm.numThreads, backend };
     });
     queue = mine.catch(() => {});
     return mine;

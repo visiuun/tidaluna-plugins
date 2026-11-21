@@ -39,6 +39,11 @@ const FILES: Record<string, { url: string; sha256: string; type: string }> = {
   "ort.wasm.min.mjs": { url: `${ORT}ort.wasm.min.mjs`, sha256: "f53ed4792e758e7232f779d479eb8931b97ff3ab2e3b9a33ee00d1251ffdaad6", type: "text/javascript" },
   "ort-wasm-simd-threaded.mjs": { url: `${ORT}ort-wasm-simd-threaded.mjs`, sha256: "745eb7c0ce6f18a6aa521971b2877babc7ffb27eecb58ab3bc6e5ef4692672e8", type: "text/javascript" },
   "ort-wasm-simd-threaded.wasm": { url: `${ORT}ort-wasm-simd-threaded.wasm`, sha256: "207d02be4591c156b0a98f024f3d58005b5b04c92274d759fb390338c63559ea", type: "application/wasm" },
+  // The same runtime with the graphics card (WebGPU): about 30 times faster at this network. Only fetched
+  // where there is a graphics card to use (TIDAL started with --enable-unsafe-webgpu)
+  "ort.webgpu.min.mjs": { url: `${ORT}ort.webgpu.min.mjs`, sha256: "e1a0817ac08d5a6ade7f229754c2aecd444bff0bd22c259ca148a04b9f9e9f65", type: "text/javascript" },
+  "ort-wasm-simd-threaded.jsep.mjs": { url: `${ORT}ort-wasm-simd-threaded.jsep.mjs`, sha256: "2fb14505d39926e4c544de8c57fe59a2f2bc74caba6f71890be9afecc5046758", type: "text/javascript" },
+  "ort-wasm-simd-threaded.jsep.wasm": { url: `${ORT}ort-wasm-simd-threaded.jsep.wasm`, sha256: "185b0861a6cd6cbdfb057289338090436483cc59e10a7bc83bd167b15531a51b", type: "application/wasm" },
   // UVR5's "MDX-Net 1 (9.7)" vocal model, from the project's own model repository
   "model.onnx": {
     url: "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR_MDXNET_1_9703.onnx",
@@ -288,7 +293,7 @@ const inPage = async <T>(pageSource: string, code: string, what: string): Promis
 
 // ------------------ API (called from TIDAL's page) ------------------
 /** Gets the separator ready: its files downloaded (once) and the network loaded */
-export const stemsReady = (pageSource: string) => inPage<{ threads: number; ms: number }>(pageSource, "window.__stems.ready()", "Loading the vocal separator");
+export const stemsReady = (pageSource: string) => inPage<{ threads: number; ms: number; backend?: string }>(pageSource, "window.__stems.ready()", "Loading the vocal separator");
 
 /** Takes the voice out of the sound left under `job` (see blobRoute); the voice is left under `${job}.v` */
 export const stemsSeparate = (pageSource: string, job: string) =>
