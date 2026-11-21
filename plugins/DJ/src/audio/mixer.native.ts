@@ -3,6 +3,7 @@
 // and decrypted here, on its way to the mixer; nothing is written to disk.
 import { createDecipheriv } from "crypto";
 import os from "os";
+import path from "path";
 import { blobRoute } from "./stems.native";
 import { stat } from "fs/promises";
 import { Agent as HttpsAgent } from "https";
@@ -187,6 +188,8 @@ const dropCarried = (gently = false) => {
   clearTimeout(c.timer);
   clearInterval(c.awake);
   unhush(true);
+  // (no DJ to play any more: TIDAL's player gets its exclusive mode back)
+  void playerShared(false);
   if (gently) return closeGently(c.view);
   try {
     detach(c.view);
@@ -542,6 +545,80 @@ export const mixerAdopt = async () => {
   host = created;
   followPage(created);
   return created.id;
+};
+
+// ------------------ TIDAL'S PLAYER IN SHARED MODE ------------------
+// In exclusive mode TIDAL's player keeps the output device to itself and pays no heed to its volume: the
+// mixer is then heard nowhere (or on another device, alongside TIDAL's own player at full volume). Asking
+// TIDAL's page to switch modes doesn't hold: the page, or a plugin that keeps settings applied, puts exclusive
+// mode straight back. So the switch is made where the page's commands reach the player: while the DJ plays,
+// a device chosen in exclusive mode is opened in shared mode instead. The page goes on showing exclusive
+// mode as on, and when the DJ stops the player gets the device the way the page last asked for it.
+// The hook stays on TIDAL's Player class for the life of the app (a plugin reload finds it by its mark);
+// what it does is decided by the state on the shelf, which every load shares.
+type ShareState = { on: boolean; wanted?: string; hooked?: boolean };
+const SHARE = Symbol.for("visiuun.dj.playerShare");
+const shareState = (): ShareState => {
+  const app = getElectron()?.app;
+  if (!app) return { on: false };
+  return (app[SHARE] ??= { on: false });
+};
+const MARK = Symbol.for("visiuun.dj.sendHook");
+const hookPlayer = (state: ShareState) => {
+  if (state.hooked) return true;
+  const app = getElectron()?.app;
+  if (!app) return false;
+  const file = path.join(path.dirname(String(app.getAppPath())), "original.asar", "app", "main", "playback", "player", "Player.js");
+  // (read through descriptors: Luna hands out its modules wrapped, and calling through the wrapper would ask
+  // you about TIDAL's own code; the descriptors give the real class)
+  const mod = runtimeRequire(file);
+  const cls = Object.getOwnPropertyDescriptor(mod, "default")?.value;
+  const proto = cls && Object.getOwnPropertyDescriptor(cls, "prototype")?.value;
+  const orig = proto && Object.getOwnPropertyDescriptor(proto, "send")?.value;
+  if (typeof orig !== "function") return false;
+  if (!orig[MARK]) {
+    const send = function (this: unknown, message: string) {
+      try {
+        const s = shareState();
+        const m = JSON.parse(String(message));
+        if (m?.command === "media.device.select") {
+          if (s.on && m.options?.mode === "exclusive") {
+            s.wanted = String(message);
+            message = JSON.stringify({ ...m, options: { ...m.options, mode: "shared" } });
+          } else s.wanted = undefined;
+        }
+      } catch {}
+      return orig.call(this, message);
+    };
+    (send as any)[MARK] = true;
+    Object.defineProperty(proto, "send", { value: send, writable: true, configurable: true });
+  }
+  state.hooked = true;
+  return true;
+};
+/**
+ * `on`: TIDAL's player is kept in shared mode (and `select`, the page's own choice of device, is made again,
+ * which opens it shared). Off: the device the page last chose in exclusive mode is opened exclusively again.
+ * Returns whether the player is held in shared mode.
+ */
+export const playerShared = async (on: boolean, select?: string) => {
+  try {
+    const s = shareState();
+    if (!hookPlayer(s)) return false;
+    if (on) {
+      s.on = true;
+      if (select) tellPlayer(JSON.parse(select));
+      return true;
+    }
+    if (!s.on) return false;
+    s.on = false;
+    const wanted = s.wanted;
+    s.wanted = undefined;
+    if (wanted) tellPlayer(JSON.parse(wanted));
+    return false;
+  } catch {
+    return false;
+  }
 };
 
 // ------------------ LUNA'S QUESTIONS ------------------

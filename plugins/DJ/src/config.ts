@@ -22,6 +22,8 @@ export type PluginSettings = {
   mixing: Mixing;
   setLength: number; // tracks per set, between two talk breaks
   discovery: number; // 0-100: how much of the music is new to you
+  /** How loud the DJ's voice is, percent of its usual level (the music follows TIDAL's volume) */
+  voiceVolume: number;
   quality: "LOSSLESS" | "HIGH";
   homeCard: boolean;
   captions: boolean;
@@ -50,6 +52,7 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("DJ
   mixing: "auto",
   setLength: 5,
   discovery: 30,
+  voiceVolume: 100,
   quality: "LOSSLESS",
   homeCard: true,
   captions: true,

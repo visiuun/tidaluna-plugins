@@ -23,6 +23,7 @@ export const mixerClose = gated(mixer.mixerClose);
 export const mixerCarry = gated(mixer.mixerCarry);
 export const mixerCarried = gated(mixer.mixerCarried);
 export const mixerAdopt = gated(mixer.mixerAdopt);
+export const playerShared = gated(mixer.playerShared);
 
 export const stemsReady = gated(stems.stemsReady);
 export const stemsSeparate = gated(stems.stemsSeparate);

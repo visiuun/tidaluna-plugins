@@ -460,8 +460,49 @@ class Session {
       seek: (t) => void this.run(() => this.onSeek(t)),
       playing: (p) => this.onPlaying(p),
       volume: (v, muted) => this.onVolume(v, muted),
-      device: () => {},
     });
+  }
+
+  // ------------------ OUTPUT DEVICE ------------------
+  /** The device the mixer was last set to play out of ("" the system's default), see syncOutput */
+  private outKey?: string;
+  private outBusy = false;
+  /** When the mixer's connection to the device is to be opened afresh (after TIDAL's player has let go of it) */
+  private reopenAt = 0;
+  private toldExclusive = false;
+  /** The voice's volume from the settings */
+  applyVoiceVolume() {
+    return this.mixer.setVoiceVolume(settings.voiceVolume ?? 100).catch(() => {});
+  }
+  /** Has TIDAL's player hold its device in shared mode while the DJ plays (see shareDevice in tidal.ts) */
+  private async shareDevice() {
+    if (!(await this.link.shareDevice())) return;
+    // (TIDAL's player had the device to itself until now: the mixer's connection to it is opened again once it has let go)
+    this.reopenAt = Date.now() + 1500;
+    if (this.toldExclusive) return;
+    this.toldExclusive = true;
+    notify("DJ: TIDAL plays in shared mode while the DJ is on, so the mix can be heard. Exclusive mode is back when the DJ stops");
+  }
+  /** Keeps the mixer on the device TIDAL plays out of */
+  private async syncOutput() {
+    if (this.outBusy || this.mixer.gone) return;
+    if (this.outKey === undefined) void this.applyVoiceVolume();
+    const key = this.link.output().name ?? "";
+    const reopen = this.reopenAt > 0 && Date.now() >= this.reopenAt;
+    if (key === this.outKey && !reopen) return;
+    this.outBusy = true;
+    try {
+      const r = await this.mixer.setOutput(key || undefined, reopen);
+      if (reopen) this.reopenAt = 0;
+      this.outKey = key;
+      if (r.changed) log(`Mixer playing out of ${r.sink}${reopen ? " (opened afresh)" : ""}`);
+    } catch (err) {
+      warn("Couldn't move the mixer to TIDAL's output device", err);
+      this.outKey = key;
+      this.reopenAt = 0;
+    } finally {
+      this.outBusy = false;
+    }
   }
 
   /**
@@ -491,7 +532,9 @@ class Session {
     if (this.follow) {
       // Nothing to pick and nothing to say: the mixer is opened and waits for TIDAL to play something
       setStatus({ phase: "playing", mode: "follow", busy: undefined, note: undefined, caption: undefined, segment: FOLLOW_SEGMENT.title });
+      await this.shareDevice();
       await this.mixer.open();
+      await this.syncOutput();
       const v = this.link.volumeState();
       await this.mixer.setVolume(v.percent, v.muted);
       await initBrain();
@@ -501,7 +544,9 @@ class Session {
       return;
     }
     setStatus({ phase: "starting", mode: "dj", busy: "Getting ready", note: undefined, caption: undefined, segment: undefined });
+    await this.shareDevice();
     await this.mixer.open();
+    await this.syncOutput();
     const vol = this.link.volumeState();
     await this.mixer.setVolume(vol.percent, vol.muted);
 
@@ -942,8 +987,17 @@ class Session {
       this.mashUntil = c.mashUntil;
       // TIDAL's own player back on the song (it is silent now): the full DJ gives it its queue again,
       // transitions only finds the song in the queue TIDAL has
-      if (!this.follow) await this.link.startQueue([cur.id, ...items.map((i) => i.track.id)]);
-      else {
+      if (!this.follow) {
+        // (TIDAL usually puts the song back on by itself: then only what comes after it is set, and the
+        // song isn't in its history twice)
+        if (this.link.currentId() === cur.id) {
+          await this.link.setUpcoming(items.map((i) => i.track.id));
+          this.link.play();
+        } else {
+          await this.link.startQueue([cur.id, ...items.map((i) => i.track.id)]);
+          setTimeout(() => this.syncQueue(), 1500);
+        }
+      } else {
         if (!this.link.moveTo(cur.id)) return false;
         this.link.play();
       }
@@ -980,6 +1034,7 @@ class Session {
     }
     const now = this.mixer.now;
     this.link.observe();
+    await this.syncOutput();
     if (status.talking && now > this.talkUntil + 0.2) setStatus({ talking: false, caption: undefined });
 
     // Decks that have finished
@@ -1293,7 +1348,11 @@ class Session {
     if (this.opening) {
       this.opening = false;
       const ids = [p.item.track.id, ...this.items.map((x) => x.track.id)];
-      this.link.startQueue(ids).catch((err) => warn("Couldn't set TIDAL's queue", err));
+      // (then what TIDAL still had coming after it gives way to the DJ's own)
+      this.link
+        .startQueue(ids)
+        .then(() => setTimeout(() => this.syncQueue(), 1500))
+        .catch((err) => warn("Couldn't set TIDAL's queue", err));
     }
     if (p.item.first && !this.alt) setTimeout(() => this.prepareAlt(), 4000);
   }
@@ -2549,6 +2608,8 @@ class Session {
     // Closing the mixer's process hands back every byte of audio it held, and makes sure nothing can
     // keep sounding under TIDAL's own player
     await mixer.close();
+    // Exclusive mode back on, now that nothing else is playing out of the device (unless another session has taken over)
+    if (!session || session === this) await this.link.restoreDevice();
     // (Unless another session has taken over meanwhile: then the status is its to set)
     if (!session || session === this) setStatus({ phase: "off", mode: undefined, talking: false, caption: undefined, segment: undefined, busy: undefined });
   }
@@ -2678,6 +2739,8 @@ export const ask = (text: string) => session?.ask(text);
 export const skip = () => session?.skip();
 /** 0-1, how loud the DJ's voice is right now */
 export const voiceLevel = () => session?.voiceLevel() ?? 0;
+/** The voice volume setting changed */
+export const applyVoiceVolume = () => void session?.applyVoiceVolume();
 /** What the full-screen view shows (see stage.ts): nothing while the DJ is off */
 export const getStage = () => (session && !session.stopped ? session.stage() : undefined);
 /** The other version of the mashup that is playing (see Session.flipMashup) */

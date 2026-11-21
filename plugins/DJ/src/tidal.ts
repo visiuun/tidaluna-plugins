@@ -3,6 +3,7 @@
 // you hear comes from the DJ's mixer, which follows whatever you do with TIDAL's controls.
 import type { LunaUnload } from "@luna/core";
 import { log, warn } from "./log";
+import { playerShared } from "./native";
 
 const lib = () => window.luna.lib!;
 const core = () => window.luna.core!;
@@ -70,6 +71,33 @@ const descriptorOf = (obj: object, key: string) => {
   return undefined;
 };
 
+// ------------------ THE DJ'S ENTRIES IN TIDAL'S QUEUE ------------------
+// Every entry of TIDAL's queue has an id of its own (uid). Those the DJ added are noted, so that it only ever
+// takes out or moves its own. Kept in sessionStorage: a reloaded page has the same queue, with the same ids.
+const OWNED_KEY = "visiuun-dj-queue-uids";
+const ownedUids: Set<string> = (() => {
+  try {
+    return new Set<string>(JSON.parse(sessionStorage.getItem(OWNED_KEY) ?? "[]"));
+  } catch {
+    return new Set<string>();
+  }
+})();
+/** Notes as the DJ's every entry of TIDAL's queue that wasn't there `before` */
+const noteOwned = (before: Set<string>) => {
+  try {
+    const elements = state().playQueue.elements ?? [];
+    const present = new Set<string>();
+    for (const e of elements) {
+      const uid = String(e.uid);
+      present.add(uid);
+      if (!before.has(uid)) ownedUids.add(uid);
+    }
+    // (entries no longer in the queue are forgotten)
+    for (const uid of ownedUids) if (!present.has(uid)) ownedUids.delete(uid);
+    sessionStorage.setItem(OWNED_KEY, JSON.stringify([...ownedUids]));
+  } catch {}
+};
+
 // ------------------ SILENCING ------------------
 // TIDAL sets its player's volume through a `volume` setter (on every track start and slider move).
 // Shadowing that setter on the player keeps it at zero without touching the slider you see.
@@ -115,8 +143,6 @@ export type LinkEvents = {
   playing(playing: boolean): void;
   /** Volume slider or mute changed */
   volume(percent: number, muted: boolean): void;
-  /** TIDAL's output device changed */
-  device(webDeviceId: string | undefined): void;
 };
 
 export class TidalLink {
@@ -126,7 +152,6 @@ export class TidalLink {
   private restore?: { shuffle: boolean; repeat: number };
   private lastPlaying: boolean | undefined;
   private lastVolume = "";
-  private lastDevice: string | undefined | null = null;
   active = false;
 
   constructor(private readonly events: LinkEvents) {}
@@ -184,7 +209,6 @@ export class TidalLink {
     if (window.__visiuunDjRelease) delete window.__visiuunDjRelease;
     this.lastPlaying = undefined;
     this.lastVolume = "";
-    this.lastDevice = null;
   }
 
   /** Puts shuffle/repeat back the way they were before the session */
@@ -240,10 +264,43 @@ export class TidalLink {
       this.lastVolume = vol;
       this.events.volume(Number(pc.volume) || 0, !!pc.muted);
     }
-    const dev = (s.player?.availableDevices ?? []).find((d: any) => d.id === s.player?.activeDeviceId)?.webDeviceId as string | undefined;
-    if (force || dev !== this.lastDevice) {
-      this.lastDevice = dev;
-      this.events.device(dev);
+  }
+
+  // ------------------ OUTPUT DEVICE ------------------
+  // The mixer plays out of the device TIDAL plays out of, alongside TIDAL's own (silent) player. In exclusive
+  // mode TIDAL's player would keep that device to itself (and pay no heed to being kept silent): while the DJ
+  // plays, TIDAL's player opens it in shared mode instead (see playerShared in mixer.native.ts). TIDAL's
+  // settings are left as they are, and exclusive mode is back the moment the DJ stops.
+  /** The device TIDAL plays out of (name undefined: the system's default), and whether TIDAL means to have it to itself */
+  output(): { name: string | undefined; exclusive: boolean } {
+    const p = state().player ?? {};
+    const dev = (p.availableDevices ?? []).find((d: any) => d.id === p.activeDeviceId);
+    return { name: dev && dev.id !== "default" ? String(dev.name ?? "") || undefined : undefined, exclusive: p.activeDeviceMode === "exclusive" && !!dev?.nativeDeviceId && dev.id !== "default" };
+  }
+  /** Has TIDAL's player hold its device in shared mode while the DJ plays. True: it was in exclusive mode, and now isn't */
+  async shareDevice(): Promise<boolean> {
+    try {
+      const p = state().player ?? {};
+      const dev = (p.availableDevices ?? []).find((d: any) => d.id === p.activeDeviceId);
+      // (the page's own choice of device, made again: the player gets it in shared mode)
+      const exclusive = p.activeDeviceMode === "exclusive" && dev?.nativeDeviceId && dev.id !== "default";
+      const select = exclusive
+        ? JSON.stringify({ command: "media.device.select", device: { controllableVolume: dev.controllableVolume !== false, id: dev.nativeDeviceId, name: dev.name, type: "default" }, options: { mode: "exclusive" } })
+        : undefined;
+      const held = await playerShared(true, select);
+      if (held && select) log(`TIDAL's player holds ${dev.name} in shared mode while the DJ plays (exclusive mode is back when it stops)`);
+      return !!(held && select);
+    } catch (err) {
+      warn("Couldn't keep TIDAL's player in shared mode", err);
+      return false;
+    }
+  }
+  /** TIDAL's player gets its device back the way TIDAL asked for it (exclusive mode, if that is on) */
+  async restoreDevice() {
+    try {
+      await playerShared(false);
+    } catch (err) {
+      warn("Couldn't give TIDAL's player its exclusive mode back", err);
     }
   }
 
@@ -326,7 +383,11 @@ export class TidalLink {
     await Promise.all(ids.map((id) => MediaItem.fromId(id).catch(() => undefined)));
   }
 
-  /** Replaces TIDAL's queue with these tracks and starts the first */
+  /**
+   * Puts these tracks on in TIDAL's queue, right after the one it is on, and starts the first. What was played
+   * before stays where it is, so TIDAL's previous button still goes back to it, and what you had queued
+   * comes after the DJ's tracks (see setUpcoming)
+   */
   async startQueue(ids: string[]) {
     // Covers the time it takes to load the tracks: the old track still showing isn't "you played something else"
     this.selfMoveUntil = Date.now() + 10000;
@@ -337,26 +398,58 @@ export class TidalLink {
       if (state().playQueue.shuffleModeEnabled) a["playQueue/DISABLE_SHUFFLE_MODE"]();
       if (state().playQueue.repeatMode) a["playQueue/SET_REPEAT_MODE"](0);
     } catch {}
-    a["playQueue/ADD_NOW"]({ context: { type: "UNKNOWN" }, mediaItemIds: ids, fromIndex: 0, overwritePlayQueue: true });
+    // (spliced in after the current track and moved to: TIDAL's own "play now" rebuilds the queue, and what
+    // was played before, and what you had queued, would be gone)
+    const before = new Set<string>((state().playQueue.elements ?? []).map((e: any) => String(e.uid)));
+    const at = Math.max(0, state().playQueue.currentIndex + 1);
+    a["playQueue/ADD_AT_INDEX"]({ context: { type: "UNKNOWN" }, index: at, mediaItemIds: ids });
+    noteOwned(before);
+    a["playQueue/MOVE_TO"](at);
     try {
       a["playQueue/SET_SOURCE_PROPERTIES"]({ name: "DJ", trackListName: "visiuun-dj" });
     } catch {}
     a["playbackControls/PLAY"]();
   }
 
-  /** Makes everything after the current track in TIDAL's queue match `ids` */
+  /**
+   * Makes the DJ's own tracks right after the current one in TIDAL's queue match `ids`. Only entries the DJ
+   * put there are ever taken out or moved: what you had queued yourself stays, after the DJ's (it used to be
+   * cleared, and the queue you had was gone once the DJ had been on, a mashup for one)
+   */
   async setUpcoming(ids: string[]) {
-    const current = this.upcomingIds();
-    if (current.length === ids.length && current.every((id, i) => id === ids[i])) return;
+    const mine = () => {
+      const pq = state().playQueue;
+      return (pq.elements ?? []).map((e: any, i: number) => ({ i, id: String(e.mediaItemId), uid: String(e.uid), own: ownedUids.has(String(e.uid)) })).filter((e: any) => e.i > pq.currentIndex);
+    };
+    // The DJ's block as it stands: its entries straight after the current track, in order
+    const block = () => {
+      const after = mine();
+      const out: string[] = [];
+      for (const e of after) {
+        if (!e.own) break;
+        out.push(e.id);
+      }
+      return { after, block: out };
+    };
+    const { after, block: now } = block();
+    const strays = after.filter((e: any) => e.own).length - now.length;
+    if (!strays && now.length === ids.length && now.every((id, i) => id === ids[i])) return;
     await this.ensureLoaded(ids);
     const a = actions();
-    // Keep the common prefix, drop the rest from the end, then append
+    // Keep the common start of the block; every other entry of the DJ's after the current track goes
     let keep = 0;
-    while (keep < current.length && keep < ids.length && current[keep] === ids[keep]) keep++;
-    const pq = state().playQueue;
-    for (let i = pq.elements.length - 1; i > pq.currentIndex + keep; i--) a["playQueue/REMOVE_AT_INDEX"]({ index: i });
+    while (keep < now.length && keep < ids.length && now[keep] === ids[keep]) keep++;
+    const drop = mine()
+      .filter((e: any) => e.own)
+      .slice(keep)
+      .map((e: any) => e.i)
+      .sort((x: number, y: number) => y - x);
+    for (const index of drop) a["playQueue/REMOVE_AT_INDEX"]({ index });
     const add = ids.slice(keep);
-    if (add.length) a["playQueue/ADD_LAST"]({ context: { type: "UNKNOWN" }, mediaItemIds: add });
+    if (!add.length) return;
+    const before = new Set<string>((state().playQueue.elements ?? []).map((e: any) => String(e.uid)));
+    a["playQueue/ADD_AT_INDEX"]({ context: { type: "UNKNOWN" }, index: state().playQueue.currentIndex + 1 + keep, mediaItemIds: add });
+    noteOwned(before);
   }
 
   /** Moves TIDAL to `id` if it's ahead in the queue. Returns whether TIDAL is (now) on it */

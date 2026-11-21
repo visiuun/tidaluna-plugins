@@ -99,3 +99,12 @@ unloads.add(() => {
 });
 
 log("DJ loaded");
+// Whether this TIDAL can use the graphics card (WebGPU): it can't unless started with --enable-unsafe-webgpu
+void (async () => {
+  try {
+    const adapter = await (navigator as any).gpu?.requestAdapter();
+    log(adapter ? `WebGPU: available (${[adapter.info?.vendor, adapter.info?.architecture].filter(Boolean).join(" ") || "GPU"}); the DJ's vocal separator still runs on the processor` : "WebGPU: not available here (TIDAL has to be started with --enable-unsafe-webgpu); the vocal separator runs on the processor");
+  } catch (err) {
+    log(`WebGPU: not available here (${String((err as Error)?.message ?? err)})`);
+  }
+})();

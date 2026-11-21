@@ -264,6 +264,14 @@ export class Mixer {
   setVolume(percent: number, muted: boolean) {
     return this.call("setVolume", { percent, muted });
   }
+  /** How loud the DJ's voice is (percent of its usual level) */
+  setVoiceVolume(percent: number) {
+    return this.call("setVoiceVolume", { percent });
+  }
+  /** Plays out of the output device of that name (undefined: the system's default); see setOutput in mixer.page.js */
+  setOutput(name: string | undefined, reopen = false) {
+    return this.call<{ sink: string; changed?: boolean }>("setOutput", { name, reopen });
+  }
   suspend() {
     return this.call("suspend");
   }

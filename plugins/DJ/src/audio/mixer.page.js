@@ -16,7 +16,7 @@
   const FADE_IN = curve((x) => Math.sin((x * Math.PI) / 2));
   const FADE_OUT = curve((x) => Math.cos((x * Math.PI) / 2));
 
-  let ctx, music, voice, voiceHp, master, outMeter, voiceMeter;
+  let ctx, music, voice, voiceHp, voiceTrim, master, outMeter, voiceMeter;
   let volume = 1;
   const tracks = new Map(); // id → { buffer, gain, loud, duration } (see TRACKS AT REST: `buffer` brings the audio back if it was put aside)
   const stretches = new Map(); // key → { buffer, x0, speed, holdOut, spliceOut, spliceIn }
@@ -211,7 +211,9 @@ registerProcessor("dj-limiter", Limiter);
     outMeter = ctx.createAnalyser();
     outMeter.fftSize = 2048;
     music.connect(limiter);
-    voiceHp.connect(voice).connect(limiter);
+    // (the voice's own volume, set in the DJ's settings: after the meter's level is measured it is still the line as spoken)
+    voiceTrim = ctx.createGain();
+    voiceHp.connect(voiceTrim).connect(voice).connect(limiter);
     voice.connect(voiceMeter);
     limiter.connect(master).connect(ctx.destination);
     limiter.connect(outMeter);
@@ -2506,6 +2508,41 @@ registerProcessor("dj-limiter", Limiter);
       volume = muted ? 0 : Math.max(0, Math.min(1, percent / 100));
       master.gain.cancelScheduledValues(ctx.currentTime);
       master.gain.setTargetAtTime(volume, ctx.currentTime, 0.015);
+      return {};
+    },
+    /**
+     * Plays out of the device TIDAL plays out of (by its name: this page has device ids of its own; none
+     * or not found: the system's default). `reopen`: the device is opened again even if it is the one in
+     * use (after TIDAL had it to itself in exclusive mode, the old connection to it stays silent for good).
+     */
+    setOutput: async ({ name, reopen }) => {
+      if (typeof ctx.setSinkId !== "function") return { sink: "unsupported" };
+      let id = "";
+      let label = "default";
+      if (name) {
+        const outs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audiooutput" && d.deviceId !== "default" && d.deviceId !== "communications");
+        const n = String(name).trim().toLowerCase();
+        const hit =
+          outs.find((d) => d.label.trim().toLowerCase() === n) ??
+          outs.find((d) => d.label.toLowerCase().includes(n) || (d.label && n.includes(d.label.trim().toLowerCase())));
+        if (hit) {
+          id = hit.deviceId;
+          label = hit.label;
+        }
+      }
+      const current = typeof ctx.sinkId === "string" ? ctx.sinkId : "";
+      if (id === current && !reopen) return { sink: label, changed: false };
+      const wasRunning = ctx.state === "running";
+      if (id === current) await ctx.setSinkId({ type: "none" });
+      await ctx.setSinkId(id);
+      // (a change of device leaves the context suspended: the clock would stand still)
+      if (wasRunning && ctx.state !== "running") await ctx.resume();
+      return { sink: label, changed: true };
+    },
+    /** How loud the DJ's voice is, on top of its usual level (percent) */
+    setVoiceVolume: ({ percent }) => {
+      const v = Math.max(0, Math.min(1.5, (Number(percent) || 0) / 100));
+      voiceTrim.gain.setTargetAtTime(v, ctx.currentTime, 0.03);
       return {};
     },
     suspend: async () => (ctx.state === "running" && (await ctx.suspend()), {}),

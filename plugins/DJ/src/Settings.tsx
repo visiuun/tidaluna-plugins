@@ -1,7 +1,7 @@
 import React from "react";
 import { JINGLES, jingleStyle, settings, voiceEngine, VOICES, type Commentary, type Jingle, type Mixing, type PluginSettings, type VoiceEngine } from "./config";
 import { poweredByTrueTaste } from "./brain";
-import { getStatus, onStatus, setTransitionOnly, startSession, stopSession } from "./session";
+import { applyVoiceVolume, getStatus, onStatus, setTransitionOnly, startSession, stopSession } from "./session";
 import { clearVoiceFiles, getDataDir, openTrueTastePage } from "./native";
 import { prepareStock, voiceState, type VoiceState } from "./talk/voice";
 import { clearVoiceModel } from "./native";
@@ -193,6 +193,18 @@ export const Settings = () => {
         max={100}
         value={state.discovery}
         onNumber={(n: number) => set("discovery", n)}
+      />
+
+      <LunaNumberSetting
+        title="Voice volume"
+        desc="How loud the DJ talks, in percent of its usual level (0 = silent, 150 = louder). The music follows TIDAL's own volume"
+        min={0}
+        max={150}
+        value={state.voiceVolume ?? 100}
+        onNumber={(n: number) => {
+          set("voiceVolume", n);
+          applyVoiceVolume();
+        }}
       />
 
       <LunaSelectSetting
