@@ -252,6 +252,7 @@ const css = `
   .${R} .tlrow { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; }
   .${R} .timeline { position: relative; min-height: 0; cursor: grab; touch-action: none; }
   .${R} .timeline.grabbing { cursor: grabbing; }
+  .${R} .timeline.locked { cursor: default; }
   .${R} .timeline canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
   .${R} .ctl { position: absolute; left: 56px; top: 50%; transform: translateY(-50%); z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 10px; transition: opacity .4s ease; }
   .${R} .ctl .icon { width: 44px; height: 44px; }
@@ -1513,7 +1514,21 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     const shift = scrub?.dx ?? 0;
     const xOf = (time: number) => playX + shift + (time - t) * pps;
     const tOf = (x: number) => t + (x - playX - shift) / pps;
-    view = { pps, playX, t, lead: sc.lead };
+    // (not while a mix is shown or under way, or a mashup plays: a seek then throws away what the mix has planned)
+    const locked = pair || (!!tr && t >= tr.start - 2 && t < tr.end) || (tr?.kind === "mashup" && t < tr.end);
+    view = { pps, playX, t, lead: sc.lead, locked };
+    if (locked !== timelineLocked) {
+      timelineLocked = locked;
+      timeline.classList.toggle("locked", locked);
+      if (locked && scrub) {
+        // (a drag under way when a mix comes up is let go of, without a seek)
+        try {
+          timeline.releasePointerCapture(scrub.pointer);
+        } catch {}
+        scrub = undefined;
+        timeline.classList.remove("grabbing");
+      }
+    }
     g.font = `500 12px ${T.text}`;
     const mashing = tr?.kind === "mashup";
     const arr = mashOf(tr);
@@ -1815,7 +1830,8 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   // The waveform can be dragged to move the track (drag it right to go back, left to go on, the way a record is
   // moved under the needle), or clicked to go to that point. "Now" stays put, a label on it says where letting go
   // takes the track, and TIDAL is moved there: the DJ follows TIDAL's seeks as it always does.
-  let view: { pps: number; playX: number; t: number; lead?: StageDeck } | undefined;
+  let view: { pps: number; playX: number; t: number; lead?: StageDeck; locked?: boolean } | undefined;
+  let timelineLocked = false;
   let scrub: { pointer: number; x0: number; dx: number; lead: StageDeck; moved: boolean } | undefined;
   const leadMap = (d: StageDeck, t: number) => (d.map?.length ? d.map : [{ t: (d.swap ?? t) - d.pos, pos: 0, rate: 1 }]);
   /** The position in the lead track that is under "Now" with the waveform moved by dx */
@@ -1825,7 +1841,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     return clamp(posAt(leadMap(scrub.lead, view.t), at), 0, Math.max(0, scrub.lead.duration - 0.5));
   };
   timeline.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0 || !view?.lead) return;
+    if (e.button !== 0 || !view?.lead || view.locked) return;
     scrub = { pointer: e.pointerId, x0: e.clientX, dx: 0, lead: view.lead, moved: false };
     timeline.setPointerCapture(e.pointerId);
     timeline.classList.add("grabbing");
