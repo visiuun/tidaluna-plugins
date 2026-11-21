@@ -15,6 +15,8 @@ export type PluginSettings = {
   lightStrength: number; // 0-100
   preloadNext: boolean; // generate the next track's cover before it plays
   breakout: boolean; // foreground can cross the cover's border
+  autoTilt: boolean; // the cover sways slowly on its own while the mouse isn't on it
+  autoTiltAmount: number; // 5-100, share of a full tilt
 };
 
 export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("3DCover", {
@@ -28,10 +30,14 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("3D
   lightStrength: 60,
   preloadNext: true,
   breakout: true,
+  autoTilt: true,
+  autoTiltAmount: 35,
 });
 
 // Older builds could store a React element here from the select's onChange
 if (settings.model !== "small" && settings.model !== "base") settings.model = "small";
+if (typeof settings.autoTilt !== "boolean") settings.autoTilt = true;
+if (!Number.isFinite(settings.autoTiltAmount)) settings.autoTiltAmount = 35;
 
 export const Settings = () => {
   // Read from window.luna rather than imported, for the same reason as @luna/lib in index.ts
@@ -41,6 +47,7 @@ export const Settings = () => {
   const [lighting, setLighting] = React.useState(settings.lighting);
   const [preloadNext, setPreloadNext] = React.useState(settings.preloadNext);
   const [breakout, setBreakout] = React.useState(settings.breakout);
+  const [autoTilt, setAutoTilt] = React.useState(settings.autoTilt);
   const [clearingDepth, setClearingDepth] = React.useState(false);
   const [clearingModel, setClearingModel] = React.useState(false);
   const [stats, setStats] = React.useState<{ count: number; bytes: number } | null>(null);
@@ -110,6 +117,29 @@ export const Settings = () => {
           updateSetting("breakout", val);
         }}
       />
+
+      <LunaSwitchSetting
+        title="Auto Tilt"
+        desc="The cover sways slowly on its own while the mouse isn't on it, so the depth can always be seen. Turn off to save processor and graphics work"
+        checked={autoTilt}
+        value={autoTilt}
+        onChange={(e: any, checked?: boolean) => {
+          const val = typeof checked === "boolean" ? checked : (e?.target?.checked ?? !autoTilt);
+          setAutoTilt(val);
+          updateSetting("autoTilt", val);
+        }}
+      />
+
+      {autoTilt && (
+        <LunaNumberSetting
+          title="Auto Tilt Amount"
+          desc="How far the cover sways on its own, as a share of a full tilt"
+          min={5}
+          max={100}
+          value={settings.autoTiltAmount}
+          onNumber={(num: number) => updateSetting("autoTiltAmount", num)}
+        />
+      )}
 
       <LunaSwitchSetting
         title="AI Lighting"

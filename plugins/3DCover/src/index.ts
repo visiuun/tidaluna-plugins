@@ -36,6 +36,10 @@ const SPINNER_DELAY_MS = 350;
 const LEAVE_TIMEOUT_MS = 1500;
 // Smallest tilt treated as "full" deflection until TIDAL's real maximum has been seen
 const TILT_MIN_REF = Math.sin((4 * Math.PI) / 180);
+// Auto tilt: a slow sway while the mouse isn't on the cover, drawn at no more than this many frames a second
+const AUTO_FPS = 30;
+const AUTO_FADE_MS = 700; // how long the sway takes to give way to the mouse, and to come back
+const AUTO_CHECK_MS = 500; // how often to look for a cover to sway when none is
 
 // ------------------ STYLES ------------------
 const style = document.createElement("style");
@@ -92,6 +96,16 @@ const eased = { x: 0, y: 0 }; // fallback when there's no tilt container
 const drawn = { x: 0, y: 0, w: 0, h: 0, dirty: true };
 let rafId = 0;
 let lastFrame = 0;
+let lastDraw = 0;
+// How much of the auto tilt's sway is in the picture: 1 with the mouse away, 0 with it on the cover
+let autoWeight = 0;
+const autoOn = () => settings.autoTilt && settings.autoTiltAmount > 0;
+// Two slow waves that never quite repeat, so it doesn't look like a loop
+const sway = (now: number) => {
+  const t = now / 1000;
+  const a = settings.autoTiltAmount / 100;
+  return { x: a * Math.sin((t * 2 * Math.PI) / 11), y: a * 0.7 * Math.sin((t * 2 * Math.PI) / 17 + 1.3) };
+};
 
 // ------------------ COVER SOURCES ------------------
 type Cover = { id: string; urls: string[] };
@@ -367,6 +381,10 @@ const frame = (now: number) => {
     return checkPointer();
   }
 
+  // With the mouse away the sway needs few frames: it moves slowly
+  const swaying = active.leaving && autoOn() && autoWeight > 0.999;
+  if (swaying && now - lastDraw < 1000 / AUTO_FPS - 2) return scheduleFrame();
+
   let n: { x: number; y: number };
   if (active.tiltEl?.isConnected) {
     const tilt = readTilt(active.tiltEl);
@@ -381,10 +399,20 @@ const frame = (now: number) => {
     eased.y += (goal.y - eased.y) * k;
     n = eased;
   }
+  const dtAuto = lastFrame ? Math.min(100, now - lastFrame) : 16.67;
   lastFrame = now;
 
+  // The sway comes in as the mouse leaves (while TIDAL's tilt eases out) and gives way as it comes back
+  const autoGoal = active.leaving && autoOn() ? 1 : 0;
+  autoWeight += Math.sign(autoGoal - autoWeight) * Math.min(Math.abs(autoGoal - autoWeight), dtAuto / AUTO_FADE_MS);
+  const aw = autoWeight * autoWeight * (3 - 2 * autoWeight); // smoothstep
+  if (aw > 0) {
+    const s = sway(now);
+    n = { x: n.x + s.x * aw, y: n.y + s.y * aw };
+  }
+
   const neutral = Math.abs(n.x) < 0.003 && Math.abs(n.y) < 0.003;
-  if (active.leaving && (neutral || now - active.leaveStart > LEAVE_TIMEOUT_MS)) return teardown();
+  if (active.leaving && autoGoal === 0 && autoWeight === 0 && (neutral || now - active.leaveStart > LEAVE_TIMEOUT_MS)) return teardown();
 
   syncPlacement(active.img);
   const flip = settings.invert ? -1 : 1;
@@ -392,7 +420,7 @@ const frame = (now: number) => {
   // Skip redundant draws while the cover is resting
   if (drawn.dirty || Math.abs(n.x - drawn.x) > 1e-4 || Math.abs(n.y - drawn.y) > 1e-4 || w !== drawn.w || h !== drawn.h) {
     try {
-      const light = lightPosition(active, { x: n.x * flip, y: n.y * flip });
+      const light = lightPosition(active, { x: n.x * flip, y: n.y * flip }, aw);
       renderer.draw({
         nx: n.x * flip,
         ny: n.y * flip,
@@ -405,6 +433,7 @@ const frame = (now: number) => {
         glare: light.glare,
       });
       Object.assign(drawn, { x: n.x, y: n.y, w, h, dirty: false });
+      lastDraw = now;
     } catch (err) {
       trace.err.withContext("draw")(err);
       return teardown();
@@ -415,15 +444,17 @@ const frame = (now: number) => {
 
 // The lighting uses TIDAL's own light (its glare's centre), so both move together. Without one, a
 // light on the side opposite the tilt that swings in from outside the cover as the tilt grows.
-const lightPosition = (state: Active, n: { x: number; y: number }) => {
-  const at = state.glareEl?.isConnected ? GLARE_AT.exec(state.glareEl.style.background) : null;
-  if (at) {
-    const opacity = parseFloat(state.glareEl!.style.opacity);
-    return { x: parseFloat(at[1]) / 100, y: parseFloat(at[2]) / 100, glare: Number.isNaN(opacity) ? 1 : opacity };
-  }
+// While the cover sways on its own (weight `auto`) TIDAL's light is out, so the light is our own.
+const lightPosition = (state: Active, n: { x: number; y: number }, auto = 0) => {
   const len = Math.hypot(n.x, n.y) || 1;
   const reach = 1.1 - 0.8 * Math.min(1, len);
-  return { x: 0.5 - (n.x / len) * reach, y: 0.5 - (n.y / len) * reach, glare: 0 };
+  const own = { x: 0.5 - (n.x / len) * reach, y: 0.5 - (n.y / len) * reach, glare: 0 };
+  const at = state.glareEl?.isConnected ? GLARE_AT.exec(state.glareEl.style.background) : null;
+  if (!at || auto >= 1) return own;
+  const opacity = parseFloat(state.glareEl!.style.opacity);
+  const tidal = { x: parseFloat(at[1]) / 100, y: parseFloat(at[2]) / 100, glare: Number.isNaN(opacity) ? 1 : opacity };
+  const mix = (a: number, b: number) => a + (b - a) * auto;
+  return { x: mix(tidal.x, own.x), y: mix(tidal.y, own.y), glare: mix(tidal.glare, own.glare) };
 };
 
 // ------------------ LIFECYCLE ------------------
@@ -437,6 +468,8 @@ const teardown = () => {
   cancelAnimationFrame(rafId);
   rafId = 0;
   lastFrame = 0;
+  lastDraw = 0;
+  autoWeight = 0;
   eased.x = eased.y = mouse.x = mouse.y = 0;
   drawn.dirty = true;
   renderer.canvas.classList.remove("visible");
@@ -445,9 +478,11 @@ const teardown = () => {
 };
 
 // Keep rendering while the cover eases back to neutral, then hand back to the real <img>
+// (with auto tilt on it stays, and sways)
 const leave = () => {
   if (!active || active.leaving) return;
-  if (!active.ready) return teardown();
+  if (!active.ready && !autoOn()) return teardown();
+  spinner.remove();
   active.leaving = true;
   active.leaveStart = performance.now();
   scheduleFrame();
@@ -460,7 +495,8 @@ const prepare = async (state: Active) => {
   state.coverId = cover.id;
 
   if (!getCachedDepth(cover.id, settings.model)) {
-    state.spinnerTimer = window.setTimeout(() => active === state && showSpinner(state.img), SPINNER_DELAY_MS);
+    // (only for someone hovering it: a cover that will sway on its own appears when it's ready)
+    state.spinnerTimer = window.setTimeout(() => active === state && !state.leaving && showSpinner(state.img), SPINNER_DELAY_MS);
   }
 
   try {
@@ -483,13 +519,15 @@ const prepare = async (state: Active) => {
   }
 };
 
-const activate = (img: HTMLImageElement) => {
+const activate = (img: HTMLImageElement, hovered = true) => {
   teardown();
   const cover = onStage(img) ? coverFromUrl(img.currentSrc || img.src)?.id : playingCover?.id;
   if (cover && failed.id === cover && performance.now() - failed.at < RETRY_AFTER_MS) return;
   const tiltEl = img.closest<HTMLElement>(TILT_CONTAINER);
   const glareEl = tiltEl?.querySelector<HTMLElement>(GLARE) ?? null;
-  const state: Active = { img, tiltEl, glareEl, coverId: "", ready: false, leaving: false, leaveStart: 0 };
+  const state: Active = { img, tiltEl, glareEl, coverId: "", ready: false, leaving: !hovered, leaveStart: performance.now() };
+  // A cover that starts out swaying fades the sway in from still
+  autoWeight = 0;
   active = state;
   prepare(state);
 };
@@ -511,7 +549,11 @@ const checkPointer = () => {
   if (!inside(r, pointer.x, pointer.y)) return leave();
 
   if (!active) activate(img);
-  else if (active.leaving) active.leaving = false;
+  else if (active.leaving) {
+    active.leaving = false;
+    spinner.remove();
+    if (!active.ready && !getCachedDepth(active.coverId, settings.model)) showSpinner(active.img);
+  }
   if (!active) return;
 
   // Normalized pointer position [-1, 1] relative to the cover centre (same as the Python app)
@@ -529,8 +571,23 @@ const onPointerMove = (e: PointerEvent) => {
 
 const onSettingsUpdated = () => {
   drawn.dirty = true;
+  // Auto tilt turned off with the mouse away: ease back to still from now, then hand back to the <img>
+  if (active?.leaving && !autoOn()) active.leaveStart = performance.now();
   if (active?.ready) scheduleFrame();
+  else checkAutoTilt();
 };
+
+// With auto tilt on, the cover sways as soon as it's on the screen, not only once it's hovered. Nothing is
+// looked for while the window can't be seen: rAF stands still then anyway, and so the sway with it.
+const checkAutoTilt = () => {
+  if (!autoOn() || active || document.hidden) return;
+  const img = getPlayerCover();
+  if (!img) return;
+  if (playingCover && generatedFor !== playingCover.id) generate(playingCover, trackAbort.signal, "auto tilt");
+  activate(img, false);
+};
+const autoTimer = setInterval(checkAutoTilt, AUTO_CHECK_MS);
+unloads.add(() => clearInterval(autoTimer));
 
 window.addEventListener("pointermove", onPointerMove, { passive: true });
 window.addEventListener("luna:3dcover:updated", onSettingsUpdated);
