@@ -32,18 +32,18 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("3D
   preloadNext: true,
   breakout: true,
   autoTilt: true,
-  autoTiltAmount: 50,
-  autoTiltRev: 2,
+  autoTiltAmount: 100,
+  autoTiltRev: 3,
 });
 
 // Older builds could store a React element here from the select's onChange
 if (settings.model !== "small" && settings.model !== "base") settings.model = "small";
 if (typeof settings.autoTilt !== "boolean") settings.autoTilt = true;
-if (!Number.isFinite(settings.autoTiltAmount)) settings.autoTiltAmount = 50;
-// 1.0.18 and 1.0.19 swayed at 35 by default: those left at it get the stronger new default, once
-if (settings.autoTiltRev !== 2) {
-  if (settings.autoTiltAmount === 35) settings.autoTiltAmount = 50;
-  settings.autoTiltRev = 2;
+if (!Number.isFinite(settings.autoTiltAmount)) settings.autoTiltAmount = 100;
+// Earlier builds swayed at 35 (1.0.18, 1.0.19) and 50 (1.0.20) by default: those left at it get the new one, once
+if (settings.autoTiltRev !== 3) {
+  if (settings.autoTiltAmount === 35 || settings.autoTiltAmount === 50) settings.autoTiltAmount = 100;
+  settings.autoTiltRev = 3;
 }
 
 export const Settings = () => {

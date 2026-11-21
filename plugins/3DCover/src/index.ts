@@ -94,7 +94,7 @@ const autoOn = () => settings.autoTilt && settings.autoTiltAmount > 0;
 const sway = (now: number) => {
   const t = now / 1000;
   const a = settings.autoTiltAmount / 100;
-  return { x: a * Math.sin((t * 2 * Math.PI) / 11), y: a * 0.7 * Math.sin((t * 2 * Math.PI) / 17 + 1.3) };
+  return { x: a * Math.sin((t * 2 * Math.PI) / 7), y: a * 0.85 * Math.sin((t * 2 * Math.PI) / 10.5 + 1.3) };
 };
 
 // ------------------ COVER SOURCES ------------------
