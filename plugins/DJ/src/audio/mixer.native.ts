@@ -5,7 +5,8 @@ import { createDecipheriv } from "crypto";
 import os from "os";
 import path from "path";
 import { blobRoute } from "./stems.native";
-import { stat } from "fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from "fs/promises";
+import { createHash as hashOf } from "crypto";
 import { Agent as HttpsAgent } from "https";
 import { dataDir } from "../store.native";
 import { tryAccess } from "../nativeAccess";
@@ -29,7 +30,8 @@ const PAGE_URL = `https://${HOST}/`;
 const PARTITION = "visiuun-dj-mixer";
 
 // ------------------ AUDIO ------------------
-export type TrackSource = { urls: string[]; encryptionType?: string; keyId?: string };
+/** `cacheKey`: the track and quality, for the song cache (see SONG CACHE) */
+export type TrackSource = { urls: string[]; encryptionType?: string; keyId?: string; cacheKey?: string };
 const sources = new Map<string, TrackSource>();
 
 // The key that unwraps each stream's own key (the same one TidaLuna's downloader uses)
@@ -53,7 +55,78 @@ const isTidalAudio = (address: string) => {
   }
 };
 
+// ------------------ SONG CACHE ------------------
+// What TIDAL's servers sent for a track is kept on disk, as they sent it (encrypted where they encrypt it), so the
+// next time the track is wanted (it comes round again, a mashup tries it again, TIDAL's page is reloaded) it is read
+// from disk instead of fetched: a lossless track is tens of megabytes. It is keyed by the track and its quality (not
+// by the key that comes with it: TIDAL wraps the same key afresh for every request, and the bytes on its servers are
+// the same each time), and kept to CACHE_LIMIT in all, the ones used longest ago going first.
+const CACHE_LIMIT = 1.5 * 1024 ** 3;
+const cacheDir = () => path.join(dataDir(), "songs");
+const cacheFile = (src: TrackSource) => (src.cacheKey ? path.join(cacheDir(), hashOf("sha1").update(`${src.cacheKey}|${src.encryptionType ?? ""}`).digest("hex") + ".bin") : undefined);
+let pruning = false;
+const pruneCache = async () => {
+  if (pruning) return;
+  pruning = true;
+  try {
+    const files = [];
+    for (const name of await readdir(cacheDir()).catch(() => [] as string[])) {
+      const file = path.join(cacheDir(), name);
+      const st = await stat(file).catch(() => null);
+      if (st) files.push({ file, size: st.size, used: st.mtimeMs });
+    }
+    let total = files.reduce((n, f) => n + f.size, 0);
+    files.sort((a, b) => a.used - b.used);
+    for (const f of files) {
+      if (total <= CACHE_LIMIT) break;
+      await rm(f.file, { force: true }).catch(() => {});
+      total -= f.size;
+    }
+  } finally {
+    pruning = false;
+  }
+};
 const fetchAudio = async (src: TrackSource) => {
+  const file = cacheFile(src);
+  if (file) {
+    const kept = await readFile(file).catch(() => null);
+    if (kept && kept.byteLength > 0) {
+      // (marked as just used: what goes first is what was used longest ago)
+      const now = new Date();
+      void utimes(file, now, now).catch(() => {});
+      return decrypt(src, new Uint8Array(kept.buffer, kept.byteOffset, kept.byteLength));
+    }
+  }
+  const raw = await download(src);
+  if (file) {
+    // (written aside and moved into place: a half-written file is never read)
+    const tmp = `${file}.${Date.now()}.tmp`;
+    void mkdir(cacheDir(), { recursive: true })
+      .then(() => writeFile(tmp, raw))
+      .then(() => rename(tmp, file))
+      .then(pruneCache)
+      .catch(() => rm(tmp, { force: true }).catch(() => {}));
+  }
+  return decrypt(src, raw);
+};
+/** How much the song cache holds (bytes, files) */
+export const songCacheSize = async () => {
+  let bytes = 0;
+  let files = 0;
+  for (const name of await readdir(cacheDir()).catch(() => [] as string[])) {
+    const st = await stat(path.join(cacheDir(), name)).catch(() => null);
+    if (st) {
+      bytes += st.size;
+      files++;
+    }
+  }
+  return { bytes, files };
+};
+export const clearSongCache = async () => {
+  await rm(cacheDir(), { recursive: true, force: true });
+};
+/** The track's bytes as TIDAL's servers send them */
+const download = async (src: TrackSource) => {
   if (!src.urls.length || !src.urls.every(isTidalAudio)) throw new Error("Not a TIDAL audio address");
   const parts: Uint8Array[] = [];
   // DASH streams come as many small segments: a few at a time
@@ -75,11 +148,15 @@ const fetchAudio = async (src: TrackSource) => {
     );
     parts.push(...batch);
   }
-  let data: Uint8Array = parts.length === 1 ? parts[0] : new Uint8Array(Buffer.concat(parts));
+  return parts.length === 1 ? parts[0] : new Uint8Array(Buffer.concat(parts));
+};
+/** The playable bytes: decrypted, where TIDAL encrypts them */
+const decrypt = (src: TrackSource, data: Uint8Array) => {
   if (src.encryptionType === "OLD_AES" && src.keyId) {
     const d = decipherFor(src.keyId);
-    data = new Uint8Array(Buffer.concat([d.update(data), d.final()]));
-  } else if (src.encryptionType && src.encryptionType !== "NONE") throw new Error(`Unknown stream encryption ${src.encryptionType}`);
+    return new Uint8Array(Buffer.concat([d.update(data), d.final()]));
+  }
+  if (src.encryptionType && src.encryptionType !== "NONE") throw new Error(`Unknown stream encryption ${src.encryptionType}`);
   return data;
 };
 

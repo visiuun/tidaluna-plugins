@@ -286,7 +286,7 @@ export class Mixer {
     const stream = await trackStream(id, quality);
     const tInfo = performance.now() - t0;
     const known = await cachedAnalysis(id);
-    const url = await mixerTrackUrl(`t${this.nextToken++}-${id}`, { urls: stream.urls, encryptionType: stream.encryptionType, keyId: stream.keyId });
+    const url = await mixerTrackUrl(`t${this.nextToken++}-${id}`, { urls: stream.urls, encryptionType: stream.encryptionType, keyId: stream.keyId, cacheKey: `${id}-${stream.quality}` });
     const r = await this.call<{ duration: number; analysis?: unknown; ms?: { fetch: number; decode: number; analyse: number } }>("load", { id, url, gain: normGain(stream, tidalNormalizes), hintBpm, analyse: !known && !playFirst });
     if (!known && playFirst) {
       // The track has to start now: a stand-in until the real analysis arrives a few seconds later

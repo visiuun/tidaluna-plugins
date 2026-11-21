@@ -86,7 +86,7 @@ const css = `
   /* The panel, in TIDAL's own look: its fonts and colours (its design tokens, with their values as fallbacks), a solid
      card like its menus, no outlines, white for what matters most and grey for the rest */
   .${ROOT}-panel { --dj-text: "Square Sans Text VF", "Square Sans Text", Helvetica, Arial, sans-serif; --dj-display: "Square Sans Display VF", "Square Sans Display", Helvetica, Arial, sans-serif; --dj-fill: var(--wave-color-opacity-contrast-fill-ultra-thin, #ffffff1a); --dj-fill-hover: var(--wave-color-opacity-contrast-fill-thin, #ffffff33); --dj-grey: var(--wave-color-solid-contrast-darker, #afafb6); --dj-grey2: var(--wave-color-solid-contrast-darkest, #787887); --dj-accent: var(--wave-color-solid-accent-fill, #33ffee);
-    position: fixed; z-index: 9999; width: 360px; padding: 20px; border-radius: 12px; background: var(--wave-color-solid-base-brighter, #1f1f23); color: #fff; box-shadow: 0 16px 48px rgba(0,0,0,.6); font-family: var(--dj-text); font-size: 14px; line-height: 20px; font-weight: 500; -webkit-font-smoothing: antialiased; display: none; }
+    position: fixed; z-index: 2147483600; width: 360px; padding: 20px; border-radius: 12px; background: var(--wave-color-solid-base-brighter, #1f1f23); color: #fff; box-shadow: 0 16px 48px rgba(0,0,0,.6); font-family: var(--dj-text); font-size: 14px; line-height: 20px; font-weight: 500; -webkit-font-smoothing: antialiased; display: none; }
   .${ROOT}-panel.open { display: block; }
   .${ROOT}-panel.over { z-index: 2147483600; }
   .${ROOT}-panel h3 { margin: 0; font-family: var(--dj-display); font-size: 20px; line-height: 28px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
@@ -120,6 +120,7 @@ const css = `
   .${ROOT}-mode div { flex: 1; min-width: 0; }
   .${ROOT}-mode strong { display: block; font-size: 14px; font-weight: 600; }
   .${ROOT}-mode span { display: block; font-size: 12px; line-height: 16px; color: var(--dj-grey); margin-top: 2px; }
+  .${ROOT}-mode.flat { margin-top: 12px; padding-top: 0; border-top: 0; }
   /* a switch, as TIDAL's own settings have them */
   .${ROOT}-switch { position: relative; flex: none; width: 40px; height: 24px; border-radius: 1000px; border: 0; padding: 0; background: var(--dj-fill-hover); cursor: pointer; transition: background-color .2s ease; }
   .${ROOT}-switch::after { content: ""; position: absolute; left: 3px; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform .2s ease, background-color .2s ease; }
@@ -253,6 +254,15 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   // (while one plays: its other version, and its code)
   const mashChips = el("div", `${ROOT}-chips`);
   mashChips.append(flipBtn, shareBtn);
+  // Mashup mode: one mashup after another
+  const mashModeRow = el("div", `${ROOT}-mode`);
+  mashModeRow.classList.add("flat");
+  const mashModeText = el("div");
+  mashModeText.append(el("strong", undefined, "Mashup mode"), el("span", undefined, "One mashup after another, wherever two songs fit"));
+  const mashModeBtn = el("button", `${ROOT}-switch`);
+  mashModeBtn.type = "button";
+  mashModeBtn.setAttribute("role", "switch");
+  mashModeRow.append(mashModeText, mashModeBtn);
   // Section headings, as TIDAL's menus have them
   const askHead = el("h4", undefined, "Ask the DJ");
   const mashHead = el("h4", undefined, "Mashup");
@@ -310,7 +320,7 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   });
   powered.append("Powered by ", poweredLink);
   powered.title = "The DJ picks by what the TrueTaste plugin has measured of your listening: what you play to the end, what you skip, what you gave a thumbs up";
-  panel.append(title, statusLine, said, askHead, askRow, chips, mashHead, mashRow, mashChips, voiceHead, voiceRow, reader, talkRow, modeRow, actions, powered);
+  panel.append(title, statusLine, said, askHead, askRow, chips, mashHead, mashRow, mashChips, mashModeRow, voiceHead, voiceRow, reader, talkRow, modeRow, actions, powered);
   document.body.appendChild(panel);
 
   let open = false;
@@ -494,6 +504,8 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
     skipBtn.style.display = on ? "" : "none";
     stopBtn.style.display = s.phase === "off" || follow ? "none" : "";
     modeBtn.classList.toggle("on", !!settings.transitionOnly);
+    mashModeBtn.classList.toggle("on", !!settings.mashupMode);
+    mashModeBtn.setAttribute("aria-checked", String(!!settings.mashupMode));
     modeBtn.setAttribute("aria-checked", String(!!settings.transitionOnly));
     voiceSelect.value = settings.voice;
     talkSelect.value = settings.commentary;
@@ -519,6 +531,12 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
     setOpen(!open);
   });
   primary.addEventListener("click", act);
+  mashModeBtn.addEventListener("click", () => {
+    settings.mashupMode = !settings.mashupMode;
+    // (on with the DJ off or only mixing: the DJ is started, for mashups)
+    if (settings.mashupMode && (getStatus().phase === "off" || getStatus().mode === "follow")) void startSession("dj", true);
+    render(getStatus());
+  });
   modeBtn.addEventListener("click", () => {
     setTransitionOnly(!settings.transitionOnly);
     render(getStatus());

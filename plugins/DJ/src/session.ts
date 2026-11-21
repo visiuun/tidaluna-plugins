@@ -1037,6 +1037,7 @@ class Session {
     const now = this.mixer.now;
     this.link.observe();
     await this.syncOutput();
+    this.autoMash(now);
     if (status.talking && now > this.talkUntil + 0.2) setStatus({ talking: false, caption: undefined });
 
     // Decks that have finished
@@ -1623,19 +1624,38 @@ class Session {
    * plays: this song's from the moment a mashup is asked for, the other's once it is found, and the
    * rest while it plays. The DJ says what it is doing meanwhile.
    */
-  async mashup(query?: string) {
+  /**
+   * Mashup mode: one mashup after another. Each song gets one go, once it plays on its own (some seconds in, nothing
+   * else under way): what it finds comes in as a mashup, and the song that came in that way gets its own go next.
+   * Where nothing fits, the DJ carries on as usual and tries with the next song, without a word about it.
+   */
+  private autoMashFor?: string;
+  private autoMash(now: number) {
+    if (!settings.mashupMode || this.follow || this.stopped || this.opening) return;
+    const cur = this.current;
+    if (!cur || this.autoMashFor === cur.item.track.id) return;
+    if (this.mashing || this.mashNext || this.pending || this.awaiting || this.busyCutting() || now < this.mashUntil) return;
+    if (!cur.deck.loaded.analysed || cur.deck.positionAt(now) < 12) return;
+    this.autoMashFor = cur.item.track.id;
+    log(`Mashup mode: looking for a mashup for ${cur.item.track.title}`);
+    void this.mashup(undefined, true).catch((err) => warn("Mashup mode", err));
+  }
+
+  async mashup(query?: string, auto = false) {
     if (this.follow || this.stopped) return;
     if (this.mashNext) return setStatus({ note: "The mashup comes with the next song: too little of this one is left" });
     if (this.busyCutting() || this.pending) return setStatus({ note: "One moment, still busy with the last thing" });
     this.mashing = true;
     setStatus({ busy: query ? "Finding that song" : "Looking for a song that goes with this one", note: undefined });
     let keep: string | undefined;
-    // Candidates are loaded straight away, not in turn with the queue, and one ahead of the one being tried
+    // Candidates are loaded straight away, not in turn with the queue, and one ahead of the one being tried. In
+    // TIDAL's "High" quality (320 kbps AAC, a third of a lossless file and as good to the ear): most of them are
+    // only measured and let go, and every second spent fetching is a second less of the song for the mashup
     const loads = new Map<string, Promise<Loaded>>();
     const fetch = (c: Track) => {
       let job = loads.get(c.id);
       if (!job) {
-        job = this.mixer.load(c.id, settings.quality, c.bpm, this.link.normalizes);
+        job = this.mixer.load(c.id, "HIGH", c.bpm, this.link.normalizes);
         job.catch(() => {});
         loads.set(c.id, job);
       }
@@ -1658,13 +1678,15 @@ class Session {
       });
     };
     const nag = setInterval(() => {
-      if (!waiting || !chatty || nags >= 2 || Date.now() - lastWord < 13000) return;
+      // (mashup mode looks quietly: it only speaks up when it has something)
+      if (auto || !waiting || !chatty || nags >= 2 || Date.now() - lastWord < 13000) return;
       nags++;
       void say("mashWait");
     }, 1000);
     /** Nothing came of it: the reason on the panel, and a word from the DJ */
     const sorry = (note: string) => {
       waiting = false;
+      if (auto) return void log(`Mashup mode: nothing for this song (${note})`);
       setStatus({ note });
       if (chatty && !this.stopped) void say("mashFail");
     };
@@ -1693,6 +1715,8 @@ class Session {
         const on = this.current;
         const an = on?.deck.analysis;
         const left = on && an ? an.lastSound - on.deck.positionAt(this.mixer.now) : 0;
+        // (mashup mode tries again with the next song anyway)
+        if (auto && on && an && settled() && left <= MASH_LEAD + 18 * 4 * (an.grid?.period ?? 60 / (an.bpm || 120))) return;
         if (on && an && settled() && left <= MASH_LEAD + 18 * 4 * (an.grid?.period ?? 60 / (an.bpm || 120))) {
           log(`Mashup: only ${left.toFixed(0)}s of ${on.item.track.title} left, so it will be of the next song`);
           setStatus({ busy: "Too little of this song left: the mashup comes with the next one" });

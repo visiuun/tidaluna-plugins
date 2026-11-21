@@ -2,7 +2,7 @@ import React from "react";
 import { JINGLES, jingleStyle, settings, voiceEngine, VOICES, type Commentary, type Jingle, type Mixing, type PluginSettings, type VoiceEngine } from "./config";
 import { poweredByTrueTaste } from "./brain";
 import { applyVoiceVolume, getStatus, onStatus, setTransitionOnly, startSession, stopSession } from "./session";
-import { clearVoiceFiles, getDataDir, openTrueTastePage } from "./native";
+import { clearSongCache, clearVoiceFiles, getDataDir, openTrueTastePage, songCacheSize } from "./native";
 import { prepareStock, voiceState, type VoiceState } from "./talk/voice";
 import { clearVoiceModel } from "./native";
 
@@ -88,6 +88,10 @@ export const Settings = () => {
   const [status, setStatus] = React.useState(getStatus());
   const [dir, setDir] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const [songs, setSongs] = React.useState<{ bytes: number; files: number } | null>(null);
+  React.useEffect(() => {
+    songCacheSize().then(setSongs, () => {});
+  }, []);
 
   React.useEffect(() => {
     getDataDir().then(setDir).catch(() => {});
@@ -99,7 +103,7 @@ export const Settings = () => {
     settings[key] = val;
     setState({ ...settings });
   };
-  const toggle = (key: "homeCard" | "captions" | "allowExplicit" | "coverFx" | "transitionOnly" | "stageBackdrop" | "stageLyrics" | "stageCover3d", title: string, desc: string) => (
+  const toggle = (key: "homeCard" | "captions" | "allowExplicit" | "coverFx" | "transitionOnly" | "stageBackdrop" | "stageLyrics" | "stageCover3d" | "mashupMode", title: string, desc: string) => (
     <LunaSwitchSetting
       title={title}
       desc={desc}
@@ -217,6 +221,7 @@ export const Settings = () => {
         <LunaSelectItem value="HIGH">High</LunaSelectItem>
       </LunaSelectSetting>
 
+      {toggle("mashupMode", "Mashup mode", "One mashup after another: each song that plays on its own gets a go at a mashup with one that fits it, and the DJ carries on as usual where none does")}
       {toggle("transitionOnly", "Transitions only", "No picks and no talking: whatever you play in TIDAL (an album, a playlist, your queue) is mixed together, track into track. Stays on across restarts; the DJ button still starts the full DJ on top of it")}
       {toggle("coverFx", "Cover art transitions", "The cover art turns into the next track's cover along with the mix")}
       {toggle("captions", "Captions", "Show what the DJ is saying above the DJ button")}
@@ -234,6 +239,18 @@ export const Settings = () => {
         value={state.cloudVoiceKey}
         onChange={(e: any) => set("cloudVoiceKey", String(e.target.value ?? ""))}
       />
+
+      <LunaButtonSetting
+        title="Clear song cache"
+        desc={`Songs the DJ has played are kept on disk (up to 1.5 GB, the ones used longest ago going first), so they load at once the next time instead of being downloaded again.${songs ? ` Now: ${songs.files} song${songs.files === 1 ? "" : "s"}, ${Math.round(songs.bytes / 1024 ** 2)} MB.` : ""}`}
+        disabled={!songs?.files}
+        onClick={async () => {
+          await clearSongCache().catch(() => {});
+          setSongs(await songCacheSize().catch(() => null));
+        }}
+      >
+        Clear
+      </LunaButtonSetting>
 
       <LunaButtonSetting
         title="Clear voice files"

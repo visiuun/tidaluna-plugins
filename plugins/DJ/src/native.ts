@@ -24,6 +24,8 @@ export const mixerCarry = gated(mixer.mixerCarry);
 export const mixerCarried = gated(mixer.mixerCarried);
 export const mixerAdopt = gated(mixer.mixerAdopt);
 export const playerShared = gated(mixer.playerShared);
+export const songCacheSize = gated(mixer.songCacheSize);
+export const clearSongCache = gated(mixer.clearSongCache);
 
 export const stemsReady = gated(stems.stemsReady);
 export const stemsSeparate = gated(stems.stemsSeparate);
