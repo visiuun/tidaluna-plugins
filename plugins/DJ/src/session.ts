@@ -31,7 +31,7 @@ import { persona, settings } from "./config";
 import { log, notify, warn } from "./log";
 import { lineFor, mashupLine, stockLines, type Context, type GenericKind, type Here, type Moment } from "./talk/script";
 import { prepareStock, reread, speak, stockLine, voiceState } from "./talk/voice";
-import { TidalLink } from "./tidal";
+import { playTrackAt, TidalLink } from "./tidal";
 import { nativeReady } from "./access";
 
 // ------------------ STATUS (for the UI) ------------------
@@ -431,6 +431,8 @@ class Session {
   private mashing = false;
   /** A mashup was asked for with too little of the song left: it is waiting for the next one */
   private mashNext = false;
+  /** The mashup last put together, as a share code has it (see shareCode): the song, where in it it was asked for, the other song, and whether it was turned round */
+  shareMash?: { a: string; at: number; b: string; flipped: boolean };
   /** This session was started by asking for a mashup */
   forMashup = false;
   /** Until when (on the mixer's clock) a mashup is playing out: nothing else is started over it */
@@ -1502,6 +1504,17 @@ class Session {
     setTimeout(() => this.mixer.dispose(p.deck), 400);
   }
 
+  /**
+   * A seek asked for here (the full screen's waveform), not on TIDAL's progress bar: TIDAL is moved, and the mixer
+   * with it. (TIDAL's seeks reach the session through Luna's intercept, which only sees TIDAL's own buttons: one
+   * sent from a plugin goes past it, and the DJ then took TIDAL to be off the music and moved it back)
+   */
+  seekTo(time: number) {
+    if (this.stopped) return;
+    this.link.seek(time);
+    void this.run(() => this.onSeek(time));
+  }
+
   private async onSeek(time: number) {
     const cur = this.current;
     if (!cur || this.opening || this.stopped) return;
@@ -1703,6 +1716,8 @@ class Session {
       const track = cur.item.track;
       const a = cur.deck.analysis;
       const here = () => cur.deck.positionAt(this.mixer.now);
+      // (where it was asked for: what a share code carries, so another DJ starts its own search from the same place)
+      const askedAt = here();
       const gridA = mashGrid(a, here());
       if (!gridA) {
         log(`Mashup: ${track.title} doesn't hold a beat from here on`);
@@ -1819,7 +1834,10 @@ class Session {
 
       let candidates: Track[];
       if (query) {
-        const found = await findTrack(query, track.id);
+        // (a song given by its id: a shared mashup's other song, see playShared)
+        const byId = /^id:(\d+)$/.exec(query);
+        if (byId) await ensureTracks([byId[1]]).catch(() => {});
+        const found = byId ? trackInfo(byId[1]) : await findTrack(query, track.id);
         if (!found) return void sorry(`Couldn't find "${query.trim()}"`);
         candidates = [found];
       } else {
@@ -2171,6 +2189,7 @@ class Session {
           this.immediate = false;
           this.lateVoice = undefined;
           this.syncQueue();
+          this.shareMash = { a: track.id, at: askedAt, b: partner.id, flipped: false };
           return true;
         });
         if (!set) {
@@ -2313,6 +2332,7 @@ class Session {
       log(`Mashup: not turned round (${r.why ?? "the mixer didn't answer"})`);
       return void setStatus({ note: r.why === "one" ? "Only one of these two has a singer: there is no other version" : r.why === "early" ? "It hasn't started yet" : r.why === "busy" ? "It is turning round already" : r.why === "late" ? "Too late to turn it round: this is its way out" : "No mashup is playing" });
     }
+    if (this.shareMash) this.shareMash.flipped = !this.shareMash.flipped;
     const names = tr.songs ? (r.bed === "a" ? `${tr.songs.b}'s voice over ${tr.songs.a}'s band` : `${tr.songs.a}'s voice over ${tr.songs.b}'s band`) : "the other version";
     log(`Mashup turned round ${Math.max(0, (r.at ?? this.mixer.now) - this.mixer.now).toFixed(1)}s from now: ${names}`);
     setStatus({ note: `The other version: ${names}` });
@@ -2731,10 +2751,74 @@ export const setTransitionOnly = (on: boolean) => {
 
 /** Mashes the playing song up with another: one you name, or one the DJ finds. Starts the DJ if it isn't on */
 export const mashup = async (query?: string) => {
+  if (query && parseShare(query)) return playShared(query);
   if (!session || session.follow) await startSession("dj", true);
   await session?.mashup(query?.trim() || undefined);
 };
 export const switchUp = () => session?.switchUp();
+/** A seek from the full screen: the DJ's session follows it (see Session.seekTo); false: no session to follow it */
+export const seekTo = (time: number) => {
+  if (!session || session.stopped) return false;
+  session.seekTo(time);
+  return true;
+};
+
+// ------------------ SHARED MASHUPS ------------------
+// A mashup can be handed to someone else with the DJ as a short code: the song, where in it the mashup was asked
+// for, the other song, and whether it was turned round ("DJ-MASHUP:<song>.<other>.<seconds>[.f]"). Their DJ puts the
+// song on at that point and makes the mashup with that other song. What the DJ decides about a mashup comes from the
+// two songs' sound, so it comes out the same, give or take where it starts by a beat or two.
+const SHARE_RE = /DJ-MASHUP:(\d+)\.(\d+)\.(\d+)(\.f)?/i;
+export const parseShare = (text: string) => {
+  const m = SHARE_RE.exec(text.trim());
+  return m ? { a: m[1], b: m[2], at: Number(m[3]), flipped: !!m[4] } : undefined;
+};
+/** The code for the mashup that is playing, or was last put together and is still on its way or playing; undefined: none */
+export const shareCode = () => {
+  const m = session && !session.stopped ? session.shareMash : undefined;
+  if (!m) return undefined;
+  const st = getStage();
+  const on = [st?.current?.id, st?.incoming?.id, st?.planned?.deck?.id].filter(Boolean);
+  if (!on.includes(m.a) && !on.includes(m.b)) return undefined;
+  return `DJ-MASHUP:${m.a}.${m.b}.${Math.round(m.at)}${m.flipped ? ".f" : ""}`;
+};
+let sharing = false;
+/** Plays a shared mashup (see parseShare): the song on at its place, the DJ on, the mashup made with the other song */
+export const playShared = async (code: string) => {
+  const m = parseShare(code);
+  if (!m || sharing) return;
+  sharing = true;
+  try {
+    setStatus({ busy: "Putting the shared mashup on", note: undefined });
+    await ensureTracks([m.a, m.b]).catch(() => {});
+    const a = trackInfo(m.a);
+    const b = trackInfo(m.b);
+    if (!a || !b) return void setStatus({ busy: undefined, note: "Couldn't find the songs of that mashup (not on TIDAL where you are?)" });
+    log(`Shared mashup: ${a.artists[0]?.name} - ${a.title} from ${m.at}s, with ${b.artists[0]?.name} - ${b.title}${m.flipped ? ", the other version" : ""}`);
+    // The song, at a moment before where it was asked for (the DJ needs it playing on its own first)
+    if (session && !session.stopped) await stopSession("making way for a shared mashup", true);
+    if (!(await playTrackAt(m.a, Math.max(0, m.at - 3)))) return void setStatus({ busy: undefined, note: "Couldn't put the first song of that mashup on" });
+    await startSession("dj", true);
+    const s = session as Session | undefined;
+    if (!s || s.stopped) return;
+    await s.mashup(`id:${m.b}`);
+    if (!m.flipped) return;
+    // Turned round, the way it was shared: as soon as it is playing
+    for (let i = 0; i < 240 && !s.stopped; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const tr = getStatus().transition;
+      if (tr?.kind === "mashup" && s.mixer.now >= tr.start + 1) {
+        await s.flipMashup();
+        return;
+      }
+    }
+  } catch (err) {
+    warn("Couldn't play the shared mashup", err);
+    setStatus({ busy: undefined, note: "Couldn't play that mashup" });
+  } finally {
+    sharing = false;
+  }
+};
 export const ask = (text: string) => session?.ask(text);
 export const skip = () => session?.skip();
 /** 0-1, how loud the DJ's voice is right now */

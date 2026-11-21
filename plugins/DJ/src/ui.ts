@@ -5,7 +5,8 @@ import { poweredByTrueTaste, suggestions } from "./brain";
 import { openTrueTastePage } from "./native";
 import { persona, settings, VOICES, type Commentary } from "./config";
 import { readingNow } from "./talk/voice";
-import { ask, flipMashup, getStatus, isActive, mashup, mixerClock, onStatus, setTransitionOnly, skip, startSession, stopSession, switchUp, voiceLevel, type Status } from "./session";
+import { ask, flipMashup, getStatus, isActive, mashup, mixerClock, onStatus, setTransitionOnly, shareCode, skip, startSession, stopSession, switchUp, voiceLevel, type Status } from "./session";
+import { copyText } from "./clipboard";
 
 const ROOT = "visiuun-dj";
 const STYLE_ID = `${ROOT}-style`;
@@ -82,40 +83,57 @@ const css = `
   .${ROOT}-caption.show { opacity: 1; transform: none; }
   .${ROOT}-caption b { display: block; font-size: 10px; letter-spacing: .8px; text-transform: uppercase; opacity: .6; margin-bottom: 3px; font-weight: 700; }
 
-  .${ROOT}-panel { position: fixed; z-index: 9999; width: 340px; padding: 16px; border-radius: 16px; background: rgba(20,20,26,.96); backdrop-filter: blur(18px); color: #fff; box-shadow: 0 14px 50px rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.09); font-size: 13px; line-height: 1.45; display: none; }
+  /* The panel, in TIDAL's own look: its fonts and colours (its design tokens, with their values as fallbacks), a solid
+     card like its menus, no outlines, white for what matters most and grey for the rest */
+  .${ROOT}-panel { --dj-text: "Square Sans Text VF", "Square Sans Text", Helvetica, Arial, sans-serif; --dj-display: "Square Sans Display VF", "Square Sans Display", Helvetica, Arial, sans-serif; --dj-fill: var(--wave-color-opacity-contrast-fill-ultra-thin, #ffffff1a); --dj-fill-hover: var(--wave-color-opacity-contrast-fill-thin, #ffffff33); --dj-grey: var(--wave-color-solid-contrast-darker, #afafb6); --dj-grey2: var(--wave-color-solid-contrast-darkest, #787887); --dj-accent: var(--wave-color-solid-accent-fill, #33ffee);
+    position: fixed; z-index: 9999; width: 360px; padding: 20px; border-radius: 12px; background: var(--wave-color-solid-base-brighter, #1f1f23); color: #fff; box-shadow: 0 16px 48px rgba(0,0,0,.6); font-family: var(--dj-text); font-size: 14px; line-height: 20px; font-weight: 500; -webkit-font-smoothing: antialiased; display: none; }
   .${ROOT}-panel.open { display: block; }
-  /* (opened from the DJ full screen, which covers the window: over it) */
   .${ROOT}-panel.over { z-index: 2147483600; }
-  .${ROOT}-panel h3 { margin: 0; font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
-  .${ROOT}-panel h3 small { font-size: 12px; font-weight: 500; opacity: .6; margin-left: auto; }
-  .${ROOT}-status { margin: 8px 0 12px; min-height: 18px; opacity: .78; }
-  .${ROOT}-status em { font-style: normal; color: #33ffee; }
-  .${ROOT}-powered { display: none; margin-top: 12px; text-align: center; font-size: 10px; letter-spacing: .4px; opacity: .45; }
-  .${ROOT}-powered.on { display: block; }
-  .${ROOT}-powered a { font-weight: 700; color: inherit; text-decoration: none; cursor: pointer; }
-  .${ROOT}-powered:has(a:hover) { opacity: .9; }
-  .${ROOT}-powered a:hover { text-decoration: underline; }
-  .${ROOT}-said { margin: 0 0 12px; padding: 9px 11px; border-radius: 10px; background: rgba(255,255,255,.06); font-size: 12.5px; }
-  .${ROOT}-ask { display: flex; gap: 6px; }
-  .${ROOT}-ask input { flex: 1; min-width: 0; height: 34px; padding: 0 11px; border-radius: 9px; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.06); color: #fff; font: inherit; outline: none; }
-  .${ROOT}-ask input:focus { border-color: #33ffee; }
-  .${ROOT}-ask input::placeholder { color: rgba(255,255,255,.45); }
-  .${ROOT}-panel button.pill { height: 30px; padding: 0 12px; border-radius: 15px; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.06); color: #fff; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
-  .${ROOT}-panel button.pill:hover { background: rgba(255,255,255,.13); }
-  .${ROOT}-panel button.pill.main { background: #fff; color: #000; border-color: #fff; font-weight: 600; }
-  .${ROOT}-panel button.pill.main:hover { background: #e9e9e9; }
+  .${ROOT}-panel h3 { margin: 0; font-family: var(--dj-display); font-size: 20px; line-height: 28px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .${ROOT}-panel h3 small { font-family: var(--dj-text); font-size: 13px; font-weight: 500; color: var(--dj-grey); margin-left: auto; }
+  .${ROOT}-status { margin: 6px 0 16px; min-height: 20px; color: var(--dj-grey); font-size: 13px; line-height: 18px; }
+  .${ROOT}-status em { font-style: normal; color: #fff; font-weight: 600; }
+  .${ROOT}-said { margin: -4px 0 16px; padding: 10px 12px; border-radius: 8px; background: var(--dj-fill); font-size: 13px; line-height: 18px; }
+  .${ROOT}-panel h4 { margin: 18px 0 8px; font-family: var(--dj-display); font-size: 15px; line-height: 20px; font-weight: 700; }
+  .${ROOT}-panel h4:first-of-type { margin-top: 0; }
+  .${ROOT}-ask { display: flex; gap: 8px; }
+  .${ROOT}-ask input { flex: 1; min-width: 0; height: 40px; padding: 0 14px; border-radius: 8px; border: 0; background: var(--dj-fill); color: #fff; font: inherit; font-size: 14px; outline: none; box-shadow: inset 0 0 0 1px transparent; transition: box-shadow .15s ease, background-color .15s ease; }
+  .${ROOT}-ask input:hover { background: var(--dj-fill-hover); }
+  .${ROOT}-ask input:focus { background: var(--dj-fill); box-shadow: inset 0 0 0 1px rgba(255,255,255,.6); }
+  .${ROOT}-ask input::placeholder { color: var(--dj-grey2); }
+  .${ROOT}-panel button.pill { height: 40px; padding: 0 18px; border-radius: 1000px; border: 0; background: var(--dj-fill); color: #fff; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap; flex: none; transition: background-color .15s ease; }
+  .${ROOT}-panel button.pill:hover { background: var(--dj-fill-hover); }
+  .${ROOT}-panel button.pill.main { background: #fff; color: #000; }
+  .${ROOT}-panel button.pill.main:hover { background: var(--wave-color-solid-contrast-dark, #e4e4e7); }
   .${ROOT}-panel button.pill[disabled] { opacity: .4; cursor: default; }
-  .${ROOT}-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 14px; }
-  .${ROOT}-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-  .${ROOT}-row label { opacity: .6; font-size: 12px; width: 78px; flex: none; }
-  .${ROOT}-reader { margin: 4px 0 0 86px; font-size: 10.5px; line-height: 1.3; opacity: .5; }
-  .${ROOT}-row select { flex: 1; min-width: 0; max-width: 100%; text-overflow: ellipsis; height: 30px; border-radius: 8px; border: 1px solid rgba(255,255,255,.14); background: #1d1d24; color: #fff; font: inherit; font-size: 12px; padding: 0 6px; }
-  .${ROOT}-mode { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.08); }
+  .${ROOT}-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0; }
+  .${ROOT}-chips:empty { display: none; }
+  .${ROOT}-panel .${ROOT}-chips button.pill { height: 32px; padding: 0 14px; font-size: 13px; }
+  .${ROOT}-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px; }
+  .${ROOT}-row + .${ROOT}-row, .${ROOT}-reader + .${ROOT}-row { margin-top: 8px; }
+  .${ROOT}-row label { color: #fff; font-size: 14px; flex: none; }
+  .${ROOT}-reader { margin: 2px 0 0; text-align: right; font-size: 12px; line-height: 16px; color: var(--dj-grey2); }
+  .${ROOT}-row select { flex: 0 1 220px; min-width: 0; height: 36px; border-radius: 8px; border: 0; background: var(--dj-fill) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23afafb6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center / 16px; color: #fff; font: inherit; font-size: 13px; padding: 0 32px 0 12px; appearance: none; -webkit-appearance: none; cursor: pointer; text-overflow: ellipsis; outline: none; }
+  .${ROOT}-row select:hover { background-color: var(--dj-fill-hover); }
+  .${ROOT}-row select option { background: #1f1f23; color: #fff; }
+  .${ROOT}-mode { display: flex; align-items: center; gap: 14px; margin-top: 18px; padding: 14px 0 0; border-top: 1px solid var(--dj-fill); }
   .${ROOT}-mode div { flex: 1; min-width: 0; }
-  .${ROOT}-mode strong { display: block; font-size: 12.5px; font-weight: 600; }
-  .${ROOT}-mode span { display: block; font-size: 11.5px; opacity: .6; }
-  .${ROOT}-actions { display: flex; gap: 6px; margin-top: 14px; }
+  .${ROOT}-mode strong { display: block; font-size: 14px; font-weight: 600; }
+  .${ROOT}-mode span { display: block; font-size: 12px; line-height: 16px; color: var(--dj-grey); margin-top: 2px; }
+  /* a switch, as TIDAL's own settings have them */
+  .${ROOT}-switch { position: relative; flex: none; width: 40px; height: 24px; border-radius: 1000px; border: 0; padding: 0; background: var(--dj-fill-hover); cursor: pointer; transition: background-color .2s ease; }
+  .${ROOT}-switch::after { content: ""; position: absolute; left: 3px; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform .2s ease, background-color .2s ease; }
+  .${ROOT}-switch.on { background: #fff; }
+  .${ROOT}-switch.on::after { transform: translateX(16px); background: #000; }
+  .${ROOT}-actions { display: flex; align-items: center; gap: 8px; margin-top: 18px; }
   .${ROOT}-actions .spacer { flex: 1; }
+  .${ROOT}-panel button.icon { width: 40px; height: 40px; padding: 0; border-radius: 1000px; border: 0; background: transparent; color: #fff; cursor: pointer; display: grid; place-items: center; flex: none; transition: background-color .15s ease; }
+  .${ROOT}-panel button.icon:hover { background: var(--dj-fill); }
+  .${ROOT}-panel button.icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .${ROOT}-powered { display: none; margin-top: 16px; text-align: center; font-size: 11px; line-height: 14px; color: var(--dj-grey2); }
+  .${ROOT}-powered.on { display: block; }
+  .${ROOT}-powered a { font-weight: 700; color: var(--dj-grey); text-decoration: none; cursor: pointer; }
+  .${ROOT}-powered a:hover { color: #fff; }
 
   .${ROOT}-card { position: relative; display: flex; align-items: center; gap: 18px; margin: 0 0 24px; padding: 18px 22px; border-radius: 14px; overflow: hidden; cursor: pointer; color: #fff; background: linear-gradient(110deg, #10131c 0%, #171a2e 55%, #251a3a 100%); border: 1px solid rgba(255,255,255,.07); }
   .${ROOT}-card::before { content: ""; position: absolute; right: -60px; top: -90px; width: 320px; height: 320px; border-radius: 50%; background: conic-gradient(from 40deg, #33ffee, #5b8cff, #b45cff, #ff5ea8, #33ffee); filter: blur(70px); opacity: .32; transition: opacity .3s ease; }
@@ -215,7 +233,7 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   const mashRow = el("div", `${ROOT}-ask`);
   const mashInput = el("input");
   mashInput.type = "text";
-  mashInput.placeholder = "Mash up with… (empty: DJ picks)";
+  mashInput.placeholder = "Song name or shared code";
   mashInput.maxLength = 120;
   shield(mashInput);
   const mashBtn = el("button", "pill", "Mashup");
@@ -226,7 +244,20 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   flipBtn.type = "button";
   flipBtn.title = "Turns the mashup round: the other song's band, with the other singer over it";
   flipBtn.style.display = "none";
-  mashRow.append(mashInput, mashBtn, flipBtn);
+  // ...and a code for it, to hand to someone else with the DJ (see playShared)
+  const shareBtn = el("button", "pill", "Share");
+  shareBtn.type = "button";
+  shareBtn.title = "Copies a code for this mashup: pasted into this box, someone else's DJ plays the same mashup";
+  shareBtn.style.display = "none";
+  mashRow.append(mashInput, mashBtn);
+  // (while one plays: its other version, and its code)
+  const mashChips = el("div", `${ROOT}-chips`);
+  mashChips.append(flipBtn, shareBtn);
+  // Section headings, as TIDAL's menus have them
+  const askHead = el("h4", undefined, "Ask the DJ");
+  const mashHead = el("h4", undefined, "Mashup");
+  mashHead.title = "Another song played together with this one: one you name, one the DJ finds (leave it empty), or a mashup someone shared with you (paste its code)";
+  const voiceHead = el("h4", undefined, "Voice");
   const voiceRow = el("div", `${ROOT}-row`);
   const voiceSelect = el("select");
   for (const v of VOICES) {
@@ -234,7 +265,7 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
     o.value = v.id;
     voiceSelect.appendChild(o);
   }
-  voiceRow.append(el("label", undefined, "Voice"), voiceSelect);
+  voiceRow.append(el("label", undefined, "Character"), voiceSelect);
   // (the names in the list are the DJ's characters: who actually reads them depends on the voice engine)
   const reader = el("div", `${ROOT}-reader`);
   reader.title = "Change it under Voice engine in the DJ's settings";
@@ -255,14 +286,17 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   const modeRow = el("div", `${ROOT}-mode`);
   const modeText = el("div");
   modeText.append(el("strong", undefined, "Transitions only"), el("span", undefined, "Mixes whatever you play. No picks, no talking"));
-  const modeBtn = el("button", "pill");
+  const modeBtn = el("button", `${ROOT}-switch`);
   modeBtn.type = "button";
+  modeBtn.setAttribute("role", "switch");
   modeRow.append(modeText, modeBtn);
   const actions = el("div", `${ROOT}-actions`);
   const primary = el("button", "pill main");
   const skipBtn = el("button", "pill", "Skip");
   const stopBtn = el("button", "pill", "Stop DJ");
-  const fullBtn = el("button", "pill", "Full screen");
+  const fullBtn = el("button", "icon");
+  fullBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>`;
+  fullBtn.title = "Full screen";
   for (const b of [primary, skipBtn, stopBtn, fullBtn]) b.type = "button";
   const spacer = el("div", "spacer");
   actions.append(primary, skipBtn, spacer, fullBtn, stopBtn);
@@ -276,7 +310,7 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   });
   powered.append("Powered by ", poweredLink);
   powered.title = "The DJ picks by what the TrueTaste plugin has measured of your listening: what you play to the end, what you skip, what you gave a thumbs up";
-  panel.append(title, statusLine, said, askRow, chips, mashRow, voiceRow, reader, talkRow, modeRow, actions, powered);
+  panel.append(title, statusLine, said, askHead, askRow, chips, mashHead, mashRow, mashChips, voiceHead, voiceRow, reader, talkRow, modeRow, actions, powered);
   document.body.appendChild(panel);
 
   let open = false;
@@ -445,16 +479,22 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
     said.style.display = s.caption ? "" : "none";
     said.textContent = s.caption ?? "";
     const on = s.phase === "playing" && !follow;
-    askRow.style.display = on ? "" : "none";
+    askHead.style.display = askRow.style.display = on ? "" : "none";
     chips.style.display = on ? "" : "none";
-    mashRow.style.display = s.phase === "starting" || s.phase === "stopping" ? "none" : "";
-    flipBtn.style.display = s.transition?.kind === "mashup" && s.transition.detail?.way === "voice" ? "" : "none";
+    const mashing = s.transition?.kind === "mashup";
+    mashHead.style.display = mashRow.style.display = s.phase === "starting" || s.phase === "stopping" ? "none" : "";
+    // (no second mashup asked for while one is coming or playing)
+    mashBtn.style.display = mashing ? "none" : "";
+    mashInput.disabled = mashing;
+    flipBtn.style.display = mashing && s.transition?.detail?.way === "voice" ? "" : "none";
+    shareBtn.style.display = mashing && shareCode() ? "" : "none";
+    mashChips.style.display = flipBtn.style.display === "none" && shareBtn.style.display === "none" ? "none" : "";
     primary.textContent = s.phase === "off" || follow ? "Start DJ" : "Switch it up";
     primary.disabled = s.phase === "starting" || s.phase === "stopping";
     skipBtn.style.display = on ? "" : "none";
     stopBtn.style.display = s.phase === "off" || follow ? "none" : "";
-    modeBtn.textContent = settings.transitionOnly ? "On" : "Off";
-    modeBtn.classList.toggle("main", !!settings.transitionOnly);
+    modeBtn.classList.toggle("on", !!settings.transitionOnly);
+    modeBtn.setAttribute("aria-checked", String(!!settings.transitionOnly));
     voiceSelect.value = settings.voice;
     talkSelect.value = settings.commentary;
   };
@@ -499,6 +539,13 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   };
   mashBtn.addEventListener("click", mash);
   flipBtn.addEventListener("click", () => void flipMashup());
+  shareBtn.addEventListener("click", async () => {
+    const code = shareCode();
+    if (!code) return;
+    const ok = await copyText(code);
+    shareBtn.textContent = ok ? "Code copied" : "Couldn't copy";
+    setTimeout(() => (shareBtn.textContent = "Share"), 2200);
+  });
   mashInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") mash();
     if (e.key === "Escape") setOpen(false);

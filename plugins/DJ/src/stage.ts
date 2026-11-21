@@ -20,6 +20,7 @@
 // leaving it from here took TIDAL out of that view half-way). It covers the window, and is gone again when closed.
 import type { LunaUnload } from "@luna/core";
 import type { MashArrangement, MashBlock, Wave } from "./audio/mixer";
+import { copyText } from "./clipboard";
 import { lookingForMusic, type CoverTransition, type Stage, type StageDeck, type Status } from "./session";
 
 export type StageSource = {
@@ -42,6 +43,8 @@ export type StageSource = {
   mashup: () => void;
   /** The other version of the mashup that is playing: the other song's band, and the other singer */
   flipMashup: () => void;
+  /** The code that hands the mashup that is on to someone else with the DJ (see playShared in session.ts); undefined: none */
+  shareMashup: () => string | undefined;
   /** How TIDAL marks a track: explicit, made with AI, an upload, in Dolby Atmos */
   marks: (trackId: string) => Promise<Marks | undefined>;
   /**
@@ -52,6 +55,15 @@ export type StageSource = {
   /** The DJ's panel (requests, the voice, how much it talks, transitions only): opened under `anchor`, or closed if it is open there */
   panel: { toggle: (anchor: HTMLElement) => void; isOpen: () => boolean; close: () => void };
   skip: () => void;
+  /** TIDAL's own controls: play/pause, back, where in the track, the volume */
+  player: {
+    playing: () => boolean;
+    toggle: () => void;
+    previous: () => void;
+    seek: (seconds: number) => void;
+    volume: () => { percent: number; muted: boolean };
+    setVolume: (percent: number) => void;
+  };
   stop: () => void;
   /** What the full screen takes from other plugins, when they are there (see THROUGH): their backdrop, TIDAL's lyrics, 3D Cover's depth on the cover */
   guests: () => { backdrop: boolean; lyrics: boolean; cover3d: boolean };
@@ -236,8 +248,25 @@ const css = `
   .${R} .said .w { color: rgba(255,255,255,.35); transition: color .25s ease; }
   .${R} .said .w.done { color: #fff; }
 
-  .${R} .timeline { position: relative; min-height: 0; }
+  /* TIDAL's controls, at the middle of the screen on either side: back, play/pause and next on the left, the volume on the right */
+  .${R} .tlrow { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .${R} .timeline { position: relative; min-height: 0; cursor: grab; touch-action: none; }
+  .${R} .timeline.grabbing { cursor: grabbing; }
   .${R} .timeline canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .${R} .ctl { position: absolute; left: 56px; top: 50%; transform: translateY(-50%); z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 10px; transition: opacity .4s ease; }
+  .${R} .ctl .icon { width: 44px; height: 44px; }
+  .${R} .ctl .icon.play svg { width: 28px; height: 28px; }
+  .${R} .ctl .icon svg.solid { fill: currentColor; stroke: currentColor; stroke-width: 1.2; }
+  /* (a bar that fills from the bottom, no knob: it grows a little under the mouse; the percentage under it) */
+  .${R} .vol { position: absolute; right: 56px; top: 50%; transform: translateY(-50%); z-index: 3; height: 200px; display: flex; flex-direction: column; align-items: center; gap: 12px; width: 44px; transition: opacity .4s ease; }
+  .${R} .vol .vtrack { position: relative; flex: 1; width: 28px; min-height: 40px; cursor: pointer; touch-action: none; }
+  .${R} .vol .vtrack::before, .${R} .vol .vfill { position: absolute; left: 50%; width: 6px; margin-left: -3px; border-radius: 1000px; transition: width .15s ease, margin-left .15s ease; }
+  .${R} .vol .vtrack::before { content: ""; top: 0; bottom: 0; background: ${T.ultraThin}; }
+  .${R} .vol .vfill { bottom: 0; background: #fff; }
+  .${R} .vol:hover .vtrack::before, .${R} .vol:hover .vfill { width: 10px; margin-left: -5px; }
+  .${R} .vol .pct { font-size: 12px; line-height: 16px; font-weight: 600; font-variant-numeric: tabular-nums; color: ${T.secondary}; }
+  .${R} .vol.muted .vfill { background: ${T.tertiary}; }
+  .${R}.resting .ctl, .${R}.resting .vol { opacity: 0; pointer-events: none; }
 
   /* ("Up next" goes out of sight with the buttons while the mouse is still, and is back for as long as there is
      something to see in it: a mix near or on, the DJ picking music, a change in the row itself. See showNext) */
@@ -261,7 +290,7 @@ const css = `
 
   .${R} .idle { position: absolute; inset: 64px 0 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; padding: 0 32px; }
   .${R}[data-mode="off"] .idle { display: flex; }
-  .${R}[data-mode="off"] .main, .${R}[data-mode="off"] .timeline, .${R}[data-mode="off"] .next, .${R}[data-mode="off"] .said { visibility: hidden; }
+  .${R}[data-mode="off"] .main, .${R}[data-mode="off"] .tlrow, .${R}[data-mode="off"] .next, .${R}[data-mode="off"] .said, .${R}[data-mode="off"] .ctl, .${R}[data-mode="off"] .vol { visibility: hidden; }
   .${R} .idle h2 { margin: 0; font-family: ${T.display}; font-size: 48px; line-height: 1.1; font-weight: 700; }
   .${R} .idle p { margin: 0; color: ${T.secondary}; font-size: 16px; line-height: 24px; max-width: 520px; }
   .${R} .idle div { display: flex; gap: 12px; justify-content: center; margin-top: 8px; }
@@ -270,6 +299,10 @@ const css = `
 
 // (TIDAL's own "close the now-playing view" chevron)
 const ICON_CLOSE = `<svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>`;
+const ICON_PREV = `<svg class="solid" viewBox="0 0 24 24"><path d="M6 5.5v13" fill="none" stroke-width="2.2"/><path d="M18.5 5.8v12.4a.8.8 0 0 1-1.2.7L8.6 12.7a.8.8 0 0 1 0-1.4l8.7-6.2a.8.8 0 0 1 1.2.7Z"/></svg>`;
+const ICON_NEXT = `<svg class="solid" viewBox="0 0 24 24"><path d="M18 5.5v13" fill="none" stroke-width="2.2"/><path d="M5.5 5.8v12.4a.8.8 0 0 0 1.2.7l8.7-6.2a.8.8 0 0 0 0-1.4L6.7 5.1a.8.8 0 0 0-1.2.7Z"/></svg>`;
+const ICON_PLAY = `<svg class="solid" viewBox="0 0 24 24"><path d="M8 5.6v12.8a.9.9 0 0 0 1.4.8l10-6.4a.9.9 0 0 0 0-1.6l-10-6.4A.9.9 0 0 0 8 5.6Z"/></svg>`;
+const ICON_PAUSE = `<svg class="solid" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.6" height="14" rx="1"/><rect x="13.9" y="5" width="3.6" height="14" rx="1"/></svg>`;
 const ICON_LYRICS = `<svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h8"/></svg>`;
 const ICON_OPTIONS = `<svg viewBox="0 0 24 24"><path d="M4 7h8.5M19.5 7h.5M4 17h.5M11.5 17H20"/><circle cx="16" cy="7" r="3"/><circle cx="8" cy="17" r="3"/></svg>`;
 // (TrueTaste's thumb)
@@ -439,6 +472,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const switchBtn = el("button", "btn primary", "Switch it up");
   const mashBtn = el("button", "btn", "Mashup");
   const flipBtn = el("button", "btn", "Other version");
+  const shareBtn = el("button", "btn", "Share");
   const skipBtn = el("button", "btn", "Skip");
   const djBtn = el("button", "btn primary", "Start the DJ");
   const stopBtn = el("button", "btn", "Stop DJ");
@@ -447,10 +481,12 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const downBtn = el("button", "icon thumb down");
   const optionsBtn = el("button", "icon");
   const lyrBtn = el("button", "icon toggle");
-  for (const b of [switchBtn, mashBtn, flipBtn, skipBtn, djBtn, stopBtn, closeBtn, upBtn, downBtn, optionsBtn, lyrBtn]) b.type = "button";
+  for (const b of [switchBtn, mashBtn, flipBtn, shareBtn, skipBtn, djBtn, stopBtn, closeBtn, upBtn, downBtn, optionsBtn, lyrBtn]) b.type = "button";
   mashBtn.title = "Mash this song up with one the DJ picks for it";
   flipBtn.title = "Turn the mashup round: the other song's band, with the other singer over it";
   flipBtn.style.display = "none";
+  shareBtn.title = "Copy a code for this mashup: pasted into the DJ's \"Mash up with\" box, someone else's DJ plays the same mashup";
+  shareBtn.style.display = "none";
   closeBtn.title = "Close (Esc)";
   closeBtn.innerHTML = ICON_CLOSE;
   upBtn.innerHTML = downBtn.innerHTML = ICON_THUMB;
@@ -459,7 +495,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   lyrBtn.title = "Lyrics";
   lyrBtn.innerHTML = ICON_LYRICS;
   lyrBtn.style.display = "none";
-  top.append(who, banner, el("div", "sp"), upBtn, downBtn, djBtn, switchBtn, mashBtn, flipBtn, skipBtn, stopBtn, lyrBtn, optionsBtn, closeBtn);
+  top.append(who, banner, el("div", "sp"), upBtn, downBtn, djBtn, switchBtn, mashBtn, flipBtn, shareBtn, skipBtn, stopBtn, lyrBtn, optionsBtn, closeBtn);
 
   const main = el("div", "main");
   const fx = el("div", "fx");
@@ -479,6 +515,27 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const timeline = el("div", "timeline");
   const canvas = el("canvas");
   timeline.appendChild(canvas);
+  const ctl = el("div", "ctl");
+  const prevBtn = el("button", "icon");
+  const playBtn = el("button", "icon play");
+  const nextBtn = el("button", "icon");
+  prevBtn.innerHTML = ICON_PREV;
+  nextBtn.innerHTML = ICON_NEXT;
+  playBtn.innerHTML = ICON_PAUSE;
+  playBtn.title = "Pause";
+  prevBtn.title = "Back";
+  nextBtn.title = "Next";
+  for (const b of [prevBtn, playBtn, nextBtn]) b.type = "button";
+  ctl.append(nextBtn, playBtn, prevBtn);
+  const vol = el("div", "vol");
+  const volPct = el("span", "pct");
+  const volTrack = el("div", "vtrack");
+  const volFill = el("div", "vfill");
+  volTrack.append(volFill);
+  vol.append(volTrack, volPct);
+  vol.title = "Volume (the mouse wheel works on it)";
+  const tlRow = el("div", "tlrow");
+  tlRow.append(timeline);
   const next = el("div", "next");
   const cards = el("div", "cards");
   next.append(el("h3", undefined, "Up next"), cards);
@@ -491,11 +548,11 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   idleActions.append(idleStart, idleFollow);
   idle.append(el("h2", undefined, "DJ"), el("p", undefined, "Music picked for you and mixed track into track. Everything the DJ does shows here as it happens."), idleActions);
 
-  frame.append(top, main, said, timeline, next);
+  frame.append(top, main, said, tlRow, next);
   const shade = el("div", "shade");
   // (what the background is in when it is under TIDAL's lyrics, not in the full screen: see placeBg)
   const underWrap = el("div", `${R}-under`);
-  root.append(bg, shade, frame, idle);
+  root.append(bg, shade, frame, ctl, vol, idle);
   document.body.appendChild(root);
   const g = canvas.getContext("2d")!;
 
@@ -749,13 +806,24 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   };
   /** While a mashup with two singers plays, the button that asks for one is the button that turns it round */
   let flipShown = false;
+  let mashBusyShown = false;
+  let shareShown = false;
   const showFlip = (tr: Live | undefined, t: number) => {
+    // (Share: for as long as a mashup is coming or playing, and there is a code for it)
+    const share = tr?.kind === "mashup" && t < tr.end && src.status().mode === "dj" && !!src.shareMashup();
+    if (share !== shareShown) {
+      shareShown = share;
+      shareBtn.style.display = share ? "" : "none";
+    }
     const arr = tr?.kind === "mashup" ? mashOf(tr) : undefined;
     const on = !!arr?.flippable && t >= arr.from && t < arr.end - (arr.per ?? 8) * (arr.bar ?? 2) && src.status().mode === "dj";
-    if (on === flipShown) return;
+    // (and the button that asks for a mashup is away for as long as one is coming or playing, other version or not)
+    const busy = tr?.kind === "mashup" && t < tr.end;
+    if (on === flipShown && busy === mashBusyShown) return;
     flipShown = on;
+    mashBusyShown = busy;
     flipBtn.style.display = on ? "" : "none";
-    mashBtn.style.display = on || src.status().mode !== "dj" ? "none" : "";
+    mashBtn.style.display = busy || src.status().mode !== "dj" ? "none" : "";
   };
 
   // ------------------ WHAT IS ON ------------------
@@ -1441,8 +1509,11 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     const span = pair && tr!.end - t > 30 ? Math.min(90, tr!.end - t + 12) / 0.7 : 40;
     const playX = Math.round(W * 0.3);
     const pps = W / span;
-    const xOf = (time: number) => playX + (time - t) * pps;
-    const tOf = (x: number) => t + (x - playX) / pps;
+    // (while the waveform is dragged, everything on it moves along with the mouse, and "Now" stays where it is)
+    const shift = scrub?.dx ?? 0;
+    const xOf = (time: number) => playX + shift + (time - t) * pps;
+    const tOf = (x: number) => t + (x - playX - shift) / pps;
+    view = { pps, playX, t, lead: sc.lead };
     g.font = `500 12px ${T.text}`;
     const mashing = tr?.kind === "mashup";
     const arr = mashOf(tr);
@@ -1501,7 +1572,8 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
           pk = Math.pow(pk / 255, 0.75);
           rm = Math.pow(rm / 255, 0.75);
         }
-        const past = tm < t ? 0.35 : 1;
+        // (dimmed behind "Now"; while the waveform is dragged, behind where letting go would take it)
+        const past = tm < t - shift / pps ? 0.35 : 1;
         for (const h of ["top", "low"] as Half[]) {
           const on = pair ? heardOf(tr!, side, h, tm, arr) : 1;
           const a = past * (0.12 + 0.78 * on);
@@ -1718,10 +1790,152 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     // now
     g.fillStyle = "#fff";
     g.fillRect(playX - 1, Math.max(0, lanesTop - 6), 2, H - Math.max(0, lanesTop - 6));
-    if (!pair) {
+    const target = scrub && scrubTarget(scrub.dx);
+    if (target !== undefined) {
+      // (where letting go will take the track, on a label of its own: the marks of a mix are up there too)
+      const label = `${mmss(target)} / ${mmss(scrub!.lead.duration)}`;
+      g.font = `600 12px ${T.text}`;
+      const w = g.measureText(label).width + 14;
+      const lx = clamp(playX - w / 2, 0, W - w);
+      const ly = Math.max(0, lanesTop - 26);
+      g.fillStyle = "#fff";
+      g.beginPath();
+      g.roundRect(lx, ly, w, 18, 9);
+      g.fill();
+      g.fillStyle = "#000";
+      g.textAlign = "center";
+      g.fillText(label, lx + w / 2, ly + 13);
+    } else if (!pair) {
       g.textAlign = "center";
       g.fillText("Now", playX, lanesTop - 4);
     }
+  };
+
+  // ------------------ TIDAL'S CONTROLS ------------------
+  // The waveform can be dragged to move the track (drag it right to go back, left to go on, the way a record is
+  // moved under the needle), or clicked to go to that point. "Now" stays put, a label on it says where letting go
+  // takes the track, and TIDAL is moved there: the DJ follows TIDAL's seeks as it always does.
+  let view: { pps: number; playX: number; t: number; lead?: StageDeck } | undefined;
+  let scrub: { pointer: number; x0: number; dx: number; lead: StageDeck; moved: boolean } | undefined;
+  const leadMap = (d: StageDeck, t: number) => (d.map?.length ? d.map : [{ t: (d.swap ?? t) - d.pos, pos: 0, rate: 1 }]);
+  /** The position in the lead track that is under "Now" with the waveform moved by dx */
+  const scrubTarget = (dx: number) => {
+    if (!scrub || !view) return undefined;
+    const at = view.t - dx / view.pps;
+    return clamp(posAt(leadMap(scrub.lead, view.t), at), 0, Math.max(0, scrub.lead.duration - 0.5));
+  };
+  timeline.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || !view?.lead) return;
+    scrub = { pointer: e.pointerId, x0: e.clientX, dx: 0, lead: view.lead, moved: false };
+    timeline.setPointerCapture(e.pointerId);
+    timeline.classList.add("grabbing");
+    e.preventDefault();
+  });
+  timeline.addEventListener("pointermove", (e) => {
+    if (!scrub || e.pointerId !== scrub.pointer) return;
+    scrub.dx = e.clientX - scrub.x0;
+    if (Math.abs(scrub.dx) > 3) scrub.moved = true;
+  });
+  const endScrub = (e: PointerEvent, cancel = false) => {
+    if (!scrub || e.pointerId !== scrub.pointer) return;
+    const s = scrub;
+    let target: number | undefined;
+    if (!cancel && view) {
+      if (s.moved) target = scrubTarget(s.dx);
+      else {
+        // a click: that point of the waveform comes to "Now"
+        const x = e.clientX - timeline.getBoundingClientRect().left;
+        s.dx = view.playX - x;
+        target = scrubTarget(s.dx);
+      }
+    }
+    scrub = undefined;
+    timeline.classList.remove("grabbing");
+    try {
+      timeline.releasePointerCapture(e.pointerId);
+    } catch {}
+    if (target !== undefined && Number.isFinite(target)) src.player.seek(target);
+  };
+  timeline.addEventListener("pointerup", (e) => endScrub(e));
+  timeline.addEventListener("pointercancel", (e) => endScrub(e, true));
+
+  prevBtn.addEventListener("click", () => src.player.previous());
+  nextBtn.addEventListener("click", () => src.skip());
+  playBtn.addEventListener("click", () => {
+    src.player.toggle();
+    // (shown at once, not when TIDAL gets round to it)
+    shownPlaying = !shownPlaying;
+    playBtn.innerHTML = shownPlaying ? ICON_PAUSE : ICON_PLAY;
+    playHeldUntil = Date.now() + 1500;
+  });
+
+  // The volume: TIDAL's own (the DJ's music follows it). Dragged, clicked, or the mouse wheel over it
+  let volDrag: number | undefined;
+  let volHeld: { percent: number; until: number } | undefined;
+  const setVol = (p: number) => {
+    const percent = Math.round(clamp(p, 0, 100));
+    volHeld = { percent, until: Date.now() + 800 };
+    showVol(percent, false);
+    src.player.setVolume(percent);
+  };
+  const volAt = (clientY: number) => {
+    const r = volTrack.getBoundingClientRect();
+    return ((r.bottom - clientY) / Math.max(1, r.height)) * 100;
+  };
+  volTrack.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    volDrag = e.pointerId;
+    volTrack.setPointerCapture(e.pointerId);
+    setVol(volAt(e.clientY));
+    e.preventDefault();
+  });
+  volTrack.addEventListener("pointermove", (e) => {
+    if (volDrag === e.pointerId) setVol(volAt(e.clientY));
+  });
+  const endVol = (e: PointerEvent) => {
+    if (volDrag !== e.pointerId) return;
+    volDrag = undefined;
+    try {
+      volTrack.releasePointerCapture(e.pointerId);
+    } catch {}
+  };
+  volTrack.addEventListener("pointerup", endVol);
+  volTrack.addEventListener("pointercancel", endVol);
+  vol.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      const now = volHeld && Date.now() < volHeld.until ? volHeld.percent : src.player.volume().percent;
+      // (a notch of the wheel is 5 %; a touchpad's small steps add up to the same)
+      const step = Math.abs(e.deltaY) >= 50 ? 5 * Math.sign(-e.deltaY) : -e.deltaY / 10;
+      setVol(now + step);
+    },
+    { passive: false },
+  );
+  let shownVol = "";
+  const showVol = (percent: number, muted: boolean) => {
+    const key = `${percent}|${muted}`;
+    if (key === shownVol) return;
+    shownVol = key;
+    volPct.textContent = muted ? "Muted" : `${percent}%`;
+    volFill.style.height = `${percent}%`;
+    vol.classList.toggle("muted", muted);
+  };
+  let shownPlaying = true;
+  let playHeldUntil = 0;
+  /** Keeps the play button and the volume as TIDAL has them (on every frame; nothing is touched unless it changed) */
+  const updateControls = () => {
+    if (Date.now() > playHeldUntil) {
+      const playing = src.player.playing();
+      if (playing !== shownPlaying) {
+        shownPlaying = playing;
+        playBtn.innerHTML = playing ? ICON_PAUSE : ICON_PLAY;
+        playBtn.title = playing ? "Pause" : "Play";
+      }
+    }
+    if (volDrag !== undefined || (volHeld && Date.now() < volHeld.until)) return;
+    const v = src.player.volume();
+    showVol(Math.round(v.percent), v.muted);
   };
 
   // ------------------ A NEW SET ------------------
@@ -1880,6 +2094,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     digging(status.phase === "starting" ? { text: busy ?? "Getting ready", pool } : busy && calm && (lookingForMusic(busy) || status.busyTrack) ? { text: busy, hold: status.busyTrack, pool } : undefined);
     renderTitles(sc, t);
     draw(sc, st, t);
+    updateControls();
     renderQueue(st);
     showNext(time, !!armed || status.phase === "starting" || dig.classList.contains("on") || (status.phase === "playing" && !!st?.planned && st.planned.transition.start - t <= LEAD + NEXT_AHEAD));
     followCaption(t);
@@ -1949,7 +2164,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       mashShown = s.transition.seq;
     }
     switchBtn.style.display = mode === "dj" ? "" : "none";
-    mashBtn.style.display = mode === "dj" && !flipShown ? "" : "none";
+    mashBtn.style.display = mode === "dj" && !flipShown && !mashBusyShown ? "" : "none";
     skipBtn.style.display = mode === "dj" ? "" : "none";
     stopBtn.style.display = mode === "dj" ? "" : "none";
     djBtn.style.display = mode === "follow" ? "" : "none";
@@ -2020,7 +2235,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     if (!open) return;
     restTimer = setTimeout(() => {
       if (!open) return;
-      if (src.panel.isOpen() || top.querySelector(".btn:hover, .icon:hover")) return stir();
+      if (src.panel.isOpen() || top.querySelector(".btn:hover, .icon:hover") || ctl.matches(":hover") || vol.matches(":hover") || scrub || volDrag !== undefined) return stir();
       root.classList.add("resting");
     }, REST_AFTER);
   };
@@ -2102,6 +2317,13 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   switchBtn.addEventListener("click", () => src.switchUp());
   mashBtn.addEventListener("click", () => src.mashup());
   flipBtn.addEventListener("click", () => src.flipMashup());
+  shareBtn.addEventListener("click", async () => {
+    const code = src.shareMashup();
+    if (!code) return;
+    const ok = await copyText(code);
+    shareBtn.textContent = ok ? "Code copied" : "Couldn't copy";
+    setTimeout(() => (shareBtn.textContent = "Share"), 2200);
+  });
   skipBtn.addEventListener("click", () => src.skip());
   stopBtn.addEventListener("click", () => src.stop());
   djBtn.addEventListener("click", () => src.start());

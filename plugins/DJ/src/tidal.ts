@@ -98,6 +98,37 @@ const noteOwned = (before: Set<string>) => {
   } catch {}
 };
 
+/**
+ * Puts a track on in TIDAL right after the one it is on (what was played stays its history), plays it, and moves it
+ * to `at` seconds once it plays. For a shared mashup (see playShared in session.ts). False: it didn't come on.
+ */
+export const playTrackAt = async (id: string, at: number) => {
+  try {
+    await lib().MediaItem.fromId(id).catch(() => undefined);
+    const a = actions();
+    const pq = state().playQueue;
+    const index = Math.max(0, (pq.currentIndex ?? -1) + 1);
+    a["playQueue/ADD_AT_INDEX"]({ context: { type: "UNKNOWN" }, index, mediaItemIds: [id] });
+    a["playQueue/MOVE_TO"](index);
+    a["playbackControls/PLAY"]();
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      const s = state();
+      const cur = s.playQueue.elements?.[s.playQueue.currentIndex]?.mediaItemId;
+      if (String(cur) === id && s.playbackControls.playbackState === "PLAYING") {
+        if (at > 1) {
+          a["playbackControls/SEEK"](at);
+          await new Promise((r) => setTimeout(r, 800));
+        }
+        return true;
+      }
+    }
+  } catch (err) {
+    warn("Couldn't put the track on", err);
+  }
+  return false;
+};
+
 // ------------------ SILENCING ------------------
 // TIDAL sets its player's volume through a `volume` setter (on every track start and slider move).
 // Shadowing that setter on the player keeps it at zero without touching the slider you see.

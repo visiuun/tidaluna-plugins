@@ -6,7 +6,7 @@ import { stopRequests } from "./brain";
 import { flushLogNow, log, trace } from "./log";
 import { persona, settings } from "./config";
 import { underNowPlaying } from "./tidal";
-import { applyTransitionOnly, flipMashup, getMash, getStage, getWaveform, getStatus, markUnloaded, mashup, onStatus, resumeCarried, setTransitionOnly, skip, startSession, stopSession, switchUp } from "./session";
+import { applyTransitionOnly, flipMashup, getMash, getStage, getWaveform, getStatus, markUnloaded, mashup, onStatus, resumeCarried, seekTo, setTransitionOnly, shareCode, skip, startSession, stopSession, switchUp } from "./session";
 import { mountStage } from "./stage";
 import { resetVoiceQueue } from "./talk/voice";
 import { stopVoiceEngine } from "./native";
@@ -29,6 +29,14 @@ const thumbs = () => {
   return up && down && !up.disabled ? { up, down } : undefined;
 };
 let ui: ReturnType<typeof mountUi> | undefined;
+const tidalState = () => window.luna.lib?.redux.store.getState() as any;
+const tidalAction = (type: string, payload?: unknown) => {
+  try {
+    (window.luna.lib!.redux.actions as Record<string, (p?: unknown) => unknown>)[type]?.(payload);
+  } catch (err) {
+    log(`Couldn't ${type}: ${String((err as Error)?.message ?? err)}`);
+  }
+};
 
 // The DJ full screen: what it's doing, as it does it
 const stage = mountStage(unloads, {
@@ -45,6 +53,7 @@ const stage = mountStage(unloads, {
   switchUp,
   mashup: () => void mashup(),
   flipMashup: () => void flipMashup(),
+  shareMashup: shareCode,
   marks: async (id) => {
     const item = (await window.luna.lib!.MediaItem.fromId(id))?.tidalItem as { explicit?: boolean; ai?: boolean; upload?: boolean; audioModes?: string[] } | undefined;
     return item && { explicit: !!item.explicit, ai: !!item.ai, upload: !!item.upload, atmos: !!item.audioModes?.includes("DOLBY_ATMOS") };
@@ -63,6 +72,21 @@ const stage = mountStage(unloads, {
     close: () => ui?.panel.close(),
   },
   skip,
+  // TIDAL's own controls, the way its player bar works them (the DJ follows TIDAL's seeks and moves as it always does)
+  player: {
+    playing: () => tidalState()?.playbackControls?.desiredPlaybackState === "PLAYING",
+    toggle: () => tidalAction("playbackControls/TOGGLE_PLAYBACK"),
+    previous: () => tidalAction("playbackControls/SKIP_PREVIOUS"),
+    seek: (s) => void (seekTo(Math.max(0, s)) || tidalAction("playbackControls/SEEK", Math.max(0, s))),
+    volume: () => {
+      const pc = tidalState()?.playbackControls;
+      return { percent: Number(pc?.volume) || 0, muted: !!pc?.muted };
+    },
+    setVolume: (p) => {
+      if (tidalState()?.playbackControls?.muted && p > 0) tidalAction("playbackControls/SET_MUTE", false);
+      tidalAction("playbackControls/SET_VOLUME", { volume: Math.max(0, Math.min(100, Math.round(p))) });
+    },
+  },
   stop: () => void stopSession("stopped from the full screen"),
   // What other plugins bring to the full screen (it shows through to them: see THROUGH in stage.ts)
   guests: () => ({ backdrop: settings.stageBackdrop !== false, lyrics: settings.stageLyrics !== false, cover3d: settings.stageCover3d !== false }),
