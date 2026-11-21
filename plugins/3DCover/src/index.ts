@@ -465,6 +465,13 @@ const syncPlacement = (img: HTMLImageElement) => {
   c.style.zIndex = cs.zIndex === "auto" ? "" : cs.zIndex;
 };
 
+// A cover that grows or shrinks (TIDAL animates the now playing cover's box as the view or the window changes)
+// gets a frame at once, so the 3D picture is placed on it again even while it rests and draws nothing
+const sizeWatch = new ResizeObserver(() => {
+  if (active?.ready && !document.hidden) scheduleFrame();
+});
+unloads.add(() => sizeWatch.disconnect());
+
 // ------------------ RENDER LOOP ------------------
 const scheduleFrame = () => {
   if (!rafId) rafId = requestAnimationFrame(frame);
@@ -566,6 +573,7 @@ const RETRY_AFTER_MS = 10_000;
 let failed = { id: "", at: 0 };
 
 const teardown = () => {
+  sizeWatch.disconnect();
   restoreTilt();
   restoreGlare();
   if (!active) return;
@@ -633,6 +641,7 @@ const activate = (img: HTMLImageElement, hovered = true) => {
   // A cover that starts out swaying fades the sway in from still
   autoWeight = 0;
   active = state;
+  sizeWatch.observe(img);
   prepare(state);
 };
 
