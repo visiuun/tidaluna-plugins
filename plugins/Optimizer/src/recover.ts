@@ -10,12 +10,12 @@
 // TIDAL's player is stopped the moment the page goes (also in guard.native.ts), so what is heard is a
 // gap: about four seconds after a reload, about nine after a crash. With the DJ plugin on there is no
 // gap at all: its mixer plays through and the DJ picks its session up again, and nothing is done here.
+import { PlayState, redux } from "@luna/lib";
 import { beat, notePlay, takeRecovery, unwatchPage, watchPage, type Recovery } from "./guard.native";
 import { note, settings } from "./state";
 
-const lib = () => (window as any).luna?.lib;
-const state = () => lib()?.redux?.store?.getState?.();
-const actions = () => lib().redux.actions as Record<string, (payload?: any) => unknown>;
+const state = () => redux.store.getState();
+const actions = () => redux.actions;
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const currentId = (): string | undefined => {
@@ -23,16 +23,14 @@ const currentId = (): string | undefined => {
   const id = pq?.elements?.[pq.currentIndex]?.mediaItemId;
   return id === undefined ? undefined : String(id);
 };
-// Where the song is, from the player that is active now: Luna's PlayState.currentTime keeps hold of the
-// first player it found, and stands still once TIDAL has changed to its other one (it has two)
-let playerModule: { activePlayer?: { currentTime?: number } } | undefined;
+// Where the song is, from the player that is active now (TIDAL has two and changes between them by quality:
+// Luna's PlayState.currentTime reads whichever is active, since Luna 1.25)
 const position = (): number => {
   try {
-    playerModule ??= (window as any).luna?.core?.findModuleByProperty?.((key: unknown, value: unknown) => key === "activePlayer" && typeof value === "object" && value !== null && "currentTime" in (value as object)) ?? undefined;
-    const t = Number(playerModule?.activePlayer?.currentTime);
+    const t = Number(PlayState.currentTime);
     if (Number.isFinite(t)) return t;
   } catch {}
-  return Number(lib()?.PlayState?.currentTime) || 0;
+  return 0;
 };
 const isPlaying = () => state()?.playbackControls?.desiredPlaybackState === "PLAYING";
 
@@ -77,7 +75,7 @@ const resume = async (r: Recovery): Promise<string> => {
   if (isPlaying()) return "the music was already playing again";
   if (currentId() !== play.id) {
     // (TIDAL remembers its queue a little late: it can come back one song behind)
-    const index = (state().playQueue.elements ?? []).findIndex((e: any) => String(e.mediaItemId) === play.id);
+    const index = (state().playQueue.elements ?? []).findIndex((e: redux.PlayQueueElement) => String(e.mediaItemId) === play.id);
     if (index < 0) return "TIDAL came back on another song: left as it is";
     actions()["playQueue/MOVE_TO"](index);
     const moved = Date.now() + 4000;

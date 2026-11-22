@@ -11,13 +11,18 @@
 
 // Through a variable so the build leaves it alone, and inside a try: TidaLunar may not hand out electron
 const runtimeRequire = (id: string) => require(id);
+let electronModule: any | null | undefined;
 const getElectron = (): any | null => {
+  if (electronModule !== undefined) return electronModule;
   try {
-    return runtimeRequire("electron");
+    electronModule = runtimeRequire("electron");
   } catch {
-    return null;
+    electronModule = null;
   }
+  return electronModule;
 };
+// (taken while this file loads, so that Luna asks for it in its window as the plugin loads, not with a box at its first use)
+getElectron();
 
 const MARK = "optimizer-sentinel";
 const SENTINEL =

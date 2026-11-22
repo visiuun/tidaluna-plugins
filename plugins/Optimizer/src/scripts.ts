@@ -1,4 +1,5 @@
 // Scripts: which of them the page spends its time in, and (if asked) slower timers while nobody is looking.
+import { LunaPlugin } from "@luna/core";
 import { profile } from "./guard.native";
 import { settings, status } from "./state";
 
@@ -13,9 +14,12 @@ export type Usage = {
   rows: { name: string; ms: number; share: number }[];
 };
 
-// Luna loads a plugin's code from a blob, which is all a profile knows of it. The code ends with a line
-// naming where it came from (Luna adds it), and the blob is still there to read the end of.
+// Luna loads a plugin's code from a blob, and the code ends with a line naming where it came from,
+// `<plugin url>.mjs` (Luna adds it). The profile names the plugin by that (see profile in guard.native.ts);
+// failing that, by the blob, whose end is read for it where it is still there (Luna 1.25 throws it away
+// once the code has run).
 const named = new Map<string, string>();
+const pluginNamed = (url: string): string | undefined => LunaPlugin.plugins[url.replace(/\.mjs$/, "")]?.name;
 const pluginOf = async (blob: string): Promise<string> => {
   const known = named.get(blob);
   if (known) return known;
@@ -23,16 +27,15 @@ const pluginOf = async (blob: string): Promise<string> => {
   try {
     const tail = await (await (await fetch(blob)).blob()).slice(-600).text();
     const url = tail.match(/sourceURL=(\S+?)\.mjs\s*$/)?.[1];
-    if (url) {
-      const plugins = (window as any).luna?.core?.LunaPlugin?.plugins ?? {};
-      name = plugins[url]?.name ?? url.split("/").pop() ?? url;
-    }
+    if (url) name = pluginNamed(url) ?? url.split("/").pop() ?? url;
   } catch {}
   named.set(blob, name);
   return name;
 };
 const nameOf = async (url: string): Promise<string> => {
   if (url.startsWith("blob:")) return pluginOf(url);
+  const plugin = url.endsWith(".mjs") ? pluginNamed(url) : undefined;
+  if (plugin) return plugin;
   if (url.startsWith("https://luna/")) return "Luna itself";
   if (url.startsWith("/assets/") || /^https:\/\/(desktop|listen)\.tidal\.com\//.test(url)) return "TIDAL";
   if (url.startsWith("wasm:")) return "WebAssembly (of a plugin)";

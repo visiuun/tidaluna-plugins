@@ -15,12 +15,15 @@ import path from "path";
 
 // Through a variable so the build leaves it alone, and inside a try: TidaLunar may not hand out electron
 const runtimeRequire = (id: string) => require(id);
+let electronModule: any | null | undefined;
 const getElectron = (): any | null => {
+  if (electronModule !== undefined) return electronModule;
   try {
-    return runtimeRequire("electron");
+    electronModule = runtimeRequire("electron");
   } catch {
-    return null;
+    electronModule = null;
   }
+  return electronModule;
 };
 
 const MB = 1048576;
@@ -430,6 +433,7 @@ export const cleanDisk = async (): Promise<number> => {
 
 // ------------------ SCRIPTS ------------------
 export type ProfileRow = { url: string; ms: number };
+type CallFrame = { url: string; functionName: string; scriptId?: string };
 export type Profile = { ms: number; idle: number; gc: number; system: number; rows: ProfileRow[] };
 /**
  * Where TIDAL's page spends its time over `seconds`: for every script, how long the processor was in it
@@ -438,14 +442,35 @@ export type Profile = { ms: number; idle: number; gc: number; system: number; ro
  */
 export const profile = async (seconds: number): Promise<Profile> => {
   const length = Math.max(1, Math.min(30, seconds)) * 1000;
-  const cpu = await withDebugger(async (send) => {
+  const cpu = await withDebugger(async (send, dbg) => {
     await send("Profiler.enable");
     await send("Profiler.setSamplingInterval", { interval: 1000 });
     await send("Profiler.start");
     await new Promise((r) => setTimeout(r, length));
     const { profile } = await send("Profiler.stop");
     await send("Profiler.disable").catch(() => {});
-    return profile as { nodes: { id: number; callFrame: { url: string; functionName: string }; children?: number[] }[]; samples: number[]; timeDeltas: number[] };
+    // A plugin's code is loaded from a blob, and that is all the profile names it by; Luna 1.25 throws the blob
+    // away once the code has run, so the page can't read the plugin's name off it any more. The debugger knows
+    // every script by the name Luna gives it as well, `<plugin url>.mjs`, and lists them all as it is switched
+    // on (after the measuring, and only for a moment)
+    const named = new Map<string, string>();
+    const heard = (_: unknown, method: string, params: any) => {
+      if (method === "Debugger.scriptParsed" && params?.hasSourceURL && params.url) named.set(String(params.scriptId), String(params.url));
+    };
+    dbg.on("message", heard);
+    try {
+      await send("Debugger.enable");
+      await send("Debugger.disable");
+    } catch {
+    } finally {
+      dbg.removeListener("message", heard);
+    }
+    const result = profile as { nodes: { id: number; callFrame: CallFrame; children?: number[] }[]; samples: number[]; timeDeltas: number[] };
+    for (const n of result.nodes) {
+      const url = n.callFrame.scriptId === undefined ? undefined : named.get(String(n.callFrame.scriptId));
+      if (url && n.callFrame.url.startsWith("blob:")) n.callFrame.url = url;
+    }
+    return result;
   });
   const byId = new Map(cpu.nodes.map((n) => [n.id, n]));
   const parent = new Map<number, number>();
@@ -613,13 +638,17 @@ export const unwatchPage = async () => {
 // in (see watchPage): what was said meanwhile had been kept, and is delivered. For a window whose line
 // is whole it changes nothing. The dispatcher is a module of TIDAL's own, asked for by its file: Luna
 // asks you once whether this plugin may use it, when the plugin is loaded, not in the middle of a crash.
+// (Named relative to TIDAL's resources folder, the way Luna knows TIDAL's own files: Luna asks for it as
+// "TIDAL and Luna App Code", and not again with every new version of TIDAL, whose folder has the version in it)
+let dispatcherModule: any | null | undefined;
 const dispatcher = (): any | null => {
+  if (dispatcherModule !== undefined) return dispatcherModule;
   try {
-    const file = path.join((process as any).resourcesPath, "original.asar", "app", "main", "client", "clientDispatcher.js");
-    return runtimeRequire(file)?.default ?? null;
+    dispatcherModule = runtimeRequire("./original.asar/app/main/client/clientDispatcher.js")?.default ?? null;
   } catch {
-    return null;
+    dispatcherModule = null;
   }
+  return dispatcherModule;
 };
 /** Puts TIDAL's line to its page back (see above). False: it couldn't be reached in this version of TIDAL */
 const mendLine = (): boolean => {
@@ -663,3 +692,9 @@ export const reloadPage = async (why: string) => {
   if (home) await page.loadURL(home).catch(() => {});
   else page.reload();
 };
+
+// Electron and TIDAL's dispatcher are taken while this file loads, not at their first use: Luna then asks for
+// this file's permissions in one window as the plugin loads (Filesystem, Electron, TIDAL and Luna App Code)
+// rather than with a box for each when it is first used. Starting programs waits until it is asked for (see canHandBack).
+getElectron();
+dispatcher();

@@ -32,7 +32,7 @@
 //
 // Other plugins can go by it without depending on it: `document.hidden` and the "visibilitychange" event
 // are the standard way, and `window.lunaOptimizer` ({ visible, onChange(cb) }) is there as well.
-import { LunaUnload, Tracer } from "@luna/core";
+import { safeInterval, safeTimeout, StyleTag } from "@luna/lib";
 import { installAnimations, tuneAll } from "./animations";
 import { holdFrames, installFrames, measureScreen, releaseFrames, setScreenRate } from "./frames";
 import { screenRate } from "./guard.native";
@@ -40,6 +40,7 @@ import { seenChanged, startGuard } from "./memory";
 import { startRecovery } from "./recover";
 import { installTimers, removeTimers, setSlowing } from "./scripts";
 import { settings, status, statusChanged } from "./state";
+import { trace, unloads } from "./index.safe";
 import { startWatching, stopWatching, visibilityAfter } from "./watch.native";
 
 export { Settings } from "./Settings";
@@ -47,8 +48,7 @@ export { Settings } from "./Settings";
 export { check, clean, checkDisk, trim } from "./memory";
 export { measure } from "./scripts";
 export { settings, status } from "./state";
-export const { trace } = Tracer("[Optimizer]");
-export const unloads = new Set<LunaUnload>();
+export { trace, unloads };
 
 /** How long the window has to be out of sight before anything is paused: passing behind another window for a moment is not worth it */
 const SETTLE_MS = 1500;
@@ -82,23 +82,13 @@ askScreen();
 // is, lyrics go on scrolling, animations keep their time and are where they should be when the window
 // is back. Measured over the same seven seconds: the page at 5%, the graphics process at 1%.
 const UNSEEN = "data-optimizer-unseen";
-const unseenStyle = document.createElement("style");
-unseenStyle.textContent = `html[${UNSEEN}] body { content-visibility: hidden !important; }`;
-document.head.appendChild(unseenStyle);
-unloads.add(() => {
-  document.documentElement.removeAttribute(UNSEEN);
-  unseenStyle.remove();
-});
+new StyleTag("optimizer-unseen", unloads, `html[${UNSEEN}] body { content-visibility: hidden !important; }`);
+unloads.add(() => document.documentElement.removeAttribute(UNSEEN));
 
 // ------------------ CSS ANIMATIONS ------------------
 const ATTR = "data-optimizer-paused";
-const style = document.createElement("style");
-style.textContent = `html[${ATTR}] *, html[${ATTR}] *::before, html[${ATTR}] *::after { animation-play-state: paused !important; }`;
-document.head.appendChild(style);
-unloads.add(() => {
-  document.documentElement.removeAttribute(ATTR);
-  style.remove();
-});
+new StyleTag("optimizer-paused", unloads, `html[${ATTR}] *, html[${ATTR}] *::before, html[${ATTR}] *::after { animation-play-state: paused !important; }`);
+unloads.add(() => document.documentElement.removeAttribute(ATTR));
 
 // ------------------ ANIMATIONS MADE IN SCRIPT ------------------
 // The endless ones (a loop made with element.animate) are paused too. One that ends is left to run: it
@@ -198,7 +188,7 @@ unloads.add(() => {
 
 // ------------------ OUT OF SIGHT, AND BACK ------------------
 let applied = false;
-let sweep: ReturnType<typeof setInterval> | undefined;
+let sweep: (() => void) | undefined;
 const apply = (hide: boolean) => {
   if (hide === applied) return;
   applied = hide;
@@ -215,7 +205,7 @@ const apply = (hide: boolean) => {
       document.documentElement.setAttribute(ATTR, "");
       pauseLoops();
       // (and those that start while the window is out of sight)
-      sweep = setInterval(pauseLoops, 10000);
+      sweep = safeInterval(unloads, pauseLoops, 10000);
     }
     if (settings.videos) {
       videosOff = true;
@@ -224,7 +214,8 @@ const apply = (hide: boolean) => {
   } else {
     status.pausedMs += Date.now() - status.pausedSince;
     status.pausedSince = 0;
-    clearInterval(sweep);
+    sweep?.();
+    sweep = undefined;
     document.documentElement.removeAttribute(UNSEEN);
     document.documentElement.removeAttribute(ATTR);
     resumeLoops();
@@ -247,17 +238,17 @@ const apply = (hide: boolean) => {
 };
 
 let alive = true;
-let settleTimer: ReturnType<typeof setTimeout> | undefined;
+let settleTimer: (() => void) | undefined;
 const seen = (visible: boolean) => {
   status.visible = visible;
-  clearTimeout(settleTimer);
+  settleTimer?.();
   if (visible) apply(false);
-  else settleTimer = setTimeout(() => alive && apply(true), SETTLE_MS);
+  else settleTimer = safeTimeout(unloads, () => alive && apply(true), SETTLE_MS);
   statusChanged();
 };
 unloads.add(() => {
   alive = false;
-  clearTimeout(settleTimer);
+  settleTimer?.();
   apply(false);
   stopWatching().catch(() => {});
 });
