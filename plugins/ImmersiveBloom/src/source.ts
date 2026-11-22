@@ -6,13 +6,18 @@ const lib = () => window.luna.lib!;
 export type TrackStream = { urls: string[]; seconds?: number };
 
 /**
- * A track's playback info, asked for now. Luna's own `getPlaybackInfo` remembers every answer for as long as TIDAL
- * stays open, but the addresses in it only work for an hour: an extra, changing parameter gets past that memory
- * while keeping Luna's sign-in and request limiting (as the DJ does).
+ * A track's playback info, asked for now. Luna before 1.25 remembers every answer for as long as TIDAL stays open,
+ * but the addresses in it only work for an hour: an extra, changing parameter gets past that memory while keeping
+ * Luna's sign-in and request limiting (as the DJ does). Luna 1.25 keeps an answer for 45 minutes at most, so the
+ * address is asked as it is there: with the changing parameter every answer was kept anew (in the page, and on disk
+ * by Luna's offline cache, which nothing clears) under an address nothing would ask for again. (Its AudioCache came
+ * in the same release, so it says which Luna this is. Not Luna's `TidalApi.playbackInfo`: a track with no answer at
+ * one quality is taken there for one with none at any, for every plugin, until TIDAL is restarted.)
  */
 const fresh = async (id: string, quality: string) => {
-  const { TidalApi } = lib() as any;
-  const url = `https://desktop.tidal.com/v1/tracks/${id}/playbackinfo?audioquality=${quality}&playbackmode=STREAM&assetpresentation=FULL&bloom=${Date.now()}`;
+  const { TidalApi, AudioCache } = lib() as any;
+  const agesOut = AudioCache !== undefined;
+  const url = `https://desktop.tidal.com/v1/tracks/${id}/playbackinfo?audioquality=${quality}&playbackmode=STREAM&assetpresentation=FULL${agesOut ? "" : `&bloom=${Date.now()}`}`;
   return await (TidalApi.playbackInfoSemaphore?.with ? TidalApi.playbackInfoSemaphore.with(() => TidalApi.fetch(url)) : TidalApi.fetch(url));
 };
 

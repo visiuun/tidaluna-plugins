@@ -6,21 +6,21 @@
 // Each track is listened to once, ahead of time, in a worker (see bloom.worker.js): every 10 ms of it becomes how
 // much sound comes from each of 48 directions. Playing, the page only looks up where TIDAL's player is in the
 // track and draws that, so the glows are neither late nor behind the music: there is nothing to work out live.
-import { type LunaUnload, Tracer } from "@luna/core";
 import workerSource from "file://./bloom.worker.js";
+import { errSignal, trace, unloads } from "./index.safe";
 import { MEASURED, settings, SETTINGS_EVENT, type PluginSettings } from "./Settings";
 import { trackStream } from "./source";
 
 export { Settings } from "./Settings";
-
-export const { trace, errSignal } = Tracer("[ImmersiveBloom]");
-export const unloads = new Set<LunaUnload>();
+export { errSignal, trace, unloads };
 
 // @luna/lib is read from window.luna instead of imported: Luna's import wrapper for plugin modules registers a
 // dependency and throws if Luna's registry doesn't hold this plugin at that instant (during reloads; see 3DCover)
 const lib = () => window.luna.lib!;
 const core = () => window.luna.core!;
 const state = () => lib().redux.store.getState();
+// Set once the plugin is unloaded: a measurement still on its way (its playback info, say) stops there
+let unloaded = false;
 
 // ------------------ THE WORKER ------------------
 type Directions = {
@@ -41,6 +41,8 @@ let jobSeq = 0;
 const jobs = new Map<number, { resolve: (d: Directions) => void; reject: (e: Error) => void }>();
 const getWorker = () => {
   if (worker) return worker;
+  // (never one made again after the unload, from a revoked url)
+  if (unloaded) throw new Error("cancelled: unloaded");
   worker = new Worker(workerUrl);
   worker.onmessage = ({ data }) => {
     const job = jobs.get(data.id);
@@ -58,8 +60,11 @@ const getWorker = () => {
   return worker;
 };
 unloads.add(() => {
+  unloaded = true;
   worker?.terminate();
   worker = undefined;
+  // (what waits on the worker ends here, instead of waiting for ever)
+  for (const job of jobs.values()) job.reject(new Error("cancelled: unloaded"));
   jobs.clear();
 });
 
@@ -105,6 +110,7 @@ const want = (id: string | undefined) => {
 };
 
 const pump = async () => {
+  if (unloaded) return;
   const cur = currentId();
   const nxt = nextId();
   want(cur);
@@ -145,8 +151,7 @@ const pump = async () => {
     void pump();
   }
 };
-const pumpTimer = setInterval(() => void pump(), 500);
-unloads.add(() => clearInterval(pumpTimer));
+lib().safeInterval(unloads, () => void pump(), 500);
 
 const onSettings = (e: Event) => {
   const key = (e as CustomEvent).detail as keyof PluginSettings;
@@ -258,8 +263,7 @@ const raise = () => {
 raise();
 document.addEventListener("fullscreenchange", raise);
 unloads.add(() => document.removeEventListener("fullscreenchange", raise));
-const raiseTimer = setInterval(raise, 1000);
-unloads.add(() => clearInterval(raiseTimer));
+lib().safeInterval(unloads, raise, 1000);
 const ctx = canvas.getContext("2d")!;
 // Drawn at a quarter of the window's size and stretched: the glows are soft all over, and it costs a sixteenth
 const SCALE = 4;
@@ -401,9 +405,8 @@ const frame = (now: number) => {
 const wake = () => {
   if (!raf && isPlaying()) raf = requestAnimationFrame(frame);
 };
-const wakeTimer = setInterval(wake, 250);
+lib().safeInterval(unloads, wake, 250);
 unloads.add(() => {
-  clearInterval(wakeTimer);
   cancelAnimationFrame(raf);
   raf = 0;
 });
