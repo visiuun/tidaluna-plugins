@@ -77,6 +77,13 @@ const stage = mountStage(unloads, {
     playing: () => tidalState()?.playbackControls?.desiredPlaybackState === "PLAYING",
     toggle: () => tidalAction("playbackControls/TOGGLE_PLAYBACK"),
     previous: () => tidalAction("playbackControls/SKIP_PREVIOUS"),
+    // (the full DJ plays its own queue and is skipped through; with transitions only it follows TIDAL, which is
+    // skipped the way its own next button does, and the DJ mixes into whatever comes. The DJ's skip does nothing then)
+    next: () => {
+      const s = getStatus();
+      if (s.phase !== "off" && s.mode !== "follow") skip();
+      else tidalAction("playbackControls/SKIP_NEXT");
+    },
     seek: (s) => void (seekTo(Math.max(0, s)) || tidalAction("playbackControls/SEEK", Math.max(0, s))),
     volume: () => {
       const pc = tidalState()?.playbackControls;

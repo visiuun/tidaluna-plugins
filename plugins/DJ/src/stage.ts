@@ -55,11 +55,13 @@ export type StageSource = {
   /** The DJ's panel (requests, the voice, how much it talks, transitions only): opened under `anchor`, or closed if it is open there */
   panel: { toggle: (anchor: HTMLElement) => void; isOpen: () => boolean; close: () => void };
   skip: () => void;
-  /** TIDAL's own controls: play/pause, back, where in the track, the volume */
+  /** TIDAL's own controls: play/pause, back and next, where in the track, the volume */
   player: {
     playing: () => boolean;
     toggle: () => void;
     previous: () => void;
+    /** The next song, whatever the DJ is doing (the full DJ's own next; with transitions only or the DJ off, TIDAL's) */
+    next: () => void;
     seek: (seconds: number) => void;
     volume: () => { percent: number; muted: boolean };
     setVolume: (percent: number) => void;
@@ -627,19 +629,44 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   document.head.appendChild(underStyle);
   let underKey = "";
   let npy = 0;
+  // Where the line goes is set on the lyrics' panel itself, not in that sheet: it moves with every line that sits
+  // higher or lower than the one before (one row or two), and a sheet rewritten restyles all of TIDAL's page (7 to
+  // 9 ms each time, measured, before anything is drawn: the whole window stood still for a moment at every new
+  // line). On the panel only the panel is restyled (half a millisecond).
+  const PLACED = ["width", "max-width", "height", "max-height", "transform"];
+  let placedOn: HTMLElement | null = null;
+  let placedKey = "";
+  const placeLine = (at?: number[]) => {
+    const panel = at ? (placedOn?.isConnected && placedOn.matches(LYRICS) ? placedOn : document.querySelector<HTMLElement>(LYRICS)) : null;
+    const key = at?.join(",") ?? "";
+    // (TIDAL makes a new panel now and then, and may write the panel's own style: it is checked, not taken on trust)
+    if (panel === placedOn && key === placedKey && (!panel || panel.style.getPropertyValue("transform"))) return;
+    if (placedOn && placedOn !== panel) for (const p of PLACED) placedOn.style.removeProperty(p);
+    placedOn = panel;
+    placedKey = key;
+    if (!panel || !at) return;
+    const s = panel.style;
+    s.setProperty("width", `${at[2]}px`, "important");
+    s.setProperty("max-width", "none", "important");
+    s.setProperty("height", `${LINE.h}px`, "important");
+    s.setProperty("max-height", `${LINE.h}px`, "important");
+    s.setProperty("transform", `translate(${at[0]}px, ${at[1]}px) scale(${LINE.scale})`, "important");
+  };
+  unloads.add(() => placeLine());
   /** The line goes at `to` (on the page: its left, top and width as shown) */
   const sizeUnder = (to?: { left: number; top: number; width: number }) => {
     const at = to && lyrBox ? [Math.round(to.left - lyrBox.left), Math.round(to.top - lyrBox.top), Math.round(to.width / LINE.scale)] : undefined;
-    const key = `${at?.join(",") ?? ""}|${npy}`;
+    // (only while the full screen shows through to the lyrics: the panel is TIDAL's own the rest of the time)
+    placeLine(at && document.body.classList.contains(`${R}-through`) ? at : undefined);
+    const key = `${npy}`;
     if (key === underKey) return;
     underKey = key;
     underStyle.textContent =
-      (at ? `body.${R}-through #wimp ${LYRICS} { width: ${at[2]}px !important; max-width: none !important; height: ${LINE.h}px !important; max-height: ${LINE.h}px !important; transform: translate(${at[0]}px, ${at[1]}px) scale(${LINE.scale}) !important; }\n` : "") +
       // (a little further up than the title bar is tall: on a screen scaled by 125% the bar is 37.5 of its pixels, the
       // view under it starts on a whole one, and a backdrop moved up by exactly the bar began one pixel down from the
       // top: a line across the top of the screen, of what is behind it, which is the backdrop the plugin draws behind
       // all of TIDAL)
-      (npy ? `body.${R}-through.${R}-bg #wimp .now-playing-background-container { top: -${npy + OVER}px !important; height: calc(100% + ${npy + OVER}px) !important; }\n` : "");
+      npy ? `body.${R}-through.${R}-bg #wimp .now-playing-background-container { top: -${npy + OVER}px !important; height: calc(100% + ${npy + OVER}px) !important; }\n` : "";
   };
   /** Where the stage's middle row is on the page (asked now and then, not every frame: asking makes the page lay itself out) */
   let mainBox = { left: 56, top: 64, width: 0 };
@@ -1876,7 +1903,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   timeline.addEventListener("pointercancel", (e) => endScrub(e, true));
 
   prevBtn.addEventListener("click", () => src.player.previous());
-  nextBtn.addEventListener("click", () => src.skip());
+  nextBtn.addEventListener("click", () => src.player.next());
   playBtn.addEventListener("click", () => {
     src.player.toggle();
     // (shown at once, not when TIDAL gets round to it)
@@ -1925,7 +1952,13 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       const now = volHeld && Date.now() < volHeld.until ? volHeld.percent : src.player.volume().percent;
       // (a notch of the wheel is 5 %, 1 % with Shift held; a touchpad's small steps add up to the same. With Shift
       // the browser may turn the wheel sideways, so whichever way it moved counts)
-      const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      const vertical = Math.abs(e.deltaY) >= Math.abs(e.deltaX);
+      // A touchpad moves the page with the fingers (fingers up scrolls it down: deltaY > 0), and the slider goes with
+      // them too: fingers up is louder, as the wheel turned up is (deltaY < 0). Which one it is: a wheel's notches come
+      // as whole 120ths in the older wheelDelta, a touchpad's movement doesn't (measured: -306, -747, -3...)
+      const legacy = Number((e as WheelEvent & { wheelDeltaY?: number; wheelDeltaX?: number })[vertical ? "wheelDeltaY" : "wheelDeltaX"]) || 0;
+      const touchpad = legacy !== 0 && legacy % 120 !== 0;
+      const delta = (vertical ? e.deltaY : e.deltaX) * (touchpad ? -1 : 1);
       const notch = e.shiftKey ? 1 : 5;
       // (small steps are added up until they make a whole percent: one by one they would be rounded away)
       wheelLeft += Math.abs(delta) >= 50 ? notch * Math.sign(-delta) : (-delta / 50) * notch;

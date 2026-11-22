@@ -423,6 +423,8 @@ class Session {
   private justMoved = false;
   private pausedAt = 0;
   private talkUntil = 0;
+  /** What the DJ said last (until talkUntil) */
+  private saying = "";
   private captionTimer?: ReturnType<typeof setTimeout>;
   private starvedSince = 0;
   /** When a switch/request started: further ones wait until its first track is playing */
@@ -849,6 +851,7 @@ class Session {
   // ------------------ SPEECH ------------------
   private say(text: string, start: number, end: number) {
     this.talkUntil = end;
+    this.saying = text;
     this.greeted = true;
     clearTimeout(this.captionTimer);
     const show = () => setStatus({ talking: true, caption: text, captionSpan: { start, end } });
@@ -1429,7 +1432,8 @@ class Session {
   }
 
   /** Cuts to an item right away (next/previous or a click in the queue) */
-  private async jump(item: Item) {
+  /** `quiet`: without the line that would introduce it */
+  private async jump(item: Item, quiet = false) {
     log(`Jumping to ${item.track.title}`);
     setStatus({ transition: undefined });
     await this.dropPending();
@@ -1444,7 +1448,7 @@ class Session {
     await this.mixer.stopVoice();
     this.ensureLoading(item);
     // Skipping into a new set still gets its introduction, when the line is ready
-    const clip = (item.first || everySong()) && settings.commentary !== "off" ? item.talk?.ready : null;
+    const clip = !quiet && (item.first || everySong()) && settings.commentary !== "off" ? item.talk?.ready : null;
     if (clip) await this.talkBetween(clip, item.talk!.text);
     else {
       clearTimeout(this.leaving);
@@ -2481,7 +2485,13 @@ class Session {
     return this.run(async () => {
       if (this.follow) return;
       const next = this.items[0];
-      if (next) await this.jump(next);
+      if (!next) return;
+      // Pressed while the DJ introduces the song that is coming (over the song before it, or with the song waiting
+      // for the line, or coming in under it): that song comes straight in, without the line. Jumping to it the usual
+      // way only began the same line again from the start (the song is still first in line until it plays), which
+      // was all a skip did then
+      const introducing = this.mixer.now < this.talkUntil && !!next.talk && this.saying === next.talk.text;
+      await this.jump(next, introducing);
     });
   }
 
