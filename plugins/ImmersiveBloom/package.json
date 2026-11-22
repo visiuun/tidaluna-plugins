@@ -1,0 +1,12 @@
+{
+  "name": "@visiuun/immersive-bloom",
+  "version": "1.0.0",
+  "description": "Immersive Bloom: soft white glows at the edges of TIDAL's window show where the sounds in a song come from (left, right, in front, behind, above, below), like the glows a game puts round the screen. Only what is placed in 3D lights up: what is straight ahead in the middle never does",
+  "author": {
+    "name": "visiuun",
+    "url": "https://github.com/visiuun/tidaluna-plugins",
+    "avatarUrl": "http://hanabot.xyz/lookup?api=avatar&id=636585243846901802&size=512"
+  },
+  "main": "src/index.ts",
+  "type": "module"
+}

@@ -12,7 +12,7 @@ A collection of plugins for **[TidaLuna](https://github.com/Inrixia/TidaLuna)**.
    ```text
    https://github.com/visiuun/tidaluna-plugins/releases/download/latest/store.json
    ```
-4. Press Enter to load **Vis's Luna Plugins**, then click **Install** on the plugins you want (e.g. `@visiuun/dj`, `@visiuun/true-taste`, `@visiuun/3d-cover`, `@visiuun/tidal-genres`, `@visiuun/quick-queue`, `@visiuun/optimizer`).
+4. Press Enter to load **Vis's Luna Plugins**, then click **Install** on the plugins you want (e.g. `@visiuun/dj`, `@visiuun/true-taste`, `@visiuun/3d-cover`, `@visiuun/tidal-genres`, `@visiuun/quick-queue`, `@visiuun/optimizer`, `@visiuun/immersive-bloom`).
 
 ---
 
@@ -70,6 +70,18 @@ Turns the now playing cover into a 2.5D parallax scene that moves with TIDAL's c
 - AI Lighting (on by default): light, soft shadows, reflections and shine on glossy things like gold and chrome, lit from TIDAL's own moving cover glare and shaped by the AI depth map. At rest the cover is untouched.
 - Settings: model (Small/Base), depth shift, focal plane, edge anti-smear, break out of frame, AI lighting and its strength, preload next cover, fallback mouse smoothing, invert direction, clear depth cache, clear downloaded model.
 - **On the DJ's full screen too:** with the DJ plugin's full screen open, its cover is the one that gets the depth (TIDAL's own is under it then).
+
+---
+
+### Immersive Bloom (`@visiuun/immersive-bloom`)
+
+Soft white glows at the edges of TIDAL's window where the sounds in the song come from, the way a game shows round the screen where things are around you.
+
+- **Where on the screen:** the top of the window is in front of you, the bottom behind you, the sides left and right, the corners in between. Higher-pitched sounds sit higher and lower ones lower (stereo has no up or down of its own; higher sounds are heard as higher, so pitch is used for height, as far as the Height From Pitch setting says). Several glows at once, each where its own sound is.
+- **Only what is placed in 3D:** what is straight ahead in the middle (the vocal, kick and bass of most songs) never lights up, and neither does reverb or a wide pad, which come from no one place. What counts: a sound panned off to a side (the level difference between the channels), a sound one ear hears first (the time difference, as in binaural and 8D recordings), and sound in antiphase, which is heard from behind (what a surround decoder sends to the rear speakers). Only the strongest few places light up (Most Glows At Once), and never more than about a fifth of the border, so a busy mix never turns the whole edge white.
+- **On time, with nothing worked out live:** TIDAL plays through a player outside its page, so there's no sound in the page to listen to. Each track's own stream (TIDAL's AAC copy) is fetched and decoded in a background worker as soon as it starts, and the next one in the queue straight after, about 2 s for a 4-minute song. Every 10 ms of it becomes how much sound comes from each of 48 directions. While it plays, the page only looks up where TIDAL's player is and draws that (under a tenth of a millisecond a frame, at a quarter of the window's resolution, and nothing at all while paused). The encoder's lead-in is taken out, so the glows line up with TIDAL's own playback to the 10 ms.
+- **Light on memory:** the decoded sound is measured on the way through and never kept: what stays is a few hundred kB a track, for the last dozen tracks. TIDAL is a 32-bit app, so a decoded song is never held in its page.
+- Settings: brightness, sensitivity, glow size, most glows at once, height from pitch, fade, sync offset (for an output with a long delay, such as Bluetooth).
 
 ---
 
