@@ -20,6 +20,10 @@ const getElectron = () => {
   }
   return electronModule;
 };
+// Required as this file loads, so Luna's permission window asks for Electron together with this file's other
+// permissions (files, network) as the plugin loads. Required first at the first cover, it was asked then, in a box
+// that holds all of TIDAL, the music included, until it is answered.
+getElectron();
 
 const HOST = "3d-cover-engine.invalid";
 const PAGE_URL = `https://${HOST}/`;

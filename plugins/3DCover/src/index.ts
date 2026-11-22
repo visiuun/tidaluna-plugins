@@ -1,18 +1,23 @@
-import { LunaUnload, Tracer } from "@luna/core";
+import type { LunaUnload } from "@luna/core";
 import type { MediaItem } from "@luna/lib";
 import { type DepthMap, closeDepthCache, disposeDepthWorker, getCachedDepth, getDepth, isAbort, loadCoverBitmap, setInferenceLogger, setInfoLogger } from "./depth";
 import { backgroundFor, clearBackgrounds, reachFor } from "./background";
 import { clearSurfaces, surfaceFor } from "./lighting";
 import { pictureBox } from "./box";
+import { trace, unloads } from "./index.safe";
 import { CoverLoader, LOADER_CSS } from "./loader";
 import { ParallaxRenderer, overflowFor } from "./renderer";
 import { settings } from "./Settings";
 
 export { Settings } from "./Settings";
+export { trace, unloads };
 
-export const { trace } = Tracer("[3DCover]");
-
-export const unloads = new Set<LunaUnload>();
+// @luna/lib is read from window.luna instead of imported: Luna's import wrapper for plugin modules
+// registers a dependency and throws "Cannot add dependancy to non plugin!" if Luna's registry doesn't
+// hold this plugin at that instant (happens during DEV live reloads / reinstalls).
+const lib = window.luna.lib;
+// (Luna loads @luna/lib before any plugin)
+const { StyleTag, safeInterval, safeTimeout } = lib!;
 
 const STYLE_ID = "luna-3d-cover-styles";
 const CANVAS_CLASS = "luna-3d-cover-canvas";
@@ -45,9 +50,10 @@ const AUTO_CHECK_MS = 500; // how often to look for a cover to sway when none is
 const AUTO_PLAY_FADE_MS = 2500; // how long the sway takes to come to rest on pause, and to get going again on play
 
 // ------------------ STYLES ------------------
-const style = document.createElement("style");
-style.id = STYLE_ID;
-style.textContent = `
+new StyleTag(
+  STYLE_ID,
+  unloads,
+  `
   .${CANVAS_CLASS} {
     position: absolute !important;
     pointer-events: none !important;
@@ -57,10 +63,8 @@ style.textContent = `
   }
   .${CANVAS_CLASS}.visible { opacity: 1; }
   ${LOADER_CSS}
-`;
-document.getElementById(STYLE_ID)?.remove();
-document.head.appendChild(style);
-unloads.add(() => style.remove());
+`,
+);
 
 // ------------------ STATE ------------------
 const renderer = new ParallaxRenderer();
@@ -78,7 +82,8 @@ type Active = {
   ready: boolean;
   leaving: boolean;
   leaveStart: number;
-  loaderTimer?: number;
+  /** Cancels the loading line's delayed show */
+  loaderTimer?: LunaUnload;
 };
 
 let active: Active | null = null;
@@ -216,8 +221,8 @@ const onTrack = async (item?: MediaItem) => {
   previous.abort();
 };
 
-// TIDAL preloads the next track near the end of the current one: build its depth map early too.
-// Tied to the current track's signal, so skipping cancels it.
+// TIDAL preloads the next track (near the end of the current one; Luna 1.25 has it done five seconds into
+// each track): build its depth map early too. Tied to the current track's signal, so skipping cancels it.
 const onPreload = async (item?: MediaItem) => {
   if (!settings.preloadNext) return;
   const { signal } = trackAbort;
@@ -225,10 +230,6 @@ const onPreload = async (item?: MediaItem) => {
   if (cover && !signal.aborted) generate(cover, signal, "preload");
 };
 
-// @luna/lib is read from window.luna instead of imported: Luna's import wrapper for plugin modules
-// registers a dependency and throws "Cannot add dependancy to non plugin!" if Luna's registry doesn't
-// hold this plugin at that instant (happens during DEV live reloads / reinstalls).
-const lib = window.luna.lib;
 lib?.MediaItem.onMediaTransition(unloads, onTrack);
 lib?.MediaItem.onPreload(unloads, onPreload);
 setInferenceLogger((backend, ms) => {
@@ -256,7 +257,8 @@ const preloadNext = async () => {
 };
 
 // Where the song is, from the player that is active now: Luna's PlayState.currentTime keeps hold of the
-// first player it found, and stands still once TIDAL has changed to its other one (it has two)
+// first player it found, and stands still once TIDAL has changed to its other one (it has two). (Fixed in
+// Luna 1.25, which reads it the same way as here; kept for the Luna versions before it.)
 let playerModule: { activePlayer?: { currentTime?: number } } | undefined;
 const livePosition = (): number => {
   try {
@@ -267,15 +269,18 @@ const livePosition = (): number => {
   return lib?.PlayState.currentTime ?? 0;
 };
 
-const preloadTimer = setInterval(() => {
-  const duration = currentItem?.duration;
-  // Right after a song changes, the player can still report the previous song's position
-  if (!settings.preloadNext || !duration || !lib?.PlayState.playing || performance.now() - trackStart < 3000) return;
-  const position = livePosition();
-  const remaining = (duration - position) * 1000;
-  if (position <= duration && remaining <= Math.max(PRELOAD_LEAD_MS, lastGenerateMs + 1000)) preloadNext();
-}, 1000);
-unloads.add(() => clearInterval(preloadTimer));
+safeInterval(
+  unloads,
+  () => {
+    const duration = currentItem?.duration;
+    // Right after a song changes, the player can still report the previous song's position
+    if (!settings.preloadNext || !duration || !lib?.PlayState.playing || performance.now() - trackStart < 3000) return;
+    const position = livePosition();
+    const remaining = (duration - position) * 1000;
+    if (position <= duration && remaining <= Math.max(PRELOAD_LEAD_MS, lastGenerateMs + 1000)) preloadNext();
+  },
+  1000,
+);
 
 const NEXT_BUTTON = '[data-test="next"]';
 const onPointerOver = (e: PointerEvent) => {
@@ -321,6 +326,8 @@ const tiltSign = { x: 0, y: 0 }; // learned mouse→tilt direction (votes)
 const tiltMax = { x: TILT_MIN_REF, y: TILT_MIN_REF };
 
 // ------------------ AUTO TILT OF THE WHOLE COVER ------------------
+// (Watched with MutationObservers of their own rather than @luna/lib's observe(), which reports elements as they are
+// added to the page; what is watched here is one element's style attribute.)
 // TIDAL's tilt (framer-motion: up to 12°, rotateX/rotateY after perspective(1000px), written to the tilt box's
 // inline transform only while its spring moves) is what the cover does under the mouse. The sway does the
 // same: its own rotation goes after TIDAL's in that transform, as if the mouse were where the sway is. What
@@ -577,7 +584,7 @@ const teardown = () => {
   restoreTilt();
   restoreGlare();
   if (!active) return;
-  clearTimeout(active.loaderTimer);
+  active.loaderTimer?.();
   active = null;
   cancelAnimationFrame(rafId);
   rafId = 0;
@@ -608,14 +615,14 @@ const prepare = async (state: Active) => {
   state.coverId = cover.id;
 
   if (!getCachedDepth(cover.id, settings.model)) {
-    state.loaderTimer = window.setTimeout(() => active === state && loader.show(state.img), LOADER_DELAY_MS);
+    state.loaderTimer = safeTimeout(unloads, () => active === state && loader.show(state.img), LOADER_DELAY_MS);
   }
 
   try {
     const [image, depth] = await Promise.all([getBitmap(cover), buildDepth(cover)]);
     if (active !== state) return;
 
-    clearTimeout(state.loaderTimer);
+    state.loaderTimer?.();
     loader.hide();
     renderer.setSource(image, depth);
     drawn.dirty = true;
@@ -695,12 +702,15 @@ const checkAutoTilt = () => {
   if (playingCover && generatedFor !== playingCover.id) generate(playingCover, trackAbort.signal, "auto tilt");
   activate(img, false);
 };
-const autoTimer = setInterval(() => {
-  checkAutoTilt();
-  // A cover at rest on pause: start again on play, and keep its place if the page has moved meanwhile
-  if (active?.ready && !rafId && !document.hidden) scheduleFrame();
-}, AUTO_CHECK_MS);
-unloads.add(() => clearInterval(autoTimer));
+safeInterval(
+  unloads,
+  () => {
+    checkAutoTilt();
+    // A cover at rest on pause: start again on play, and keep its place if the page has moved meanwhile
+    if (active?.ready && !rafId && !document.hidden) scheduleFrame();
+  },
+  AUTO_CHECK_MS,
+);
 
 window.addEventListener("pointermove", onPointerMove, { passive: true });
 window.addEventListener("luna:3dcover:updated", onSettingsUpdated);
