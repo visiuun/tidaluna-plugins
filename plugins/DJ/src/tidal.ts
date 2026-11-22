@@ -4,6 +4,7 @@
 import type { LunaUnload } from "@luna/core";
 import { log, warn } from "./log";
 import { playerShared } from "./native";
+import { indexOfTrack, noteSame, sameTrack } from "./versions";
 
 const lib = () => window.luna.lib!;
 const core = () => window.luna.core!;
@@ -115,7 +116,8 @@ export const playTrackAt = async (id: string, at: number) => {
       await new Promise((r) => setTimeout(r, 250));
       const s = state();
       const cur = s.playQueue.elements?.[s.playQueue.currentIndex]?.mediaItemId;
-      if (String(cur) === id && s.playbackControls.playbackState === "PLAYING") {
+      // (or another version of it: RealMAX may put its best version on in its place, see versions.ts)
+      if (cur !== undefined && sameTrack(String(cur), id) && s.playbackControls.playbackState === "PLAYING") {
         if (at > 1) {
           a["playbackControls/SEEK"](at);
           await new Promise((r) => setTimeout(r, 800));
@@ -240,6 +242,8 @@ export class TidalLink {
     if (window.__visiuunDjRelease) delete window.__visiuunDjRelease;
     this.lastPlaying = undefined;
     this.lastVolume = "";
+    this.queueSeen = undefined;
+    this.uidIds.clear();
   }
 
   /** Puts shuffle/repeat back the way they were before the session */
@@ -284,6 +288,7 @@ export class TidalLink {
       }
     }
     const s = state();
+    this.noteSwaps(s.playQueue?.elements);
     const pc = s.playbackControls;
     const playing = pc.desiredPlaybackState === "PLAYING";
     if (force || playing !== this.lastPlaying) {
@@ -295,6 +300,27 @@ export class TidalLink {
       this.lastVolume = vol;
       this.events.volume(Number(pc.volume) || 0, !!pc.muted);
     }
+  }
+
+  /**
+   * RealMAX swaps an entry of TIDAL's queue for the best version of its song where it stands, as TIDAL's own buttons
+   * move to it (the same entry, another track): the two are noted as the same song (see versions.ts), so the DJ
+   * doesn't take it for something else you put on
+   */
+  private queueSeen?: unknown;
+  private uidIds = new Map<string, string>();
+  private noteSwaps(elements: { uid: unknown; mediaItemId: unknown }[] | undefined) {
+    if (!Array.isArray(elements) || elements === this.queueSeen) return;
+    this.queueSeen = elements;
+    const ids = new Map<string, string>();
+    for (const e of elements) {
+      const uid = String(e.uid);
+      const id = String(e.mediaItemId);
+      const was = this.uidIds.get(uid);
+      if (was !== undefined && was !== id) noteSame(was, id);
+      ids.set(uid, id);
+    }
+    this.uidIds = ids;
   }
 
   // ------------------ OUTPUT DEVICE ------------------
@@ -483,13 +509,29 @@ export class TidalLink {
     noteOwned(before);
   }
 
-  /** Moves TIDAL to `id` if it's ahead in the queue. Returns whether TIDAL is (now) on it */
-  moveTo(id: string) {
-    if (this.currentId() === id) return true;
+  /**
+   * Moves TIDAL to `id` if it's ahead in the queue (or another version of it: see versions.ts). Returns whether TIDAL
+   * is (now) on it. `swapIn`: an entry that is another version of it is made `id` first, where it stands, the way
+   * RealMAX swaps an entry for its best version as TIDAL's own next button moves to it (the DJ's moves go past
+   * RealMAX: actions sent through Luna don't pass other plugins' intercepts), so TIDAL plays what the mixer has
+   */
+  moveTo(id: string, swapIn = false) {
+    if (sameTrack(this.currentId(), id)) return true;
     const pq = state().playQueue;
-    const index = (pq.elements ?? []).findIndex((e: any, i: number) => i > pq.currentIndex && String(e.mediaItemId) === id);
+    const elements = pq.elements ?? [];
+    const index = indexOfTrack(elements.map((e: any) => String(e.mediaItemId)), id, pq.currentIndex + 1);
     if (index < 0) return false;
     this.selfMoveUntil = Date.now() + 2500;
+    const entry = elements[index];
+    if (swapIn && String(entry.mediaItemId) !== id) {
+      try {
+        const mediaItemId = typeof entry.mediaItemId === "number" ? Number(id) : id;
+        actions()["playQueue/RESET"]({ ...pq, elements: elements.map((e: any, i: number) => (i === index ? { ...e, mediaItemId } : e)) });
+        noteSame(String(entry.mediaItemId), id);
+      } catch (err) {
+        warn("Couldn't put the version the mixer has in TIDAL's queue", err);
+      }
+    }
     if (index === pq.currentIndex + 1) actions()["playQueue/MOVE_NEXT"]();
     else actions()["playQueue/MOVE_TO"](index);
     return true;

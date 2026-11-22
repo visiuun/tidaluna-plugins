@@ -27,6 +27,8 @@ export type PluginSettings = {
   /** How loud the DJ's voice is, percent of its usual level (the music follows TIDAL's volume) */
   voiceVolume: number;
   quality: "LOSSLESS" | "HIGH";
+  /** Each song the DJ plays in the best version TIDAL has of it: RealMAX's choice when that plugin is on (see versions.ts) */
+  bestVersions: boolean;
   homeCard: boolean;
   captions: boolean;
   jingle: Jingle;
@@ -57,6 +59,7 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("DJ
   voiceVolume: 100,
   mashupMode: false,
   quality: "LOSSLESS",
+  bestVersions: true,
   homeCard: true,
   captions: true,
   jingle: "off",

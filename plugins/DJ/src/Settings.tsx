@@ -103,7 +103,7 @@ export const Settings = () => {
     settings[key] = val;
     setState({ ...settings });
   };
-  const toggle = (key: "homeCard" | "captions" | "allowExplicit" | "coverFx" | "transitionOnly" | "stageBackdrop" | "stageLyrics" | "stageCover3d" | "mashupMode", title: string, desc: string) => (
+  const toggle = (key: "homeCard" | "captions" | "allowExplicit" | "coverFx" | "transitionOnly" | "stageBackdrop" | "stageLyrics" | "stageCover3d" | "mashupMode" | "bestVersions", title: string, desc: string) => (
     <LunaSwitchSetting
       title={title}
       desc={desc}
@@ -220,6 +220,12 @@ export const Settings = () => {
         <LunaSelectItem value="LOSSLESS">Lossless</LunaSelectItem>
         <LunaSelectItem value="HIGH">High</LunaSelectItem>
       </LunaSelectSetting>
+
+      {toggle(
+        "bestVersions",
+        "Best quality versions",
+        "Each song the DJ picks is played in the best version TIDAL has of it (the same recording: the HiRes release of a CD-quality one, a better master of a single). With RealMAX on it is the version RealMAX would put on, keeping to its kept and never used versions; with transitions only, the DJ gets ready the version RealMAX puts on in TIDAL. The mix itself is made in the audio quality above",
+      )}
 
       {toggle("mashupMode", "Mashup mode", "One mashup after another: each song that plays on its own gets a go at a mashup with one that fits it, and the DJ carries on as usual where none does")}
       {toggle("transitionOnly", "Transitions only", "No picks and no talking: whatever you play in TIDAL (an album, a playlist, your queue) is mixed together, track into track. Stays on across restarts; the DJ button still starts the full DJ on top of it")}

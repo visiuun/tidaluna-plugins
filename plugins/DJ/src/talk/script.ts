@@ -8,6 +8,7 @@
 import type { Segment, Track } from "../brain";
 import type { Persona } from "../config";
 import { readDoc, writeDoc } from "../native";
+import { putOff } from "../later";
 
 type Tone = Persona["tone"];
 export type Moment =
@@ -110,7 +111,6 @@ const artistName = (name?: string) => {
 // numbers in it ("That was §, by §."), so the same sentence about another song counts as the same.
 type Said = { seq: number; at: Record<string, number> };
 const said: Said = { seq: 0, at: {} };
-let saidTimer: ReturnType<typeof setTimeout> | undefined;
 void readDoc("said")
   .then((json) => {
     const kept = json ? (JSON.parse(json) as Partial<Said>) : null;
@@ -122,14 +122,14 @@ void readDoc("said")
     said.seq = since + (kept.seq ?? 0);
   })
   .catch(() => {});
+const saveSaid = putOff(() => {
+  const keys = Object.entries(said.at).sort((a, b) => b[1] - a[1]);
+  for (const [k] of keys.slice(1200)) delete said.at[k];
+  writeDoc("said", JSON.stringify(said)).catch(() => {});
+}, 5000);
 const remember = (key: string) => {
   said.at[key] = ++said.seq;
-  saidTimer ??= setTimeout(() => {
-    saidTimer = undefined;
-    const keys = Object.entries(said.at).sort((a, b) => b[1] - a[1]);
-    for (const [k] of keys.slice(1200)) delete said.at[k];
-    writeDoc("said", JSON.stringify(said)).catch(() => {});
-  }, 5000);
+  saveSaid();
 };
 /** The names in the line being written, longest first: taken out of a wording before it is remembered */
 let masks: string[] = [];

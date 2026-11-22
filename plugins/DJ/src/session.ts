@@ -33,6 +33,8 @@ import { lineFor, mashupLine, stockLines, type Context, type GenericKind, type H
 import { prepareStock, reread, speak, stockLine, voiceState } from "./talk/voice";
 import { playTrackAt, TidalLink } from "./tidal";
 import { nativeReady } from "./access";
+import { later } from "./later";
+import { bestVersionWithin, indexOfTrack, lookAhead, playsBest, realMaxOn, sameTrack, versionAmong } from "./versions";
 
 // ------------------ STATUS (for the UI) ------------------
 export type StageDeck = {
@@ -190,6 +192,13 @@ type Talk = {
 };
 type Item = {
   track: Track;
+  /**
+   * The track as it was picked, when `track` is the best version of it (see versions.ts): `track` is what is
+   * loaded, mixed and put in TIDAL's queue, this is what the DJ talks about and goes by
+   */
+  from?: Track;
+  /** The version picked stays (the best version of it wouldn't load) */
+  keep?: true;
   segment: Segment;
   /** First track of its set: the DJ talks before it */
   first: boolean;
@@ -346,6 +355,10 @@ const describeFit = (f: MashFit) =>
 /** The "set" every track belongs to in transitions-only mode */
 const FOLLOW_SEGMENT: Segment = { kind: "more", key: "queue", title: "Transitions only", tracks: [], facts: {} };
 const ARM_LEAD = 5;
+/** How long a track's load waits for the best version of it to be known (ms): it is looked for from the moment its set is picked */
+const BEST_WAIT = 4000;
+/** The track as the DJ picked it (see Item.from) */
+const picked = (i: Item) => i.from ?? i.track;
 
 const context = (link: TidalLink, here?: Here): Context => ({
   name: link.firstName(),
@@ -410,7 +423,7 @@ class Session {
   private songs = 0;
   private readonly before = { sessions: sessionCount(), sinceLast: lastSessionAt() ? Date.now() - lastSessionAt() : undefined };
   private here(next?: Item): Here {
-    const place = next ? { index: next.segment.tracks.indexOf(next.track), of: next.segment.tracks.length } : undefined;
+    const place = next ? { index: next.segment.tracks.indexOf(picked(next)), of: next.segment.tracks.length } : undefined;
     return { ...this.before, minutes: (Date.now() - this.began) / 60e3, songs: this.songs, place: place && place.index >= 0 ? place : undefined };
   }
   private greeted = false;
@@ -615,8 +628,8 @@ class Session {
       const loaded = await this.mixer.load(id, settings.quality, track.bpm, this.link.normalizes, true);
       if (this.stopped) return true;
       const engaged = await this.run(async () => {
-        // Still the same song, still playing?
-        if (this.link.currentTrackId() !== id || !this.link.playing) {
+        // Still the same song, still playing? (in another version, put on in its place by RealMAX, it still is: see versions.ts)
+        if (!sameTrack(this.link.currentTrackId(), id) || !this.link.playing) {
           log(this.follow ? "The song changed or was paused while it was loading" : "The song changed or was paused while the DJ was getting ready, starting fresh");
           await this.mixer.unload(id);
           return false;
@@ -691,18 +704,25 @@ class Session {
     const wanted = () => {
       if (this.link.repeatsOne) return [] as string[];
       const list = this.link.queueFromCurrent();
-      const at = list.indexOf(this.current?.item.track.id ?? "");
+      // (TIDAL may be on another version of it: see versions.ts)
+      const cur = this.current?.item.track.id;
+      let at = indexOfTrack(list, cur);
       // (TIDAL somewhere else entirely is sorted out by reconcile, not here)
       if (at < 0) return undefined;
+      // (another version of it right after it is RealMAX's, put there as TIDAL got to the song: not a song of its own)
+      while (at + 1 < list.length && list[at + 1] !== cur && sameTrack(list[at + 1], cur)) at++;
       const ids = list.slice(at + 1, at + 3);
       const blocked = ids.findIndex((id) => Date.now() < (this.avoid.get(id) ?? 0));
       return blocked < 0 ? ids : ids.slice(0, blocked);
     };
-    const same = (ids: string[]) => ids.length === this.items.length && ids.every((id, i) => this.items[i].track.id === id);
+    // (items stand for the queue's tracks as they are in it, also once the mixer has the best version of one)
+    const same = (ids: string[]) => ids.length === this.items.length && ids.every((id, i) => picked(this.items[i]).id === id);
     const want = wanted();
     if (!want || same(want)) return;
     this.queueBusy = true;
     try {
+      // (the versions RealMAX will put on as TIDAL gets to them, looked for meanwhile: see ensureLoading)
+      if (playsBest(true)) lookAhead(want);
       await ensureTracks(want);
       if (this.stopped || !this.current) return;
       const now = wanted();
@@ -712,7 +732,7 @@ class Session {
         const track = trackInfo(id);
         // (A video or something unavailable: the mix stops before it and TIDAL plays it itself)
         if (!track) break;
-        next.push(this.items.find((i) => i.track.id === id) ?? { track, segment: FOLLOW_SEGMENT, first: false });
+        next.push(this.items.find((i) => picked(i).id === id) ?? { track, segment: FOLLOW_SEGMENT, first: false });
       }
       // A track already being mixed in stays, whatever the queue says now
       if (this.pending && !next.includes(this.pending.item)) return;
@@ -751,6 +771,8 @@ class Session {
       this.items.push(item);
       this.known.set(track.id, item);
     });
+    // (the best version of each is looked for from now on, so it is known by the time the track is loaded)
+    if (playsBest(this.follow)) lookAhead(segment.tracks.map((t) => t.id));
     this.syncQueue();
   }
 
@@ -758,8 +780,8 @@ class Session {
     // (Transitions only: TIDAL's queue is yours, never written to)
     if (this.opening || this.stopped || this.follow) return;
     const ids = this.items.map((i) => i.track.id);
-    // After a skip TIDAL is already on the next item
-    if (ids[0] === this.link.currentId()) ids.shift();
+    // After a skip TIDAL is already on the next item (or on another version of it, see versions.ts)
+    if (sameTrack(ids[0], this.link.currentId())) ids.shift();
     this.link.setUpcoming(ids).catch((err) => warn("Couldn't update TIDAL's queue", err));
   }
 
@@ -782,12 +804,47 @@ class Session {
     }
   }
 
+  /**
+   * `item` made the best version of its song (see versions.ts) before it is loaded: that is what is analysed, mixed
+   * and put in TIDAL's queue. Looked for since its set was picked (transitions only: since it came up in TIDAL's
+   * queue), waited for here a few seconds at most; not found by then, the version picked plays.
+   */
+  private async toBest(item: Item) {
+    if (item.from || item.keep || item.ready || !playsBest(this.follow)) return;
+    const was = item.track;
+    const id = await bestVersionWithin(was.id, BEST_WAIT);
+    if (id === was.id || item.from || item.ready || item.track !== was || !this.wanted(item)) return;
+    item.from = was;
+    item.track = { ...was, id };
+    this.known.set(id, item);
+    log(`Best version of ${was.artists[0]?.name} - ${was.title}: ${id} (picked: ${was.id})`);
+    this.syncQueue();
+  }
+  /** The best version of `item` wouldn't load: the version picked, then */
+  private toPicked(item: Item) {
+    if (!item.from) return;
+    item.track = item.from;
+    item.from = undefined;
+    item.keep = true;
+    this.syncQueue();
+  }
+
   private ensureLoading(item: Item) {
     if (item.loading || item.failed || item.ready) return;
     const job = this.loadChain.then(async () => {
       if (!this.wanted(item)) return;
+      await this.toBest(item);
+      if (!this.wanted(item)) return;
       try {
-        const loaded = await this.mixer.load(item.track.id, settings.quality, item.track.bpm, this.link.normalizes);
+        let loaded: Loaded;
+        try {
+          loaded = await this.mixer.load(item.track.id, settings.quality, item.track.bpm, this.link.normalizes);
+        } catch (err) {
+          if (!item.from || !this.wanted(item)) throw err;
+          warn(`Couldn't load the best version of ${item.from.artists[0]?.name} - ${item.from.title}, playing the version picked`, err);
+          this.toPicked(item);
+          loaded = await this.mixer.load(item.track.id, settings.quality, item.track.bpm, this.link.normalizes);
+        }
         if (!this.wanted(item)) {
           if (!this.inUse(item.track.id)) this.mixer.unload(item.track.id);
           return;
@@ -838,6 +895,8 @@ class Session {
       const segment = await nextSegment(this.planned, playing?.kind);
       alt.segment = segment;
       alt.building = false;
+      // (so the DJ button has the first one's best version at once: the rest are looked for if the set is ever played)
+      if (playsBest(this.follow)) lookAhead(segment.tracks.slice(0, 1).map((t) => t.id));
       if (settings.commentary !== "off") {
         const talk = makeTalk({ type: "switch", segment }, this.link, false);
         talk.wanted = () => !this.stopped && this.alt === alt;
@@ -995,7 +1054,7 @@ class Session {
       if (!this.follow) {
         // (TIDAL usually puts the song back on by itself: then only what comes after it is set, and the
         // song isn't in its history twice)
-        if (this.link.currentId() === cur.id) {
+        if (sameTrack(this.link.currentId(), cur.id)) {
           await this.link.setUpcoming(items.map((i) => i.track.id));
           this.link.play();
         } else {
@@ -1057,7 +1116,7 @@ class Session {
       const dropped = this.items.filter((i) => i.failed);
       this.items = this.items.filter((i) => !i.failed);
       // (Transitions only: TIDAL plays that one itself; not tried again for a while)
-      if (this.follow) for (const d of dropped) this.avoid.set(d.track.id, Date.now() + 20000);
+      if (this.follow) for (const d of dropped) this.avoid.set(picked(d).id, Date.now() + 20000);
       // The set's talk moves to its next track
       for (const d of dropped) {
         if (!d.first) continue;
@@ -1121,7 +1180,7 @@ class Session {
       // Introducing every song: the line for the next one is written once it's certain what it follows
       // (the first song of a set has the set's introduction, which names it; a mashup needs no words)
       if (!this.piecing && !this.follow && everySong() && next && next.segment.key !== "mashup" && !(next.first && next.talk && !next.talk.after) && next.talk?.after !== cur.item.track.id) {
-        const talk = makeTalk({ type: "track", track: next.track, prev: cur.item.track, facts: trackFacts(next.track, cur.item.track), prevFacts: trackFacts(cur.item.track) }, this.link, false, this.here(next));
+        const talk = makeTalk({ type: "track", track: picked(next), prev: picked(cur.item), facts: trackFacts(picked(next), picked(cur.item)), prevFacts: trackFacts(picked(cur.item)) }, this.link, false, this.here(next));
         talk.after = cur.item.track.id;
         this.give(next, talk);
         if (this.prep?.forId === next.track.id) this.prep.voice = !this.immediate;
@@ -1364,6 +1423,13 @@ class Session {
   }
 
   // ------------------ TIDAL ↔ MIXER ------------------
+  /** A track of this session that `id` is (or is another version of) */
+  private knownAs(id: string): Item | undefined {
+    const known = this.known.get(id);
+    if (known) return known;
+    for (const [k, item] of this.known) if (sameTrack(k, id)) return item;
+    return undefined;
+  }
   private async reconcile() {
     if (this.opening || !this.current) return;
     const now = this.mixer.now;
@@ -1371,7 +1437,9 @@ class Session {
     const tid = this.link.currentId();
     const changed = tid !== this.lastTid;
     this.lastTid = tid;
-    if (tid === want) {
+    // (TIDAL on another version of the same song is on it: RealMAX puts its best version on in place of what TIDAL
+    // was moved to, see versions.ts)
+    if (sameTrack(tid, want)) {
       // Keep TIDAL's position where the music you hear actually is: lyrics, the progress bar and
       // everything else in TIDAL follow it. A tenth of a second or so is the most it may be out.
       const heard = this.current.deck.positionAt(now) - this.mixer.latency;
@@ -1398,10 +1466,15 @@ class Session {
     if (this.link.selfMoved || !tid) return;
     // TIDAL is already on the track the mixer is moving to
     const target = this.pending?.item ?? (this.awaiting ? this.items[0] : undefined);
-    if (target && tid === target.track.id) return;
+    if (target && sameTrack(tid, target.track.id)) return;
     if (!changed) {
-      // The mixer moved on and TIDAL hasn't followed yet
-      if (!this.link.moveTo(want)) {
+      // The mixer moved on and TIDAL hasn't followed yet. (Transitions only: an entry of your queue that is another
+      // version of the track the mixer has, RealMAX's best version of it, is made that version on the way, as
+      // RealMAX would have)
+      if (!this.link.moveTo(want, this.follow && realMaxOn())) {
+        // (unless TIDAL is on another version of it after all, one that wasn't known for one yet)
+        if ((await versionAmong(tid, [want], 1500)) === want) return;
+        if (this.stopped || this.current?.item.track.id !== want) return;
         if (this.follow) return this.letGo("TIDAL's queue changed during the mix");
         this.syncQueue();
       }
@@ -1410,7 +1483,17 @@ class Session {
       return;
     }
     // TIDAL changed track on its own: either it reached the end a moment before the mixer did, or you did it
-    const index = this.items.findIndex((i) => i.track.id === tid);
+    const ids = this.items.map((i) => i.track.id);
+    let index = indexOfTrack(ids, tid);
+    const known = index < 0 ? this.knownAs(tid) : undefined;
+    if (index < 0 && !known) {
+      // Another version of the song the mixer is on or the next one, which RealMAX has put on in its place, is no
+      // reason to end anything: asked once, briefly (it is usually known already), before anything is
+      const match = await versionAmong(tid, [want, ...ids.slice(0, 2)], 1500);
+      if (this.stopped || this.current?.item.track.id !== want || this.link.currentId() !== tid) return;
+      if (match === want) return log(`TIDAL is on another version of ${this.current.item.track.title} (${tid}): the same song`);
+      if (match !== undefined) index = ids.indexOf(match);
+    }
     const pos = this.current.deck.positionAt(now);
     if (index === 0 && pos > this.current.deck.analysis.lastSound - 6) return;
     if (this.follow) {
@@ -1420,10 +1503,9 @@ class Session {
       return this.letGo("you put something else on");
     }
     if (index >= 0) return this.jump(this.items[index]);
-    const known = this.known.get(tid);
     if (known) {
       // Back to something played earlier
-      const again: Item = { track: known.track, segment: known.segment, first: false };
+      const again: Item = { track: known.track, from: known.from, keep: known.keep, segment: known.segment, first: false };
       this.items.unshift(again);
       return this.jump(again);
     }
@@ -1870,7 +1952,8 @@ class Session {
         candidates = [found];
       } else {
         const keys = [keyOf(track), a.key.conf > 0.02 ? { tonic: a.key.tonic, mode: a.key.mode } : undefined].filter((k): k is NonNullable<typeof k> => !!k);
-        candidates = await mashupCandidates(track, 60 / beat, keys, a.tuning);
+        // (by the song as it was picked: what is known of it in your listening is known by that one)
+        candidates = await mashupCandidates(picked(cur.item), 60 / beat, keys, a.tuning);
         if (!candidates.length) return void sorry("Found nothing around this song that can be brought to its tempo and key");
       }
 
@@ -2452,7 +2535,7 @@ class Session {
     if (this.busyCutting()) return setStatus({ note: "One moment, still getting the last thing ready" });
     setStatus({ busy: "Finding that", note: undefined });
     try {
-      const result = await brainRequest(text, this.current?.item.track, (stage) => !this.stopped && setStatus({ busy: stage }));
+      const result = await brainRequest(text, this.current && picked(this.current.item), (stage) => !this.stopped && setStatus({ busy: stage }));
       if (this.stopped) return;
       if (!result) return setStatus({ note: `Couldn't find anything for "${text.trim()}". Try an artist, a genre or a mood` });
       if ("command" in result) {
@@ -2461,6 +2544,8 @@ class Session {
         settings.commentary = result.command === "quiet" ? "less" : "full";
         return setStatus({ note: result.command === "quiet" ? "Okay, less talking" : "Okay, I'll talk more" });
       }
+      // (the best versions of its songs are looked for while the DJ's answer is made)
+      if (playsBest(this.follow)) lookAhead(result.tracks.map((t) => t.id));
       // The DJ's answer is made for this request (what TIDAL's AI came back with, and what plays first).
       // It takes a few seconds to generate; if the voice can't manage it in time the music just starts
       let talk: Talk | undefined;
@@ -2642,7 +2727,7 @@ class Session {
         }
         // Hand over to TIDAL's own player, which has been playing the same track silently all along.
         // Line it up with the mixer first so the music carries on from the same spot
-        if (this.current && !this.opening && this.link.currentId() === this.current.item.track.id && this.link.playing) {
+        if (this.current && !this.opening && sameTrack(this.link.currentId(), this.current.item.track.id) && this.link.playing) {
           await mixer.status().catch(() => {});
           const pos = this.current.deck.positionAt(mixer.now);
           if (pos < this.current.deck.loaded.duration - 3 && Math.abs(this.link.position() - pos) > 0.35) {
@@ -2756,7 +2841,7 @@ export const stopSession = async (reason = "stopped", quick = false) => {
   // With transitions only switched on, that's what's left when the DJ stops
   if (!s.follow) {
     followRetryAt = 0;
-    setTimeout(applyTransitionOnly, 400);
+    later(applyTransitionOnly, 400);
   }
 };
 

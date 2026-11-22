@@ -2,6 +2,7 @@
 // on disk: a track is only ever analysed once.
 import { readDoc, writeDoc } from "../native";
 import { warn } from "../log";
+import { putOff } from "../later";
 
 export type Grid = { period: number; phase: number; count: number; resid: number; inlierShare: number; contrast: number; bpm: number };
 export type Analysis = {
@@ -36,7 +37,6 @@ const VERSION = 9;
 
 // ------------------ CACHE ------------------
 let cache: Record<string, Analysis> | undefined;
-let saveTimer: ReturnType<typeof setTimeout> | undefined;
 const MAX_CACHED = 4000;
 const loadCache = async () => {
   if (cache) return cache;
@@ -49,16 +49,13 @@ const loadCache = async () => {
   }
   return cache!;
 };
-const saveCache = () => {
-  saveTimer ??= setTimeout(() => {
-    saveTimer = undefined;
-    if (!cache) return;
-    const ids = Object.keys(cache);
-    // Oldest entries go first (insertion order)
-    for (const id of ids.slice(0, Math.max(0, ids.length - MAX_CACHED))) delete cache[id];
-    writeDoc("analysis", JSON.stringify({ v: VERSION, tracks: cache })).catch((err) => warn("Couldn't save the analysis cache", err));
-  }, 5000);
-};
+const saveCache = putOff(() => {
+  if (!cache) return;
+  const ids = Object.keys(cache);
+  // Oldest entries go first (insertion order)
+  for (const id of ids.slice(0, Math.max(0, ids.length - MAX_CACHED))) delete cache[id];
+  writeDoc("analysis", JSON.stringify({ v: VERSION, tracks: cache })).catch((err) => warn("Couldn't save the analysis cache", err));
+}, 5000);
 export const cachedAnalysis = async (id: string): Promise<Analysis | undefined> => (await loadCache())[id];
 
 const round = (n: number, d = 4) => (Number.isFinite(n) ? Math.round(n * 10 ** d) / 10 ** d : 0);

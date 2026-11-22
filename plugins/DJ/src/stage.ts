@@ -452,9 +452,8 @@ const spokenLength = (word: string) => {
 };
 
 export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
-  const style = el("style");
-  style.textContent = css;
-  document.head.appendChild(style);
+  // (Luna's StyleTag, read from window.luna as the rest of @luna/lib is here: see the note on it in 3DCover)
+  const style = new (window.luna.lib!.StyleTag)("", unloads, css);
 
   // ------------------ DOM ------------------
   const root = el("div", R);
@@ -626,6 +625,8 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   // (how big the line's panel is, where it goes, and how far up the backdrop reaches, depend on the window: a rule
   // for each, in a sheet of their own, rewritten when the numbers change. They were variables on the page's body at
   // first, set as the layout eased: every one of those restyles every element of TIDAL's page, and it crawled.)
+  // (a sheet of its own, not a StyleTag: one of those leaves the page while it is empty and comes back at the end of
+  // it, after the sheets other plugins put in since, and where it is matters to the backdrop's !important rules)
   const underStyle = document.createElement("style");
   document.head.appendChild(underStyle);
   let underKey = "";

@@ -176,12 +176,11 @@ const shield = (input: HTMLElement) => {
 export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   // Only one plugin instance may own the interface: a live reload whose cleanup didn't run must not leave a second one
   window.__visiuunDjUiDispose?.();
+  // (a sheet left by such an instance goes too: Luna's StyleTag would take it over by its id, and that instance could still remove it)
   document.getElementById(STYLE_ID)?.remove();
   const instance = Math.random().toString(36).slice(2);
-  const style = el("style");
-  style.id = STYLE_ID;
-  style.textContent = `${css}\n.${ROOT}:not([data-instance="${instance}"]), .${ROOT}-card:not([data-instance="${instance}"]) { display: none !important; }`;
-  document.head.appendChild(style);
+  // (Luna's StyleTag, read from window.luna as the rest of @luna/lib is here: see the note on it in 3DCover)
+  const style = new (window.luna.lib!.StyleTag)(STYLE_ID, unloads, `${css}\n.${ROOT}:not([data-instance="${instance}"]), .${ROOT}-card:not([data-instance="${instance}"]) { display: none !important; }`);
 
   // ------------------ PLAYER BAR BUTTON ------------------
   const wrap = el("div", ROOT);

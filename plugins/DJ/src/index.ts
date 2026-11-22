@@ -1,9 +1,10 @@
-import type { LunaUnload } from "@luna/core";
 import { watchAccess } from "./access";
 import { closeAnyMixer } from "./audio/mixer";
 import { closeSeparator } from "./audio/stems";
 import { stopRequests } from "./brain";
-import { flushLogNow, log, trace } from "./log";
+import { flushLogNow, log } from "./log";
+import { unloads } from "./index.safe";
+import { every, later } from "./later";
 import { persona, settings } from "./config";
 import { underNowPlaying } from "./tidal";
 import { applyTransitionOnly, flipMashup, getMash, getStage, getWaveform, getStatus, markUnloaded, mashup, onStatus, resumeCarried, seekTo, setTransitionOnly, shareCode, skip, startSession, stopSession, switchUp } from "./session";
@@ -14,9 +15,7 @@ import { coverFxStage, mountCoverFx } from "./cover";
 import { mountUi } from "./ui";
 
 export { Settings } from "./Settings";
-export { trace };
-
-export const unloads = new Set<LunaUnload>();
+export { errSignal, trace, unloads } from "./index.safe";
 
 // Luna's questions about the DJ's native side are asked once you are there to answer them, and nothing native is
 // done before (see access.ts)
@@ -111,12 +110,8 @@ void resumeCarried().then((picked) => {
 
 // Transitions only stays on across restarts: it's picked up again a moment after TIDAL has loaded, and
 // kept in step with its setting from then on
-const followTimer = setInterval(applyTransitionOnly, 4000);
-const followStart = setTimeout(applyTransitionOnly, 2500);
-unloads.add(() => {
-  clearInterval(followTimer);
-  clearTimeout(followStart);
-});
+every(applyTransitionOnly, 4000);
+later(applyTransitionOnly, 2500);
 
 unloads.add(() => {
   markUnloaded();

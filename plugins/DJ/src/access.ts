@@ -13,17 +13,16 @@
 // wherever that may be). Until then whatever wants the native side waits (the log keeps its lines). Once everything
 // was allowed, that is remembered for this version and nothing waits at the next start; if anything was blocked, the
 // DJ leaves the native side alone for the rest of this run (pressing the DJ button asks again).
-import { Tracer } from "@luna/core";
 import { appendLog as trueTasteLog, getDataDir as trueTasteDir } from "../../TrueTaste/src/store.native";
 import pkg from "../package.json";
 import { askAccess as mixerAccess } from "./audio/mixer.native";
 import { askAccess as stemsAccess } from "./audio/stems.native";
 import { settings } from "./config";
+import { trace } from "./index.safe";
 import { askAccess as storeAccess } from "./store.native";
 import { askAccess as edgeAccess } from "./talk/edge.native";
 import { askAccess as voiceAccess } from "./talk/voice.native";
 
-const { trace } = Tracer("[DJ]");
 const VERSION = String(pkg.version);
 const BLOCKED = /Access Denied|Security/;
 // TrueTaste's files, read with what it has measured of your listening, are a native file of their own in the DJ

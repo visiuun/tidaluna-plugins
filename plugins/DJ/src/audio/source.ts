@@ -2,39 +2,19 @@
 // key for encrypted streams) is handed to the mixer's process, which fetches and decodes it there.
 import type { PlaybackInfo } from "@luna/lib";
 
-import { warn } from "../log";
-
 const lib = () => window.luna.lib!;
 
 export type TrackStream = { urls: string[]; encryptionType?: string; keyId?: string; replayGain: number; peak: number; quality: string };
 
 /**
- * A track's playback info, asked for now. Luna's own `getPlaybackInfo` remembers every answer for as long
- * as TIDAL stays open, but the addresses in an answer are only good for an hour: after that TIDAL's
- * servers refuse them (403), and tracks seen earlier in a long session stopped loading. Asking with an
- * extra, changing parameter gets past that memory while keeping Luna's sign-in and request limiting.
+ * The stream details through Luna's own getPlaybackInfo: one request at a time with TIDAL's (the playing track
+ * first), shared with TIDAL's own request for the same, and asked for afresh once the answer it has is 45 minutes
+ * old (the addresses in one are only good for an hour). Before Luna 1.25 an answer was kept for as long as TIDAL
+ * stayed open, and the DJ asked for its own with an extra, changing parameter; through Luna's request cache each of
+ * those would now be kept as an answer of its own.
  */
-const freshPlaybackInfo = async (id: string, quality: string): Promise<PlaybackInfo | undefined> => {
-  const { TidalApi, parseDasha } = lib() as any;
-  const url = `https://desktop.tidal.com/v1/tracks/${id}/playbackinfo?audioquality=${quality}&playbackmode=STREAM&assetpresentation=FULL&dj=${Date.now()}`;
-  const raw = await (TidalApi.playbackInfoSemaphore?.with ? TidalApi.playbackInfoSemaphore.with(() => TidalApi.fetch(url)) : TidalApi.fetch(url));
-  if (!raw?.manifest) return undefined;
-  if (raw.manifestMimeType === "application/vnd.tidal.bts") {
-    const manifest = JSON.parse(atob(raw.manifest));
-    return { ...raw, manifest, mimeType: manifest.mimeType };
-  }
-  if (raw.manifestMimeType === "application/dash+xml") return { ...raw, manifest: await parseDasha(atob(raw.manifest), "https://sp-ad-cf.audio.tidal.com"), mimeType: "audio/mp4" };
-  throw new Error(`Unsupported stream manifest: ${raw.manifestMimeType}`);
-};
-
 export const trackStream = async (id: string, quality: "LOSSLESS" | "HIGH"): Promise<TrackStream> => {
-  let info: PlaybackInfo | undefined;
-  try {
-    info = await freshPlaybackInfo(id, quality);
-  } catch (err) {
-    warn(`Couldn't get fresh stream details for ${id}, using the remembered ones`, err);
-  }
-  info ??= (await lib().getPlaybackInfo(id, quality as any)) as PlaybackInfo | undefined;
+  const info = (await lib().getPlaybackInfo(id, quality)) as PlaybackInfo | undefined;
   if (!info) throw new Error(`Track ${id} is not available to stream`);
   const meta = info as any;
   const base = {

@@ -8,6 +8,7 @@
 // local model, so the DJ is never left without a voice. With a cloud key, that voice instead.
 import type { Clip } from "../audio/mixer";
 import { persona, settings, voiceEngine, type Persona } from "../config";
+import { later } from "../later";
 import { log, warn } from "../log";
 import { brighten, carry } from "./level";
 import { readVoice, writeVoice } from "../native";
@@ -150,7 +151,7 @@ const generate = async (job: Job): Promise<Clip | null> => {
       lastFailure = undefined;
       if (engine === "edge") {
         // (answering again after a failure: the stock lines that came due meanwhile were read by the stand-in, or not at all)
-        if (edgeFailure !== undefined) setTimeout(prepareStock, 3000);
+        if (edgeFailure !== undefined) later(prepareStock, 3000);
         edgeFailure = undefined;
         edgeFails = 0;
       }

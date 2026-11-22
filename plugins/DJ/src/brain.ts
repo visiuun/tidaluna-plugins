@@ -25,6 +25,8 @@ import { log, warn } from "./log";
 import { readDoc, writeDoc } from "./native";
 import { speakable, type Taste, type TrackFacts } from "./talk/script";
 import { nativeReady } from "./access";
+import { putOff } from "./later";
+import { versionsOf } from "./versions";
 
 export type { Track };
 export type Kind = "more" | "onRepeat" | "recentLikes" | "throwback" | "taste" | "discovery" | "artist" | "forgotten" | "mood" | "dailyMix" | "usual" | "request";
@@ -65,18 +67,15 @@ const MONTHS = ["January", "February", "March", "April", "May", "June", "July", 
 // What the DJ has played and talked about, so sets don't repeat themselves
 type Memory = { played: Record<string, number>; themes: { key: string; at: number }[]; sessions: number; lastSessionAt: number; scratchPlaylist?: string };
 let memory: Memory = { played: {}, themes: [], sessions: 0, lastSessionAt: 0 };
-let memoryTimer: ReturnType<typeof setTimeout> | undefined;
-const saveMemory = () => {
-  memoryTimer ??= setTimeout(() => {
-    memoryTimer = undefined;
-    const cutoff = Date.now() - 30 * DAY;
-    for (const [id, at] of Object.entries(memory.played)) if (at < cutoff) delete memory.played[id];
-    memory.themes = memory.themes.filter((t) => t.at > cutoff).slice(-60);
-    writeDoc("memory", JSON.stringify(memory)).catch(() => {});
-  }, 4000);
-};
+const saveMemory = putOff(() => {
+  const cutoff = Date.now() - 30 * DAY;
+  for (const [id, at] of Object.entries(memory.played)) if (at < cutoff) delete memory.played[id];
+  memory.themes = memory.themes.filter((t) => t.at > cutoff).slice(-60);
+  writeDoc("memory", JSON.stringify(memory)).catch(() => {});
+}, 4000);
+/** (every version of the song the DJ knows of: the one that was picked is played in its best version, see versions.ts) */
 export const markPlayed = (id: string) => {
-  memory.played[id] = Date.now();
+  for (const v of versionsOf(id)) memory.played[v] = Date.now();
   saveMemory();
 };
 export const sessionCount = () => memory.sessions;
@@ -108,7 +107,11 @@ const vectorOf = (id: string) => {
   return vectors.get(id) ?? null;
 };
 let ownTracks: Record<string, Track> = {};
-let tracksTimer: ReturnType<typeof setTimeout> | undefined;
+const saveTracks = putOff(() => {
+  const ids = Object.keys(ownTracks);
+  for (const id of ids.slice(0, Math.max(0, ids.length - 3000))) delete ownTracks[id];
+  writeDoc("tracks", JSON.stringify(ownTracks)).catch(() => {});
+}, 8000);
 
 /** Track details for ids we don't have yet (kept in the DJ's own cache; TrueTaste's files are never written) */
 export const ensureTracks = async (ids: string[]) => {
@@ -126,12 +129,7 @@ export const ensureTracks = async (ids: string[]) => {
       for (const a of t.artists) artists[a.id] ??= { name: a.name };
     }
   }
-  tracksTimer ??= setTimeout(() => {
-    tracksTimer = undefined;
-    const ids = Object.keys(ownTracks);
-    for (const id of ids.slice(0, Math.max(0, ids.length - 3000))) delete ownTracks[id];
-    writeDoc("tracks", JSON.stringify(ownTracks)).catch(() => {});
-  }, 8000);
+  saveTracks();
 };
 
 /** Details of a track the DJ has read (see ensureTracks) */
