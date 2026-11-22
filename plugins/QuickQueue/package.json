@@ -1,6 +1,6 @@
 {
   "name": "@visiuun/quick-queue",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Add tracks to queue or play them next with a single click directly from track rows",
   "author": {
     "name": "visiuun",

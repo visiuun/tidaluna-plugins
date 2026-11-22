@@ -1,12 +1,9 @@
-import { LunaUnload, Tracer } from "@luna/core";
-import { redux } from "@luna/lib";
+import { observe, PlayState, redux, safeTimeout, StyleTag } from "@luna/lib";
+import { trace, unloads } from "./index.safe";
 import { QueueAction, settings } from "./Settings";
 
 export { Settings } from "./Settings";
-
-export const { trace } = Tracer("[QuickQueue]");
-
-export const unloads = new Set<LunaUnload>();
+export { trace, unloads };
 
 const STYLE_ID = "luna-quick-queue-styles";
 const BUTTON_CLASS = "luna-quick-queue-btn";
@@ -18,14 +15,7 @@ const ICONS = {
 };
 
 function injectStyles(): void {
-  let styleEl = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
-  if (!styleEl) {
-    styleEl = document.createElement("style");
-    styleEl.id = STYLE_ID;
-    document.head.appendChild(styleEl);
-  }
-
-  styleEl.textContent = `
+  new StyleTag(STYLE_ID, unloads, `
     div[class*="_contextColumn_"],
     div[class*="contextColumn"],
     div[class*="_flexWrapper_"],
@@ -103,11 +93,7 @@ function injectStyles(): void {
       border: 1px solid rgba(51, 255, 238, 0.35) !important;
       transform: scale(1.08);
     }
-  `;
-
-  unloads.add(() => {
-    styleEl?.remove();
-  });
+  `);
 }
 
 function getReactFiber(dom: Element): any {
@@ -162,39 +148,15 @@ function executeDirectQueue(element: HTMLElement, actionType: QueueAction): void
   const id = extractTrackId(element);
   if (!id) return;
 
-  const rawId = typeof id === "number" ? id : parseInt(String(id), 10) || id;
-  const actions = redux?.actions;
-  if (!actions) return;
-
-  const fallbackContext = {
-    type: "TRACK",
-    id: String(rawId),
-  };
-
-  const activeContext = (redux as any)?.state?.playQueue?.context || fallbackContext;
-
-  const payload = {
-    mediaItemIds: [String(rawId)],
-    context: activeContext,
-  };
+  const mediaItemIds = [String(id)];
 
   try {
-    if (actionType === "playNext") {
-      if (typeof actions["playQueue/ADD_NEXT"] === "function") {
-        actions["playQueue/ADD_NEXT"](payload);
-      } else if (typeof actions["playbackControls/PLAY_NEXT"] === "function") {
-        actions["playbackControls/PLAY_NEXT"]({ id: rawId, itemType: "track" });
-      }
-    } else {
-      if (typeof actions["playQueue/ADD_LAST"] === "function") {
-        actions["playQueue/ADD_LAST"](payload);
-      } else if (typeof actions["playQueue/ADD"] === "function") {
-        actions["playQueue/ADD"](payload);
-      } else if (typeof actions["playQueue/ADD_TO_QUEUE"] === "function") {
-        actions["playQueue/ADD_TO_QUEUE"](payload);
-      }
-    }
-  } catch {}
+    // TIDAL's own "Play next" (playQueue/ADD_NEXT, through Luna's PlayState) and "Add to queue" (playQueue/ADD_LAST, the same context)
+    if (actionType === "playNext") PlayState.playNext(mediaItemIds);
+    else redux.actions["playQueue/ADD_LAST"]({ mediaItemIds, context: { type: "UNKNOWN" } });
+  } catch (err) {
+    trace.err.withContext(actionType === "playNext" ? "playing a track next" : "adding a track to the queue")(err);
+  }
 }
 
 function createQuickQueueButton(flexWrapper: HTMLElement): HTMLElement {
@@ -225,7 +187,7 @@ function createQuickQueueButton(flexWrapper: HTMLElement): HTMLElement {
 
     executeDirectQueue(flexWrapper, targetAction);
 
-    setTimeout(() => {
+    safeTimeout(unloads, () => {
       btn.classList.remove("success");
       const currentDefault = settings.defaultAction;
       btn.innerHTML = currentDefault === "playNext" ? ICONS.playNext : ICONS.queue;
@@ -257,18 +219,16 @@ function processFlexWrapper(flexWrapper: HTMLElement): void {
   flexWrapper.prepend(btn);
 }
 
-function scanTrackRows(): void {
-  const flexWrappers = document.querySelectorAll<HTMLElement>(
-    'div[class*="_contextColumn_"] > div[class*="_flexWrapper_"], div[class*="contextColumn"] > div[class*="flexWrapper"], div[class*="_contextColumn_"] > div, div[class*="contextColumn"] > div'
-  );
+const FLEX_WRAPPERS =
+  'div[class*="_contextColumn_"] > div[class*="_flexWrapper_"], div[class*="contextColumn"] > div[class*="flexWrapper"], div[class*="_contextColumn_"] > div, div[class*="contextColumn"] > div';
 
-  for (let i = 0; i < flexWrappers.length; i++) {
-    const flex = flexWrappers[i];
-    if (flex.closest('[class*="header"]') || flex.closest('[role="columnheader"]')) {
-      continue;
-    }
-    processFlexWrapper(flex);
-  }
+function processRow(flex: HTMLElement): void {
+  if (flex.closest('[class*="header"]') || flex.closest('[role="columnheader"]')) return;
+  processFlexWrapper(flex);
+}
+
+function scanTrackRows(): void {
+  document.querySelectorAll<HTMLElement>(FLEX_WRAPPERS).forEach(processRow);
 }
 
 function refreshAllButtons(): void {
@@ -279,17 +239,10 @@ function refreshAllButtons(): void {
 
 injectStyles();
 
-const observer = new MutationObserver(() => {
-  scanTrackRows();
-});
-
-observer.observe(document.body, {
-  childList: true,
-  subtree: true,
-});
+// Rows already on the page, and every one that is added (Luna's one shared observer, which looks at added elements only)
+observe<HTMLElement>(unloads, FLEX_WRAPPERS, processRow);
 
 unloads.add(() => {
-  observer.disconnect();
   document.querySelectorAll(`.${BUTTON_CLASS}`).forEach((el) => el.remove());
 });
 
@@ -301,5 +254,3 @@ window.addEventListener("luna:quickqueue:updated", onSettingsUpdated);
 unloads.add(() => {
   window.removeEventListener("luna:quickqueue:updated", onSettingsUpdated);
 });
-
-scanTrackRows();
