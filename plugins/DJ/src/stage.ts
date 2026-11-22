@@ -21,6 +21,7 @@
 import type { LunaUnload } from "@luna/core";
 import type { MashArrangement, MashBlock, Wave } from "./audio/mixer";
 import { copyText } from "./clipboard";
+import { lightenPage, restorePage } from "./lighten";
 import { lookingForMusic, type CoverTransition, type Stage, type StageDeck, type Status } from "./session";
 
 export type StageSource = {
@@ -811,8 +812,14 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     }
     return undefined;
   };
+  // Text is changed in place, in the text node there is, not by putting a new one in: a node put in or taken out has
+  // the browser check rules all over TIDAL's page (see lighten.ts), and textContent puts a new one in each time, even
+  // with the same text
   const setText = (e: HTMLElement | null, text: string) => {
-    if (e && e.textContent !== text) e.textContent = text;
+    if (!e || e.textContent === text) return;
+    const n = e.firstChild;
+    if (n && n === e.lastChild && n.nodeType === Node.TEXT_NODE) (n as Text).data = text;
+    else e.textContent = text;
   };
   let mash: Mash | undefined;
   let mashAsked = 0;
@@ -965,7 +972,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     c.el.style.transform = `translate(${(p.x - c.base / 2).toFixed(1)}px, ${(geo.top + (geo.S - c.base) / 2).toFixed(1)}px) scale(${((geo.S / c.base) * p.scale).toFixed(4)})`;
     c.el.style.opacity = p.opacity.toFixed(3);
     c.el.style.zIndex = String(p.z);
-    if (tag) c.tag.textContent = tag;
+    if (tag) setText(c.tag, tag);
     c.el.classList.toggle("tagged", !!tag);
   };
   /** A new cover: lifted out of its place in "Up next" when it's there, else faded in where it goes */
@@ -1282,8 +1289,8 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     return mark;
   };
   const fillTrack = (d: StageDeck) => (b: Ttl) => {
-    b.t.textContent = titleOf(d);
-    b.by.textContent = artistsOf(d);
+    setText(b.t, titleOf(d));
+    setText(b.by, artistsOf(d));
     b.marks.replaceChildren();
     marksFor(d.id, (m) => {
       // (the name may have changed hands since it was asked)
@@ -1344,7 +1351,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       replace(nowTtl, `m|${tr!.songs!.a}|${tr!.songs!.b}`, (bl) => {
         bl.t.replaceChildren(tr!.songs!.a, el("span", "x2", " × "), tr!.songs!.b);
         bl.marks.replaceChildren();
-        bl.by.textContent = [tr!.songs!.artistA, tr!.songs!.artistB].filter(Boolean).join(" × ");
+        setText(bl.by, [tr!.songs!.artistA, tr!.songs!.artistB].filter(Boolean).join(" × "));
       });
     } else if (lead) {
       // Over the name: the mix that is seconds away, else what the DJ is busy with (when the records over the cover
@@ -1504,7 +1511,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       const dots = el("i", undefined, "");
       digText.replaceChildren(digLabel, dots);
       let n = 0;
-      digDots = setInterval(() => (dots.textContent = ".".repeat((n++ % 3) + 1)), 350);
+      digDots = setInterval(() => setText(dots, ".".repeat((n++ % 3) + 1)), 350);
     }
     if (!d) return;
     setText(digLabel ?? null, d.text);
@@ -1974,7 +1981,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     const key = `${percent}|${muted}`;
     if (key === shownVol) return;
     shownVol = key;
-    volPct.textContent = muted ? "Muted" : `${percent}%`;
+    setText(volPct, muted ? "Muted" : `${percent}%`);
     volFill.style.height = `${percent}%`;
     vol.classList.toggle("muted", muted);
   };
@@ -1998,8 +2005,8 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   // ------------------ A NEW SET ------------------
   let bannerAnim: Animation | undefined;
   const announce = (label: string, title: string) => {
-    bannerLabel.textContent = label;
-    bannerTitle.textContent = title;
+    setText(bannerLabel, label);
+    setText(bannerTitle, title);
     bannerAnim?.cancel();
     top.classList.add("announcing");
     bannerAnim = banner.animate(
@@ -2336,6 +2343,8 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const openStage = () => {
     if (open) return;
     open = true;
+    // (TIDAL's page made light while it is under the full screen: see lighten.ts)
+    lightenPage();
     root.classList.add("open");
     lookedAt = 0;
     stir();
@@ -2368,6 +2377,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     digging(undefined);
     src.fxSurface(undefined);
     leaveUnder();
+    restorePage();
   };
 
   closeBtn.addEventListener("click", close);
