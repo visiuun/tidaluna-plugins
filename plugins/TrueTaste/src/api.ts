@@ -1,6 +1,7 @@
 // TIDAL API client. Endpoints and payload shapes come from TIDAL's own desktop bundle (desktop.tidal.com)
 // and the public OpenAPI spec: v1 for mixes/favorites/blocks/search, OpenAPI v2 for the similarity graph,
 // rich track metadata (bpm, key, tone tags, popularity, AI flag) and playlist writes.
+import { redux, TidalApi } from "@luna/lib";
 import type { Track } from "./types";
 
 const V1 = "https://desktop.tidal.com/v1/";
@@ -9,8 +10,7 @@ const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 // Same public key the TidalGenres plugin uses
 const LASTFM_KEY = "b25b959554ed76058ac220b7b2e0a026";
 
-const lib = () => window.luna.lib!;
-const session = () => lib().redux.store.getState().session;
+const session = () => redux.store.getState().session;
 export const userId = () => session().userId;
 const countryCode = () => session().countryCode;
 
@@ -51,6 +51,12 @@ const paced = <T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> => {
   return run;
 };
 
+/**
+ * Runs `fn` (work that makes its own requests, e.g. Luna's lookups) in the same queue, so it's paced like the rest.
+ * `fn` must not use this file's requests: they would wait for it to finish, and it for them
+ */
+export const politely = <T>(fn: () => Promise<T>): Promise<T> => paced(() => fn());
+
 let requestCount = 0;
 export const takeRequestCount = () => {
   const n = requestCount;
@@ -61,7 +67,7 @@ export const takeRequestCount = () => {
 const request = async (url: string, init: RequestInit & { auth?: boolean } = {}): Promise<Response> =>
   paced(async (signal) => {
     const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
-    if (init.auth !== false) Object.assign(headers, await lib().TidalApi.getAuthHeaders());
+    if (init.auth !== false) Object.assign(headers, await TidalApi.getAuthHeaders());
     for (let attempt = 0; ; attempt++) {
       requestCount++;
       const res = await fetch(url, { ...init, headers, signal });
@@ -338,7 +344,7 @@ export const historyMixes = async (known: HistoryMix[] = []): Promise<HistoryMix
   findHistoryMixes(await gateway<unknown>("home/feed/static", { limit: 40 }), found, viewAll);
   // Whatever the app already loaded (e.g. the Home page) is in its store
   try {
-    findHistoryMixes(lib().redux.store.getState(), found, viewAll);
+    findHistoryMixes(redux.store.getState(), found, viewAll);
   } catch {}
   for (const source of viewAll) findHistoryMixes(await gateway<unknown>(`home/pages/${encodeURIComponent(source)}/view-all`, { limit: 50, offset: 0 }), found);
   for (const m of await myMixes().catch(() => [])) if (/HISTORY/.test(m.mixType) && !found.has(m.id)) found.set(m.id, { id: m.id, mixType: m.mixType, title: m.title ?? "" });

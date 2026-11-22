@@ -1,6 +1,7 @@
 // Implicit feedback, the signal Spotify leans on most: what you finish, what you skip, what you heart.
 import type { LunaUnload } from "@luna/core";
-import { markDirty, state, writeLog } from "./db";
+import { MediaItem, PlayState, redux, safeInterval } from "@luna/lib";
+import { markDirty, state, tracks, writeLog } from "./db";
 import { engagement } from "./profile";
 import { learnFromOutcome } from "./rank";
 import type { ListenKind } from "./types";
@@ -8,22 +9,24 @@ import type { ListenKind } from "./types";
 const POLL_MS = 2000;
 const SKIP_MS = 30000;
 
-type Current = { id: string; artists: string[]; start: number; duration: number; listened: number; lastPos: number; dd: boolean };
+// `pick`: the recommendation this track is, see pickFor
+type Current = { id: string; artists: string[]; start: number; duration: number; listened: number; lastPos: number; dd: boolean; pick?: string };
 let current: Current | null = null;
 
-// Where the song is, from the player that is active now. Luna's PlayState.currentTime keeps hold of the
-// player it found first, and TIDAL has two (its own, and a web player it changes to for some songs):
-// after a change that figure stands still, and every song then looked as if none of it had been heard.
-type PlayerModule = { activePlayer?: { currentTime?: number } };
-let playerModule: PlayerModule | undefined;
-const position = (): number => {
-  try {
-    playerModule ??=
-      ((window as any).luna.core.findModuleByProperty((key: unknown, value: unknown) => key === "activePlayer" && typeof value === "object" && value !== null && "currentTime" in (value as object)) as PlayerModule | undefined) ?? undefined;
-    const t = Number(playerModule?.activePlayer?.currentTime);
-    if (Number.isFinite(t)) return t;
-  } catch {}
-  return lib().PlayState.currentTime;
+// Where the song is, from the player that is active now (TIDAL has two, its own and a web player it changes to for
+// some songs; Luna's PlayState.currentTime follows the change)
+const position = (): number => PlayState.currentTime;
+
+/**
+ * Which of our picks a track is: the pick itself, or the same recording (same ISRC) under another id. The playlist
+ * can hold another release of a pick than the one ranked (its best quality version), and RealMAX can swap a track
+ * for its best version as it plays: either way your reaction counts for the pick
+ */
+export const pickFor = (id: string, isrc = tracks[id]?.isrc): string | undefined => {
+  if (state.recommended[id]) return id;
+  if (!isrc) return undefined;
+  for (const pick in state.recommended) if (tracks[pick]?.isrc === isrc) return pick;
+  return undefined;
 };
 
 const trackListeners = new Set<(id: string | null) => void>();
@@ -52,18 +55,15 @@ export const giveFeedback = (v: 1 | -1) => {
   }
   state.feedback[c.id] = { v, at: Date.now(), artists: c.artists };
   markDirty("state");
-  if (state.recommended[c.id]) learnFromOutcome(c.id, v > 0 ? 1 : 0, 3);
-  writeLog(`${v > 0 ? "👍" : "👎"} on ${c.id}${state.recommended[c.id] ? " (one of our picks)" : ""}`);
-  if (v < 0) lib().PlayState.next();
+  if (c.pick) learnFromOutcome(c.pick, v > 0 ? 1 : 0, 3);
+  writeLog(`${v > 0 ? "👍" : "👎"} on ${c.id}${c.pick ? ` (one of our picks${c.pick !== c.id ? `, ${c.pick}` : ""})` : ""}`);
+  if (v < 0) PlayState.next();
   return v;
 };
 
-const lib = () => window.luna.lib!;
-type MediaItemLike = { id: string | number; contentType: string; duration?: number; tidalItem: { artists?: { id: string | number }[]; artist?: { id: string | number } } };
-
 const fromOurPlaylist = () => {
   if (!state.playlistId) return false;
-  const pq = lib().PlayState.playQueue;
+  const pq = PlayState.playQueue;
   const ctx = pq.elements?.[pq.currentIndex]?.context;
   return String(ctx?.id ?? pq.sourceEntityId ?? "") === state.playlistId;
 };
@@ -87,17 +87,16 @@ const finish = () => {
   markDirty("state");
 
   // Outcome of something we recommended → train the ranker, on the same listening-time curve
-  if (state.recommended[c.id]) {
+  if (c.pick) {
     const e = engagement(ms, ratio);
-    learnFromOutcome(c.id, (e + 1) / 2, e <= -0.9 ? 1.5 : 1);
-    writeLog(`Feedback on pick ${c.id}: ${kind} (${Math.round(ratio * 100)}%)`);
+    learnFromOutcome(c.pick, (e + 1) / 2, e <= -0.9 ? 1.5 : 1);
+    writeLog(`Feedback on pick ${c.pick}${c.pick !== c.id ? ` (as ${c.id})` : ""}: ${kind} (${Math.round(ratio * 100)}%)`);
   }
 };
 
 const poll = () => {
   if (!current) return;
-  const ps = lib().PlayState;
-  if (!ps.playing) return;
+  if (!PlayState.playing) return;
   const pos = position();
   const delta = pos - current.lastPos;
   // Only count real playback: seeks and stalls show up as jumps
@@ -127,9 +126,10 @@ export const watchLikes = (store: Store) => {
     for (const id of added) {
       state.likes[id] = at;
       delete state.unlikes[id];
-      if (yours && state.recommended[id]) {
-        learnFromOutcome(id, 1, 2.5);
-        writeLog(`Feedback on pick ${id}: liked`);
+      const pick = yours ? (id === current?.id ? current.pick : pickFor(id)) : undefined;
+      if (pick) {
+        learnFromOutcome(pick, 1, 2.5);
+        writeLog(`Feedback on pick ${pick}${pick !== id ? ` (as ${id})` : ""}: liked`);
       }
     }
     for (const id of removed) state.unlikes[id] = at;
@@ -141,16 +141,16 @@ export const watchLikes = (store: Store) => {
 };
 
 export const startTracking = (unloads: Set<LunaUnload>) => {
-  const { MediaItem, PlayState, redux } = lib();
-
-  const begin = (item: MediaItemLike) => {
+  const begin = (item: MediaItem) => {
     if (item.contentType !== "track") {
       current = null;
       for (const fn of trackListeners) fn(null);
       return;
     }
     const artists = (item.tidalItem.artists ?? (item.tidalItem.artist ? [item.tidalItem.artist] : [])).map((a) => String(a.id));
-    current = { id: String(item.id), artists, start: Date.now(), duration: item.duration ?? 0, listened: 0, lastPos: position(), dd: fromOurPlaylist() };
+    const id = String(item.id);
+    const pick = pickFor(id, (item.tidalItem as { isrc?: string }).isrc);
+    current = { id, artists, start: Date.now(), duration: item.duration ?? 0, listened: 0, lastPos: position(), dd: fromOurPlaylist(), pick };
     for (const fn of trackListeners) fn(current.id);
   };
 
@@ -163,8 +163,7 @@ export const startTracking = (unloads: Set<LunaUnload>) => {
     .then((item) => item && !current && begin(item))
     .catch(() => {});
 
-  const timer = setInterval(poll, POLL_MS);
-  unloads.add(() => clearInterval(timer));
+  safeInterval(unloads, poll, POLL_MS);
 
   // Hearts: TIDAL's own list of your liked tracks, watched for what comes and goes. (Watching the heart action
   // itself missed some: Luna only sees the actions TIDAL's code builds after Luna has hooked into it, and a like

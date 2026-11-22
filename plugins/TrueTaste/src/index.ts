@@ -1,4 +1,4 @@
-import { LunaUnload, Tracer } from "@luna/core";
+import { safeInterval, safeTimeout } from "@luna/lib";
 import { stopRequests, tapHomeFeed } from "./api";
 import { settings } from "./config";
 import { flush, flushLog, loadAll, markDirty, state, writeLog } from "./db";
@@ -6,12 +6,11 @@ import { discoveryDay, isRunning, runDiscovery, setLogger, setNotifier } from ".
 import { mountFeedbackButtons } from "./buttons";
 import { playingOurPlaylist, startTracking } from "./history";
 import { engagement } from "./profile";
+import { trace, unloads } from "./index.safe";
 import { migrateLegacyData, removeLegacyModels } from "./store.native";
 
 export { Settings } from "./Settings";
-
-export const { trace } = Tracer("[TrueTaste]");
-export const unloads = new Set<LunaUnload>();
+export { errSignal, trace, unloads } from "./index.safe";
 
 setLogger((msg) => {
   trace.log(msg);
@@ -79,15 +78,14 @@ const check = () => {
   const reason = playingOurPlaylist() ? null : adaptReason();
   if (!reason) return;
   state.lastAdaptAt = Date.now();
+  markDirty("state");
   runDiscovery(`adapting: ${reason}`).catch(() => {});
 };
 
-const startup = setTimeout(check, STARTUP_DELAY_MS);
-const interval = setInterval(check, CHECK_EVERY_MS);
+safeTimeout(unloads, check, STARTUP_DELAY_MS);
+safeInterval(unloads, check, CHECK_EVERY_MS);
 
 unloads.add(() => {
-  clearTimeout(startup);
-  clearInterval(interval);
   stopRequests();
   flushLog();
   flush().catch(() => {});

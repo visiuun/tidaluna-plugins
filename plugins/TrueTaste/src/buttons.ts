@@ -1,6 +1,7 @@
 // 👍 / 👎 in the player bar, next to TIDAL's own controls. They copy the queue button's classes so they
 // pick up whatever theme is active.
 import type { LunaUnload } from "@luna/core";
+import { observe, StyleTag } from "@luna/lib";
 import { currentTrackId, feedbackFor, giveFeedback, onTrackChange } from "./history";
 
 const WRAP_CLASS = "true-taste-feedback";
@@ -35,11 +36,12 @@ export const mountFeedbackButtons = (unloads: Set<LunaUnload>) => {
   // Buttons of a stale instance (whose cleanup never ran) are hidden rather than removed: removing them
   // would make its observer put them back, and the two would fight forever
   const instance = Math.random().toString(36).slice(2);
-  const style = document.createElement("style");
-  style.id = STYLE_ID;
-  style.textContent = `${css}
-  .${WRAP_CLASS}:not([data-instance="${instance}"]) { display: none !important; }`;
-  document.head.appendChild(style);
+  const style = new StyleTag(
+    STYLE_ID,
+    unloads,
+    `${css}
+  .${WRAP_CLASS}:not([data-instance="${instance}"]) { display: none !important; }`,
+  );
 
   const wrap = document.createElement("div");
   wrap.className = WRAP_CLASS;
@@ -73,10 +75,10 @@ export const mountFeedbackButtons = (unloads: Set<LunaUnload>) => {
     render();
   });
 
-  // Keep the buttons in place: TIDAL re-renders the player bar now and then
+  // Keep the buttons in place: TIDAL re-renders the player bar now and then, with a new queue button each time
   let disposed = false;
   const place = () => {
-    // A placement queued for the next frame can land after cleanup: it must not bring the buttons back
+    // A placement reported after cleanup must not bring the buttons back
     if (disposed) return;
     const anchor = document.querySelector<HTMLElement>(ANCHOR);
     // Already in the bar: leave it, so other scripts moving things around can't trigger a loop
@@ -84,23 +86,14 @@ export const mountFeedbackButtons = (unloads: Set<LunaUnload>) => {
     for (const b of [up, down]) b.className = anchor.className;
     anchor.parentElement?.insertBefore(wrap, anchor);
   };
-  let queued = false;
-  const observer = new MutationObserver(() => {
-    if (queued) return;
-    queued = true;
-    requestAnimationFrame(() => {
-      queued = false;
-      place();
-    });
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
+  // (Luna's DOM watcher, shared by every plugin: reports each queue button TIDAL puts in, and the one already there)
+  const unobserve = observe(unloads, ANCHOR, place);
   render();
-  place();
 
   const offTrack = onTrackChange(render);
   const dispose = () => {
     disposed = true;
-    observer.disconnect();
+    unobserve();
     offTrack();
     wrap.remove();
     style.remove();

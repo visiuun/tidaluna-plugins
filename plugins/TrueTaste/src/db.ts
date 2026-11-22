@@ -1,4 +1,7 @@
 // In-memory working set, persisted to disk (store.native.ts) with debounced writes
+import type { LunaUnload } from "@luna/core";
+import { safeTimeout } from "@luna/lib";
+import { unloads } from "./index.safe";
 import { appendLog, readDoc, writeDoc } from "./store.native";
 import { emptyState, type ArtistInfo, type State, type Track } from "./types";
 
@@ -73,33 +76,40 @@ const prune = () => {
 
 // ------------------ SAVING ------------------
 const dirty = new Set<"state" | "tracks" | "artists">();
-let saveTimer: ReturnType<typeof setTimeout> | undefined;
+// (cancelled on unload, which saves right away instead)
+let saveTimer: LunaUnload | undefined;
 
 export const markDirty = (...docs: ("state" | "tracks" | "artists")[]) => {
   for (const d of docs) dirty.add(d);
-  saveTimer ??= setTimeout(() => flush().catch(() => {}), 20000);
+  saveTimer ??= safeTimeout(unloads, () => flush().catch(() => {}), 20000);
 };
 
+// One save at a time: two saves of the same document at once write the same temporary file, and on Windows the
+// one that loses the race can delete the other's, so neither is kept
+let saving: Promise<unknown> = Promise.resolve();
 export const flush = async () => {
-  clearTimeout(saveTimer);
+  saveTimer?.();
   saveTimer = undefined;
   if (dirty.size === 0) return;
   prune();
   const docs = { state, tracks, artists };
   const names = [...dirty];
   dirty.clear();
-  await Promise.all(names.map((name) => writeDoc(name, JSON.stringify(docs[name]))));
+  const json = names.map((name) => [name, JSON.stringify(docs[name])] as const);
+  const save = saving.catch(() => {}).then(() => Promise.all(json.map(([name, text]) => writeDoc(name, text))));
+  saving = save;
+  await save;
 };
 
 // ------------------ LOG ------------------
 let logBuffer: string[] = [];
-let logTimer: ReturnType<typeof setTimeout> | undefined;
+let logTimer: LunaUnload | undefined;
 export const writeLog = (line: string) => {
   logBuffer.push(`[${new Date().toISOString()}] ${line}`);
-  logTimer ??= setTimeout(flushLog, 2000);
+  logTimer ??= safeTimeout(unloads, flushLog, 2000);
 };
 export const flushLog = () => {
-  clearTimeout(logTimer);
+  logTimer?.();
   logTimer = undefined;
   if (logBuffer.length === 0) return;
   const text = logBuffer.join("\n") + "\n";

@@ -9,6 +9,7 @@ export type PluginSettings = {
   excludeAI: boolean;
   useLastfm: boolean;
   notify: boolean;
+  bestQuality: boolean; // put each pick in the playlist in its best quality version (RealMAX's lookup when it's enabled)
 };
 
 export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("TrueTaste", {
@@ -20,4 +21,5 @@ export const settings = await ReactiveStore.getPluginStorage<PluginSettings>("Tr
   excludeAI: true,
   useLastfm: true,
   notify: true,
+  bestQuality: true,
 });

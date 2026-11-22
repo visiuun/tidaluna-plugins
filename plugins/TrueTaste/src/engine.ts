@@ -1,10 +1,12 @@
-// One generation run: sync → profile → vectors → cluster → retrieve → filter → rank → select → write.
+// One generation run: sync → profile → vectors → cluster → retrieve → filter → rank → select → best versions → write.
+import { Playlist, redux } from "@luna/lib";
 import * as api from "./api";
 import { gatherCandidates } from "./candidates";
 import { artists, flush, markDirty, state, tracks, writeLog } from "./db";
 import { blendSeeds, buildProfile, labelFor, titleKey, VERSION_RE, versionText, type Clocks, type Mix, type Profile } from "./profile";
 import { clusterSeeds, scoreCandidates, selectPlaylist, sequence, type Candidate } from "./rank";
 import { settings } from "./config";
+import { bestVersion, bestVersionSource } from "./quality";
 import type { State, Track } from "./types";
 import { dot, normalize, tagSpaceSize } from "./tagspace";
 import { trackVectors } from "./vectors";
@@ -68,7 +70,7 @@ const syncLibrary = async () => {
   // you (never "discovered"), with no weight as taste (nothing is known about them but the id)
   let unplayable = 0;
   try {
-    for (const raw of (window.luna.lib!.redux.store.getState() as any).favorites?.tracks ?? []) {
+    for (const raw of (redux.store.getState() as any).favorites?.tracks ?? []) {
       const id = String(raw);
       if (id in likes) continue;
       likes[id] = 1;
@@ -214,11 +216,14 @@ const writePlaylist = async (ids: string[], description: string) => {
     markDirty("state");
   }
   if (!id) {
-    id = await api.createPlaylist(PLAYLIST_NAME, description);
+    // (Luna's, which also shows the new playlist in TIDAL's playlist lists right away, as TIDAL does)
+    const mediaItems = ids.map((trackId) => ({ id: trackId, contentType: "track" as const }));
+    const created = await api.politely(() => Playlist.create(PLAYLIST_NAME, { description, mediaItems }));
+    id = created ? String(created.uuid) : (await api.myPlaylists().catch(() => [])).find((p) => p.title === PLAYLIST_NAME)?.uuid;
+    if (!id) throw new Error("Created the playlist but couldn't find it afterwards");
     state.playlistId = id;
     markDirty("state");
     log(`Created playlist ${id}`);
-    await api.addPlaylistTracks(id, ids);
   } else {
     // Add the new picks first, then remove the old ones: a failure halfway never leaves it empty
     const old = await api.playlistItems(id);
@@ -227,9 +232,57 @@ const writePlaylist = async (ids: string[], description: string) => {
     await api.updatePlaylist(id, { name: PLAYLIST_NAME, description }).catch((err) => log(`description update failed: ${err.message}`));
   }
   try {
-    window.luna.lib!.redux.actions["content/LOAD_PLAYLIST"]({ playlistUUID: id });
+    redux.actions["content/LOAD_PLAYLIST"]({ playlistUUID: id });
   } catch {}
   return id;
+};
+
+// ------------------ BEST VERSIONS ------------------
+// Each pick in its best quality version (see quality.ts). A version only replaces a pick if it passes every check the
+// pick did (new to you, not blocked, explicit/AI settings, not recently recommended...) and keeps the playlist's rules:
+// one track per artist and per album, and no more picks by artists you know. Otherwise, or if the lookup fails, the
+// pick stays as it is. Returns pick id → the id to put in the playlist, for the picks that change.
+const bestVersions = async (picks: Candidate[], profile: Profile, blocks: api.Blocks, now: number, knownArtist: (t: Track) => boolean) => {
+  const found = new Map<string, string>();
+  for (const [i, p] of picks.entries()) {
+    setStatus({ stage: `Finding the best quality versions (${i + 1}/${picks.length})` });
+    const best = await bestVersion(p.t.id).catch((err) => {
+      if (api.isAbort(err)) throw err;
+      log(`best version of ${p.t.id} failed: ${(err as Error)?.message ?? err}`);
+      return undefined;
+    });
+    if (best) found.set(p.t.id, best.id);
+  }
+  const swaps = new Map<string, string>();
+  if (found.size === 0) {
+    log(`Best quality: all ${picks.length} picks are already their best version (${bestVersionSource()})`);
+    return swaps;
+  }
+  await ensureTracks([...found.values()]);
+  // The playlist as it would be, swaps made so far included
+  const final = picks.map((p) => p.t);
+  const conflict = (t: Track, i: number) => {
+    const others = final.filter((_, j) => j !== i);
+    if (others.some((o) => o.id === t.id || titleKey(o) === titleKey(t))) return "already in the playlist";
+    if (others.some((o) => o.artists.some((a) => t.artists.some((b) => b.id === a.id)))) return "artist already in the playlist";
+    if (t.album && others.some((o) => o.album?.id === t.album!.id)) return "album already in the playlist";
+    if (knownArtist(t) && !knownArtist(final[i])) return "artist you know";
+    return null;
+  };
+  const kept: string[] = [];
+  picks.forEach((p, i) => {
+    const id = found.get(p.t.id);
+    if (!id) return;
+    const t = tracks[id];
+    const why = t ? (keep(t, profile, blocks, now) ?? conflict(t, i)) : "no details";
+    if (why) return void kept.push(`${p.t.id} (${id}: ${why})`);
+    final[i] = t;
+    swaps.set(p.t.id, id);
+  });
+  log(
+    `Best quality (${bestVersionSource()}): ${swaps.size}/${picks.length} picks swapped for a better version${kept.length ? `; kept as they are: ${kept.join(", ")}` : ""}`,
+  );
+  return swaps;
 };
 
 // ------------------ TASTE DRIFT ------------------
@@ -416,11 +469,13 @@ const run = async (reason: string) => {
     const explore = settings.exploration / 100;
     scoreCandidates(cands, profile, seedVecs, negVecs, clusters, explore);
     // Discovery means new artists: only a few picks may come from artists already in your library
-    const isKnownArtist = (c: Candidate) => c.t.artists.some((a) => (profile.artistFamiliarity.get(a.id) ?? 0) > 0);
+    const knownArtist = (t: Track) => t.artists.some((a) => (profile.artistFamiliarity.get(a.id) ?? 0) > 0);
+    const isKnownArtist = (c: Candidate) => knownArtist(c.t);
     const knownCap = Math.max(1, Math.round(settings.size * (0.4 - 0.35 * explore)));
     const picks = sequence(selectPlaylist(cands, clusters, settings.size, explore, isKnownArtist, knownCap));
     const newArtists = picks.filter((p) => !isKnownArtist(p)).length;
     if (picks.length < 5) throw new Error(`Only ${picks.length} tracks survived ranking`);
+    const swaps = settings.bestQuality ? await bestVersions(picks, profile, blocks, now, knownArtist) : new Map<string, string>();
 
     // Write
     setStatus({ stage: "Updating your playlist" });
@@ -428,11 +483,17 @@ const run = async (reason: string) => {
     const date = new Date(now).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
     const description = `New music picked for you every day from what you actually listen to, made locally by Luna.${labels.length ? ` Today: ${labels.join(" · ")}.` : ""} Updated ${date}.`;
     await writePlaylist(
-      picks.map((p) => p.t.id),
+      picks.map((p) => swaps.get(p.t.id) ?? p.t.id),
       description,
     );
 
-    for (const p of picks) state.recommended[p.t.id] = { at: now, x: p.x! };
+    // A swapped pick is noted under both ids: the one in the playlist is what you play (and what plays, skips and
+    // 👍/👎 credit), the other must not come back as a "new" pick tomorrow
+    for (const p of picks) {
+      state.recommended[p.t.id] = { at: now, x: p.x! };
+      const swap = swaps.get(p.t.id);
+      if (swap) state.recommended[swap] = { at: now, x: p.x! };
+    }
     const clusterCounts = clusters.map((_, k) => picks.filter((p) => p.cluster === k).length);
     state.lastRun = {
       at: now,
@@ -450,7 +511,7 @@ const run = async (reason: string) => {
     markDirty("state");
     log(
       `Picks:\n${picks
-        .map((p, i) => `  ${String(i + 1).padStart(2)}. ${(p.score! * 100).toFixed(0)}% [${p.cluster! >= 0 ? clusters[p.cluster!].label : "wildcard"}] ${p.t.artists.map((a) => a.name).join(", ")} - ${p.t.title} {${[...p.sources].map((s) => s.split(":")[0]).filter((s, i, a) => a.indexOf(s) === i).join(",")}}`)
+        .map((p, i) => `  ${String(i + 1).padStart(2)}. ${(p.score! * 100).toFixed(0)}% [${p.cluster! >= 0 ? clusters[p.cluster!].label : "wildcard"}] ${p.t.artists.map((a) => a.name).join(", ")} - ${p.t.title}${swaps.has(p.t.id) ? ` (best version: ${swaps.get(p.t.id)})` : ""} {${[...p.sources].map((s) => s.split(":")[0]).filter((s, i, a) => a.indexOf(s) === i).join(",")}}`)
         .join("\n")}`,
     );
     log(`Done in ${Math.round((Date.now() - t0) / 1000)}s, ${state.lastRun.requests} requests; ${newArtists}/${picks.length} picks by artists new to you`);

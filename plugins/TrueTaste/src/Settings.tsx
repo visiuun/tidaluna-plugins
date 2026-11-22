@@ -1,3 +1,5 @@
+import { redux } from "@luna/lib";
+import { LunaButtonSetting, LunaNumberSetting, LunaSettings, LunaSwitchSetting } from "@luna/ui";
 import React from "react";
 import { settings, type PluginSettings } from "./config";
 import { exportData, flush, importData, markDirty, resetAll, state } from "./db";
@@ -71,8 +73,6 @@ const TasteProfile = () => {
 };
 
 export const Settings = () => {
-  // Read from window.luna rather than imported (see 3DCover): avoids dependency registration issues on live reload
-  const { LunaButtonSetting, LunaNumberSetting, LunaSettings, LunaSwitchSetting } = window.luna.ui!;
   const [running, setRunning] = React.useState(getStatus().running);
   const [busy, setBusy] = React.useState(false);
   const [backup, setBackup] = React.useState<{ busy?: "export" | "import"; message?: string }>({});
@@ -89,7 +89,7 @@ export const Settings = () => {
     settings[key] = val;
     setSwitches({ ...settings });
   };
-  const toggle = (key: "enabled" | "allowExplicit" | "excludeAI" | "useLastfm" | "notify", desc: string, title: string) => (
+  const toggle = (key: "enabled" | "allowExplicit" | "excludeAI" | "useLastfm" | "notify" | "bestQuality", desc: string, title: string) => (
     <LunaSwitchSetting
       title={title}
       desc={desc}
@@ -116,7 +116,7 @@ export const Settings = () => {
         title="Open playlist"
         desc={state.playlistId ? "Your Daily Discovery in your library" : "Created on the first run"}
         disabled={!state.playlistId}
-        onClick={() => window.luna.lib!.redux.actions["router/PUSH"]({ pathname: `/playlist/${state.playlistId}`, search: "", replace: false })}
+        onClick={() => redux.actions["router/PUSH"]({ pathname: `/playlist/${state.playlistId}`, search: "", replace: false })}
       >
         Open
       </LunaButtonSetting>
@@ -145,6 +145,11 @@ export const Settings = () => {
 
       {toggle("excludeAI", "Leave out tracks TIDAL marks as AI-generated", "Skip AI-generated music")}
       {toggle("allowExplicit", "Include tracks marked explicit", "Allow explicit")}
+      {toggle(
+        "bestQuality",
+        "Put each pick in the playlist in its best quality version on TIDAL (another release of the same recording in Max or HiRes, when there is one). Uses RealMAX when it's enabled, so its kept and never used versions apply, and Luna's own lookup otherwise",
+        "Best quality versions",
+      )}
       {toggle("useLastfm", "Use Last.fm tags and listener data to understand artists' sound (only artist/track names are sent)", "Use Last.fm")}
       {toggle("notify", "Show a notification when a new playlist is ready", "Notify")}
 
