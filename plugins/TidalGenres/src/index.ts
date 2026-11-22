@@ -1,31 +1,24 @@
-import { LunaUnload, Tracer } from "@luna/core";
+import { observe, redux, safeInterval, safeTimeout, StyleTag } from "@luna/lib";
+import { trace, unloads } from "./index.safe";
 import { settings } from "./Settings";
 import { cachedGenres, flushCaches, getGenres, type GenreRequest } from "./genres";
 
 export { Settings } from "./Settings";
+export { trace, unloads };
 
-export const { trace } = Tracer("[TidalGenres]");
 trace.msg.log("Tidal Genres initialized!");
-
-export const unloads = new Set<LunaUnload>();
 
 let lastGenres: string[] = [];
 
 // 1. Dynamic Layout Overrides
-const dynamicStyle = document.createElement("style");
-dynamicStyle.id = "tidal-genres-layout-override";
-document.head.appendChild(dynamicStyle);
-
-unloads.add(() => {
-  dynamicStyle.remove();
-});
+const dynamicStyle = new StyleTag("tidal-genres-layout-override", unloads);
 
 // Written once for each position, not every time the badge is looked at: that is on every change anywhere
 // on the page, and while lyrics scroll that was nine times a second, each one making the browser work out
 // the styles of the whole page again.
 let styledFor = "";
 function updateLayoutOverrides() {
-  if (styledFor === settings.position && dynamicStyle.isConnected) return;
+  if (styledFor === settings.position && dynamicStyle.styleTag.isConnected) return;
   styledFor = settings.position;
   const scrollKeyframes = `
     @keyframes tidal-genres-scroll {
@@ -39,7 +32,7 @@ function updateLayoutOverrides() {
   `;
 
   if (settings.position === "under") {
-    dynamicStyle.textContent = `
+    dynamicStyle.css = `
       ${scrollKeyframes}
       #footerPlayer {
         height: auto !important;
@@ -121,7 +114,7 @@ function updateLayoutOverrides() {
       }
     `;
   } else if (settings.position === "over") {
-    dynamicStyle.textContent = `
+    dynamicStyle.css = `
       ${scrollKeyframes}
       #footerPlayer {
         height: auto !important;
@@ -189,7 +182,7 @@ function updateLayoutOverrides() {
     `;
   } else {
     // Position: "right"
-    dynamicStyle.textContent = `
+    dynamicStyle.css = `
       ${scrollKeyframes}
       #footerPlayer {
         transition: min-height 0.25s ease, padding 0.25s ease !important;
@@ -412,13 +405,23 @@ function renderBadges() {
 }
 
 // 6. Mount Position
+// TIDAL's own elements in the player bar that "under" writes inline styles on: those are taken off again
+// in the other positions and when the plugin is switched off
+const styledByUs = new Set<HTMLElement>();
+const STYLED_PROPS = ["width", "min-width", "flex-shrink", "margin-left", "position", "display", "flex-direction", "align-items", "max-width"];
+function unstyle() {
+  for (const el of styledByUs) for (const prop of STYLED_PROPS) el.style.removeProperty(prop);
+  styledByUs.clear();
+}
+unloads.add(unstyle);
+
 function mountBadge() {
   updateLayoutOverrides();
 
   const footer = document.querySelector("#footerPlayer") || document.querySelector("footer");
   if (!footer) return;
 
-  const titleStack = footer.querySelector('div[class*="_titleArtistStack_"]');
+  const titleStack = footer.querySelector<HTMLElement>('div[class*="_titleArtistStack_"]');
   const titleContainer =
     footer.querySelector('div[data-test="footer-track-title"]') ||
     footer.querySelector('div[class*="_titleContainer_"]');
@@ -431,11 +434,13 @@ function mountBadge() {
     'button[data-test*="favorite"], button[aria-label*="favorite" i], button[aria-label*="Favorite" i], button[data-test*="heart"]'
   );
   const actions =
-    (favoriteBtn ? (favoriteBtn.closest('div[class*="_actions_"]') || favoriteBtn.parentElement) : null) ||
-    footer.querySelector('div[class*="_actions_"]');
+    (favoriteBtn ? (favoriteBtn.closest<HTMLElement>('div[class*="_actions_"]') || favoriteBtn.parentElement) : null) ||
+    footer.querySelector<HTMLElement>('div[class*="_actions_"]');
 
-  const trackContent = footer.querySelector('div[class*="_trackContent_"]');
+  const trackContent = footer.querySelector<HTMLElement>('div[class*="_trackContent_"]');
   const trackInfo = footer.querySelector('div[data-test="track-info"], div[class*="_trackInfo_"]');
+
+  if (settings.position !== "under" && styledByUs.size) unstyle();
 
   if (settings.position === "over") {
     genreContainer.style.setProperty("margin", "0 0 4px 0", "important");
@@ -472,16 +477,19 @@ function mountBadge() {
     }
 
     if (titleStack) {
+      styledByUs.add(titleStack);
       titleStack.style.setProperty("width", "max-content", "important");
       titleStack.style.setProperty("min-width", "max-content", "important");
       titleStack.style.setProperty("flex-shrink", "0", "important");
     }
     if (actions) {
+      styledByUs.add(actions);
       actions.style.setProperty("margin-left", "16px", "important");
       actions.style.setProperty("position", "relative", "important");
       actions.style.setProperty("flex-shrink", "0", "important");
     }
     if (trackContent) {
+      styledByUs.add(trackContent);
       trackContent.style.setProperty("display", "flex", "important");
       trackContent.style.setProperty("flex-direction", "row", "important");
       trackContent.style.setProperty("align-items", "center", "important");
@@ -640,11 +648,13 @@ function loadGenreForRow(row: HTMLElement) {
 }
 
 // Lazy Loading with IntersectionObserver
-let rowIntersectionObserver: IntersectionObserver | null = new IntersectionObserver(
+const rowIntersectionObserver = new IntersectionObserver(
   (entries) => {
     entries.forEach((entry) => {
+      const row = entry.target as HTMLElement;
+      // (a row TIDAL has taken off the page is let go of)
+      if (!row.isConnected) return rowIntersectionObserver.unobserve(row);
       if (entry.isIntersecting) {
-        const row = entry.target as HTMLElement;
         loadGenreForRow(row);
       }
     });
@@ -657,58 +667,49 @@ let rowIntersectionObserver: IntersectionObserver | null = new IntersectionObser
 );
 
 unloads.add(() => {
-  rowIntersectionObserver?.disconnect();
-  rowIntersectionObserver = null;
-});
-
-function processTracklistRows() {
-  if (!settings.showInTracklist) {
-    document.querySelectorAll(".tidal-genres-tracklist-badge").forEach((el) => el.remove());
-    return;
-  }
-
-  const rows = document.querySelectorAll<HTMLElement>('div[data-test="tracklist-row"]');
-  rows.forEach((row) => {
-    if (rowIntersectionObserver) {
-      rowIntersectionObserver.observe(row);
-    }
-  });
-}
-
-let tracklistThrottle: any = null;
-function scheduleTracklistUpdate() {
-  if (tracklistThrottle) return;
-  tracklistThrottle = setTimeout(() => {
-    tracklistThrottle = null;
-    processTracklistRows();
-  }, 120);
-}
-
-unloads.add(() => {
-  if (tracklistThrottle) clearTimeout(tracklistThrottle);
+  rowIntersectionObserver.disconnect();
   document.querySelectorAll(".tidal-genres-tracklist-badge").forEach((el) => el.remove());
 });
+
+const TRACKLIST_ROW = 'div[data-test="tracklist-row"]';
+
+// Every row as it is put on the page (and those already there), looked at once it is on screen
+observe<HTMLElement>(unloads, TRACKLIST_ROW, (row) => rowIntersectionObserver.observe(row));
+
+// After a change of settings the badges are drawn again, as the settings now say. Observing a row that is
+// already observed does nothing, so each one is observed anew, to be looked at again if it is on screen.
+function processTracklistRows() {
+  document.querySelectorAll(".tidal-genres-tracklist-badge").forEach((el) => el.remove());
+  if (!settings.showInTracklist) return;
+
+  document.querySelectorAll<HTMLElement>(TRACKLIST_ROW).forEach((row) => {
+    rowIntersectionObserver.unobserve(row);
+    rowIntersectionObserver.observe(row);
+  });
+}
 
 // 8. Observers & Listeners
 // The page changes many times a second (lyrics, the clock): the badge is put back at once when it has
 // been taken off the page, and otherwise looked at a moment later, once for all the changes together.
-let mountTimer: ReturnType<typeof setTimeout> | undefined;
+// (Luna's observe() only reports elements as they are added: the badge being taken off has to be heard of too)
+let mountTimer: (() => void) | undefined;
 const mountObserver = new MutationObserver(() => {
   if (!genreContainer.isConnected) mountBadge();
   else
-    mountTimer ??= setTimeout(() => {
-      mountTimer = undefined;
-      mountBadge();
-    }, 500);
-  scheduleTracklistUpdate();
+    mountTimer ??= safeTimeout(
+      unloads,
+      () => {
+        mountTimer = undefined;
+        mountBadge();
+      },
+      500
+    );
 });
 mountObserver.observe(document.body, { childList: true, subtree: true });
 mountBadge();
-scheduleTracklistUpdate();
 
 unloads.add(() => {
   mountObserver.disconnect();
-  clearTimeout(mountTimer);
 });
 
 // 9. Live Settings Listener
@@ -739,7 +740,7 @@ async function updateForCurrentSong() {
   if (!title || !artist) return;
 
   // The track link in the player bar carries TIDAL's id; the playing product is the fallback
-  const product = window.luna.lib?.redux.store.getState().playbackControls?.mediaProduct;
+  const product = redux.store.getState().playbackControls?.mediaProduct;
   const id =
     /\/track\/(\d+)/.exec(titleEl?.getAttribute("href") ?? "")?.[1] ??
     (product?.productType === "track" && product.productId ? String(product.productId) : undefined);
@@ -755,9 +756,5 @@ async function updateForCurrentSong() {
   renderBadges();
 }
 
-const interval = setInterval(updateForCurrentSong, 500);
+safeInterval(unloads, updateForCurrentSong, 500);
 updateForCurrentSong();
-
-unloads.add(() => {
-  clearInterval(interval);
-});

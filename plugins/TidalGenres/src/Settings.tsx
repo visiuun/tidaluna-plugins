@@ -58,7 +58,7 @@ export const Settings = () => {
         desc="Display genre tags next to track titles in playlists and albums"
         checked={showInTracklist}
         value={showInTracklist}
-        onChange={(_, checked) => {
+        onChange={(_: React.ChangeEvent<HTMLInputElement>, checked: boolean) => {
           const val = checked ?? !showInTracklist;
           setShowInTracklist(val);
           updateSetting("showInTracklist", val);
@@ -70,7 +70,7 @@ export const Settings = () => {
         desc="Display genre tags inside a dark pill badge"
         checked={showBackground}
         value={showBackground}
-        onChange={(_, checked) => {
+        onChange={(_: React.ChangeEvent<HTMLInputElement>, checked: boolean) => {
           const val = checked ?? !showBackground;
           setShowBackground(val);
           updateSetting("showBackground", val);
@@ -82,7 +82,7 @@ export const Settings = () => {
         desc="Add a subtle border outline around the genre badges"
         checked={showBorder}
         value={showBorder}
-        onChange={(_, checked) => {
+        onChange={(_: React.ChangeEvent<HTMLInputElement>, checked: boolean) => {
           const val = checked ?? !showBorder;
           setShowBorder(val);
           updateSetting("showBorder", val);
@@ -94,7 +94,7 @@ export const Settings = () => {
         desc="Color-code the badge to match track quality"
         checked={matchQualityColor}
         value={matchQualityColor}
-        onChange={(_, checked) => {
+        onChange={(_: React.ChangeEvent<HTMLInputElement>, checked: boolean) => {
           const val = checked ?? !matchQualityColor;
           setMatchQualityColor(val);
           updateSetting("matchQualityColor", val);
@@ -106,7 +106,7 @@ export const Settings = () => {
         desc="Display up to 3 genres when available instead of only the primary one"
         checked={showMultiple}
         value={showMultiple}
-        onChange={(_, checked) => {
+        onChange={(_: React.ChangeEvent<HTMLInputElement>, checked: boolean) => {
           const val = checked ?? !showMultiple;
           setShowMultiple(val);
           updateSetting("showMultiple", val);

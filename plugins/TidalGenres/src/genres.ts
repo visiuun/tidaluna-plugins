@@ -6,14 +6,15 @@
 //    ("plugg", "tech house", "hyperpop").
 // A genre both sources agree on ranks highest. Track-level Last.fm tags (what this plugin used before)
 // are sparse and noisy, so they aren't used at all.
+import { redux, safeTimeout, TidalApi } from "@luna/lib";
 import genreList from "file://../../TrueTaste/assets/genres.txt";
+import { unloads } from "./index.safe";
 
 const V2 = "https://openapi.tidal.com/v2/";
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const LASTFM_KEY = "b25b959554ed76058ac220b7b2e0a026";
 
-const lib = () => window.luna.lib!;
-const countryCode = () => lib().redux.store.getState().session?.countryCode ?? "US";
+const countryCode = () => redux.store.getState().session?.countryCode ?? "US";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** "Hip-Hop", "hip hop", "hip_hop" → "hip hop" */
@@ -130,13 +131,13 @@ const asArray = <T>(x: T | T[] | undefined | null): T[] => (Array.isArray(x) ? x
 type Res = { id: string; type: string; attributes?: Record<string, any>; relationships?: Record<string, { data?: { id: string; type: string } | { id: string; type: string }[] }> };
 
 const trackWaiters = new Map<string, ((t: TrackInfo | undefined) => void)[]>();
-let trackTimer: ReturnType<typeof setTimeout> | undefined;
+let trackTimer: (() => void) | undefined;
 let trackChain: Promise<void> = Promise.resolve();
 
 const fetchTrackBatch = async (ids: string[]) => {
   const out = new Map<string, TrackInfo>();
   try {
-    const headers = { ...(await lib().TidalApi.getAuthHeaders()), accept: "application/vnd.api+json" };
+    const headers = { ...(await TidalApi.getAuthHeaders()), accept: "application/vnd.api+json" };
     for (let attempt = 0; attempt < 3; attempt++) {
       const res = await fetch(`${V2}tracks?countryCode=${countryCode()}&filter[id]=${ids.join(",")}&include=genres,artists`, { headers });
       if (res.status === 429 || res.status >= 500) {
@@ -189,7 +190,7 @@ const tidalTrack = (id: string): Promise<TrackInfo | undefined> => {
     if (list) return list.push(resolve);
     trackWaiters.set(id, [resolve]);
     // A short wait so a whole tracklist going on screen becomes one or two requests
-    trackTimer ??= setTimeout(flushTracks, 120);
+    trackTimer ??= safeTimeout(unloads, flushTracks, 120);
   });
 };
 
