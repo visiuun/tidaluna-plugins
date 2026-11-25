@@ -338,7 +338,13 @@ export class Mixer {
   }
   /** How the pieces of a mashup under way have been arriving */
   feedState() {
-    return this.call<{ /** what each block of the last mashup was, in the order they were played */ arrangement?: string[]; /** when the mixer ended the last mashup early, if it had to (on its clock; 0: it didn't) */ cut?: number; /** the last mashup, block by block as it is decided */ plan?: MashArrangement; feeds: { name: string; wanted: number; played: number; late: number; missed: number; /** the least time a piece arrived before it was heard, seconds */ spare: number | null }[] }>("feedState", {});
+    return this.call<{
+      /** what each block of the last mashup was, in the order they were played */ arrangement?: string[];
+      /** when the mixer ended the last mashup early, if it did (on its clock; 0: it didn't) */ cut?: number;
+      /** ...because it was stopped (see mashStop), and which song was left: then `cut` is where */ stopped?: "a" | "b";
+      /** the last mashup, block by block as it is decided */ plan?: MashArrangement;
+      feeds: { name: string; wanted: number; played: number; late: number; missed: number; /** the least time a piece arrived before it was heard, seconds */ spare: number | null }[];
+    }>("feedState", {});
   }
   /** How track `b` would best go on top of track `a` (both loaded), and how good a mashup that makes */
   mashMatch(a: string, b: string, A: MashSide, B: MashSide, free: boolean, exact = false) {
@@ -347,6 +353,13 @@ export class Mixer {
   /** Turns the mashup that is playing round (the other song's band, the other singer), from the next bar line */
   mashFlip() {
     return this.call<{ ok: boolean; bed?: "a" | "b"; at?: number; /** why not: only one version (one), not started (early), in its way out (late), still turning from the last time (busy), no mashup (none) */ why?: "one" | "early" | "late" | "busy" | "none" }>("mashFlip", {});
+  }
+  /**
+   * Ends the mashup that is playing on its next bar line two beats away or more, with one of its songs left whole: "a"
+   * the song that was playing (it plays on to its own end), "b" the other one (as at the mashup's own end)
+   */
+  mashStop(keep: "a" | "b") {
+    return this.call<{ ok: boolean; keep?: "a" | "b"; /** the bar line it ends on (on the mixer's clock) */ at?: number; /** why not: not started yet (early), in its last bar (late), ended already (over), no mashup (none) */ why?: "early" | "late" | "over" | "none" }>("mashStop", { keep });
   }
   dropStretch(key: string) {
     return this.call("dropStretch", { key }).catch(() => {});

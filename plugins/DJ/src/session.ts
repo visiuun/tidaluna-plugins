@@ -2347,11 +2347,13 @@ class Session {
         let cut = 0;
         const cutShort = async () => {
           if (cut) return true;
-          cut = (await this.mixer.feedState().catch(() => undefined))?.cut ?? 0;
+          const fed = await this.mixer.feedState().catch(() => undefined);
+          cut = fed?.cut ?? 0;
           if (!cut) return false;
           over = cut;
           this.mashUntil = Math.min(this.mashUntil, cut);
-          log(`Mashup: ended ${Math.max(0, cut - this.mixer.now).toFixed(0)}s from now, before its time: the voices weren't being made fast enough (${pieceSeconds.toFixed(1)}s a piece)`);
+          // (stopped as asked, it was said so then: see stopMashup)
+          if (!fed?.stopped) log(`Mashup: ended ${Math.max(0, cut - this.mixer.now).toFixed(0)}s from now, before its time: the voices weren't being made fast enough (${pieceSeconds.toFixed(1)}s a piece)`);
           // (the two songs are shown together until then, no longer)
           setTimeout(() => !this.stopped && getStatus().transition?.kind === "mashup" && getStatus().transition?.toId === partner.id && setStatus({ transition: undefined }), Math.max(0, cut - this.mixer.now) * 1000);
           return true;
@@ -2451,6 +2453,74 @@ class Session {
     const names = tr.songs ? (r.bed === "a" ? `${tr.songs.b}'s voice over ${tr.songs.a}'s band` : `${tr.songs.a}'s voice over ${tr.songs.b}'s band`) : "the other version";
     log(`Mashup turned round ${Math.max(0, (r.at ?? this.mixer.now) - this.mixer.now).toFixed(1)}s from now: ${names}`);
     setStatus({ note: `The other version: ${names}` });
+  }
+
+  /**
+   * Stops the mashup that is playing, as asked, on its next bar line (see `stop` in mixer.page.js). "b" goes on with the
+   * other song, whole, the way the mashup would have ended. "a" stays on the song that was playing, as if there had been
+   * no mashup: the other song leaves, TIDAL is put back on this one where it is, and what was to come after the other
+   * song comes after this one (the other song isn't kept for later: staying was choosing this one over it).
+   */
+  stopMashup(keep: "a" | "b") {
+    return this.run(async () => {
+      if (this.stopped || this.follow) return;
+      const tr = getStatus().transition;
+      if (tr?.kind !== "mashup" || this.mixer.now > tr.end) return void setStatus({ note: "No mashup is playing" });
+      // (it ends on a bar line, which a paused song doesn't reach, and putting TIDAL back on a song starts it playing)
+      if (!this.link.playing) return void setStatus({ note: "Press play first: a mashup ends on a bar line" });
+      const nameA = tr.songs?.a ?? "this song";
+      const nameB = tr.songs?.b ?? "the other song";
+      // Which song is which here now: the other one takes over (becomes the current one) as the mashup begins
+      const early = this.pending && sameTrack(this.pending.item.track.id, tr.toId) ? this.pending : undefined;
+      const back = this.outgoing;
+      if (keep === "a" && !early && !(back && !back.deck.disposed && sameTrack(back.item.track.id, tr.fromId) && this.current && sameTrack(this.current.item.track.id, tr.toId))) {
+        log("Mashup: not stopped (the song that was playing isn't there to stay on)");
+        return void setStatus({ note: `Couldn't go back to ${nameA}` });
+      }
+      const r = await this.mixer.mashStop(keep).catch(() => ({ ok: false }) as Awaited<ReturnType<Mixer["mashStop"]>>);
+      if (!r.ok || r.at === undefined) {
+        log(`Mashup: not stopped (${r.why ?? "the mixer didn't answer"})`);
+        return void setStatus({ note: r.why === "early" ? "It hasn't started yet" : r.why === "late" || r.why === "over" ? "It's ending already" : "No mashup is playing" });
+      }
+      const wait = Math.max(0, r.at - this.mixer.now);
+      this.mashUntil = Math.min(this.mashUntil, r.at);
+      if (keep === "b") {
+        log(`Mashup stopped as asked, ${wait.toFixed(1)}s from now: ${nameB} on its own from there`);
+        setStatus({ note: `On to ${nameB}` });
+        // (the two songs are shown together until then, no longer)
+        setTimeout(() => !this.stopped && getStatus().transition?.seq === tr.seq && setStatus({ transition: undefined }), wait * 1000 + 100);
+        return true;
+      }
+      log(`Mashup stopped as asked, ${wait.toFixed(1)}s from now: staying on ${nameA}`);
+      if (early) {
+        // (the other song hadn't taken over yet, and now never will: it leaves, and so does its place in the queue)
+        this.pending = undefined;
+        this.outgoing = early;
+        this.items = this.items.filter((i) => i !== early.item);
+      } else {
+        this.outgoing = this.current;
+        this.current = back;
+        // TIDAL was moved on to the other song as the mashup began: it is put back on this one (the mixer has been
+        // on it all along, and TIDAL is lined up with it at once: see reconcile)
+        try {
+          await this.link.startQueue([back!.item.track.id]);
+        } catch (err) {
+          warn("Couldn't put TIDAL back on the song", err);
+        }
+        this.lastTid = this.link.currentId();
+        this.justMoved = true;
+        this.nextSeekAt = Date.now() + 1200;
+        // (a transition out of the other song that was set up already isn't one any more)
+        if (this.pending) await this.dropPending();
+      }
+      this.prep = undefined;
+      this.awaiting = undefined;
+      // (mashup mode doesn't go looking for another one for this song: staying on it was the answer)
+      if (this.current) this.autoMashFor = this.current.item.track.id;
+      setStatus({ transition: undefined, segment: this.current?.item.segment.title, note: `Staying on ${nameA}` });
+      this.syncQueue();
+      return true;
+    });
   }
 
   /** Replaces what's coming with `segment`, has the DJ introduce it over the current track, and stays with its sound */
@@ -2960,6 +3030,8 @@ export const getStage = () => (session && !session.stopped ? session.stage() : u
 export const flipMashup = async () => {
   await session?.flipMashup();
 };
+/** Stops the mashup that is playing (see Session.stopMashup): "a" stays on the song that was playing, "b" goes on with the other one. Whether it did */
+export const stopMashup = async (keep: "a" | "b") => !!(await session?.stopMashup(keep));
 
 /** A mashup under way, block by block as the mixer decides it, and how the taking out of the voices keeps up */
 export const getMash = () => (session && !session.stopped && !session.mixer.gone && getStatus().transition?.kind === "mashup" ? session.mixer.feedState() : Promise.resolve(undefined));

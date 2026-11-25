@@ -568,6 +568,20 @@ registerProcessor("dj-limiter", Limiter);
     b.post.gain.setValueAtTime(room, until);
     b.post.gain.linearRampToValueAtTime(1, until + ROOM_BACK);
   };
+  /**
+   * A deck that is alone again from T comes back up to where it belongs, slowly, from `at` (what it is at T: see
+   * makeRoom). (Held at T and set there: a ramp only starts where the event before it is, and with none at T that was
+   * seconds before, the level moving from the moment this was asked.)
+   */
+  const roomBack = (deck, T, at) => {
+    const g = deck.post.gain;
+    try {
+      if (g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(T);
+      else g.cancelScheduledValues(T);
+      g.setValueAtTime(at, T);
+      g.linearRampToValueAtTime(1, T + ROOM_BACK);
+    } catch {}
+  };
   // The bass changes hands in one move (see the blend, below), and whichever track carries the low end
   // carries it at full level. The faders are for everything over the bass; left to them, the outgoing bass
   // was down 3 dB by the middle of a blend and the incoming one arrived 3 dB down (measured: the level fell
@@ -1305,6 +1319,8 @@ registerProcessor("dj-limiter", Limiter);
   const feedState = () => ({
     arrangement: lastArrangement ? lastArrangement.said.slice() : [],
     cut: lastArrangement ? lastArrangement.cut : 0,
+    // (ended where the listener stopped it, with that song left: "a" or "b"; cut is then where)
+    stopped: lastArrangement ? lastArrangement.stopped : undefined,
     plan: lastArrangement
       ? { halves: lastArrangement.halves, from: lastArrangement.from, end: lastArrangement.end, planned: lastArrangement.planned, per: lastArrangement.per, bar: lastArrangement.bar, bed: lastArrangement.bed, flippable: !!lastArrangement.flippable && !!liveMash && ctx.currentTime < lastArrangement.end - (lastArrangement.per || 8) * (lastArrangement.bar || 2), blocks: (lastArrangement.blocks || []).slice() }
       : undefined, feeds: feeds.map((f) => ({ name: f.name, wanted: f.grid.to - f.grid.from, played: f.played.size, late: f.late, missed: f.missed, spare: f.spare === Infinity ? null : Math.round(f.spare * 10) / 10 })) });
@@ -2497,13 +2513,19 @@ registerProcessor("dj-limiter", Limiter);
     mashMatch,
     /** Turns the mashup that is playing round: the other song's band, and the other singer (see the transition) */
     mashFlip: () => (liveMash && ctx.currentTime <= liveMash.end && decks.get(liveMash.deck.id) === liveMash.deck ? liveMash.flip() : { ok: false, why: "none" }),
+    /** Ends the mashup that is playing on its next bar line, `keep` ("a": the song that was playing, "b": the other one) left whole (see `stop` in the transition) */
+    mashStop: ({ keep }) => (liveMash && liveMash.stop && ctx.currentTime <= liveMash.end && decks.get(liveMash.deck.id) === liveMash.deck ? liveMash.stop(keep === "a" ? "a" : "b") : { ok: false, why: "none" }),
     stemOut,
     stemIn,
     stemShift,
     stemDrop,
     feedState,
     clip,
-    status: () => ({}),
+    status: () => {
+      // (a mashup's handle is let go of once it is over: a mashup without voices has no feeds to watch that would)
+      if (liveMash && ctx.currentTime > liveMash.end + 1) liveMash = null;
+      return {};
+    },
     setVolume: ({ percent, muted }) => {
       volume = muted ? 0 : Math.max(0, Math.min(1, percent / 100));
       master.gain.cancelScheduledValues(ctx.currentTime);
@@ -2715,6 +2737,81 @@ registerProcessor("dj-limiter", Limiter);
               { from: T2, to: T3, a: { top: ON_TOP, low: 0 }, b: { top: 1, low: 1 }, what: "A on top of B, leaving" },
             ],
           };
+          // Stopped while it plays (see `stop` in the mashups with a singer, below): on the next bar line two beats away
+          // or more, the one song whole and the other gone, the bass going to the one that stays in one move on the line
+          const told = lastArrangement;
+          let over = false;
+          // Where each control is at time x of what was scheduled above, and whether one of its curves is under way then
+          const along = (c, s, d, x) => {
+            const f = Math.max(0, Math.min(1, (x - s) / d)) * (c.length - 1);
+            const i = Math.floor(f);
+            return c[i] + (c[Math.min(c.length - 1, i + 1)] - c[i]) * (f - i);
+          };
+          const ramp = (v0, v1, s, e, x) => v0 + (v1 - v0) * Math.max(0, Math.min(1, (x - s) / (e - s)));
+          const outFrom = T2 + bar + 0.002;
+          const controls = [
+            { p: b.fader.gain, at: (x) => (x < T1 ? 0 : x < T1 + 2 * bar ? along(FADE_IN, T1, 2 * bar, x) * ON_TOP : x < T2 ? ON_TOP : ramp(ON_TOP, 1, T2, T2 + bar, x)), curve: (x) => x >= T1 && x < T1 + 2 * bar },
+            { p: a.fader.gain, at: (x) => (x < T2 ? 1 : x < outFrom ? ramp(1, ON_TOP, T2, T2 + bar, x) : x < T3 - 0.002 ? along(FADE_OUT, outFrom, T3 - outFrom - 0.002, x) * ON_TOP : 0), curve: (x) => x >= outFrom && x < T3 - 0.002 },
+            { p: a.low.gain, at: (x) => (x < swapFrom ? 0 : ramp(0, BASS_CUT_DB, swapFrom, swapTo, x)), curve: () => false },
+            { p: b.low.gain, at: (x) => (x < swapFrom ? BASS_CUT_DB : ramp(BASS_CUT_DB, 0, swapFrom, swapTo, x)), curve: () => false },
+          ];
+          const stop = (keep) => {
+            const t = ctx.currentTime;
+            if (over) return { ok: false, why: "over" };
+            if (t < T1 - beat) return { ok: false, why: "early" };
+            const T = T1 + Math.max(0, Math.ceil((t + 2 * beat - T1) / bar - 1e-6)) * bar;
+            if (T > T3 - bar + 1e-3) return { ok: false, why: "late" };
+            over = true;
+            const from = Math.max(t + 0.03, T - Math.max(2 * beat, Math.min(2 * bar, T - t - 0.05)));
+            // What was still to come of it goes, and everything moves on from where it stands then. (A hold alone leaves
+            // nothing to start from where no curve or ramp is under way: the move then started from the event before,
+            // seconds earlier, and the level jumped. Within a curve, the hold is that curve, cut short there.)
+            for (const { p, at, curve } of controls) {
+              try {
+                if (p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(from);
+                else p.cancelScheduledValues(from);
+                if (!curve(from)) p.setValueAtTime(at(from), from);
+              } catch {}
+            }
+            const bassB = from >= swapFrom;
+            const at = T - Math.min(0.09, beat * 0.2);
+            const giveBass = (to, away) => {
+              to.low.gain.setValueAtTime(BASS_CUT_DB, at);
+              to.low.gain.linearRampToValueAtTime(0, at + 0.05);
+              away.low.gain.setValueAtTime(0, at);
+              away.low.gain.linearRampToValueAtTime(BASS_CUT_DB, at + 0.05);
+            };
+            if (keep === "a") {
+              b.fader.gain.linearRampToValueAtTime(0, T);
+              a.fader.gain.linearRampToValueAtTime(1, T);
+              if (bassB) giveBass(a, b);
+              stopSources(b, T + 0.1);
+              // (it plays on to its own end: it was to stop where the mashup ended)
+              for (const s of a.sources) {
+                try {
+                  s.stop(t + 86400);
+                } catch {}
+              }
+              a.stopAt = Infinity;
+              // (it went down to 0.9 over the first two bars: see makeRoom below)
+              roomBack(a, T, ramp(1, 0.9, T1, T1 + 2 * bar, T));
+            } else {
+              a.fader.gain.linearRampToValueAtTime(0, T);
+              b.fader.gain.linearRampToValueAtTime(1, T);
+              if (!bassB) giveBass(b, a);
+              stopSources(a, T + 0.1);
+              roomBack(b, T, 0.9);
+            }
+            told.said.push(`stopped ${Math.round((T - T1) / bar)} bars in: ${keep === "a" ? "A" : "B"} on its own`);
+            told.blocks = told.blocks.filter((x) => x.from < T - 1e-3);
+            for (const x of told.blocks) if (x.to > T) x.to = T;
+            told.end = T;
+            told.cut = T;
+            told.stopped = keep;
+            if (liveMash) liveMash.end = T;
+            return { ok: true, keep, at: T, end: T };
+          };
+          liveMash = { flip: () => ({ ok: false, why: "one" }), stop, deck: b, end: T3 };
           return { swap: T1, end: T3, bStart: t0, first: T1, mid: T2 };
         }
         // A singer in one or both: one song's singer over the other song's band, the same way round
@@ -3088,13 +3185,111 @@ registerProcessor("dj-limiter", Limiter);
           tell(T, from + per * bar, next, what, h, { turned: true });
           return { ok: true, bed, at: T };
         };
+        /** A deck's low cut back to where it rests by T, from wherever a sweep of this mashup's has it (one under way, or to come) */
+        const unsweep = (deck, T) => {
+          const f = deck.hp.frequency;
+          const from = ctx.currentTime + 0.02;
+          try {
+            if (f.cancelAndHoldAtTime) f.cancelAndHoldAtTime(from);
+            else f.cancelScheduledValues(from);
+            f.exponentialRampToValueAtTime(HP_IDLE, Math.max(from + 0.04, T));
+          } catch {}
+        };
+        /**
+         * Stopped while it plays, the listener having asked: it ends on the next bar line two beats away or more, with
+         * one of the two songs left, whole, and the other gone.
+         *   "b": the other song, its band and its singer, as the mashup would have ended: its band is come to as two
+         *        tracks are blended (in two keys the band that was playing is thinned from below, and everything changes
+         *        at once on the line)
+         *   "a": the song that was playing, as if there had been no mashup: its band back and the other song's band and
+         *        singer away, the same way, and its own singer back in the song itself; it plays on to its own end
+         */
+        const stop = (keep) => {
+          const t = ctx.currentTime;
+          if (over) return { ok: false, why: "over" };
+          if (t < T1 - ease) return { ok: false, why: "early" };
+          // (the line it lands on, as for turning it round; not in its last bar, where it is ending by itself)
+          const T = T1 + Math.max(0, Math.ceil((t + 2 * beat - T1) / bar - 1e-6)) * bar;
+          if (T > Tend - bar + 1e-3) return { ok: false, why: "late" };
+          over = true;
+          const S = Math.max(2 * beat, Math.min(2 * bar, T - t - 0.05));
+          // Whatever is still to come of it goes (the next block, if it has been decided; a turn round on its way, its
+          // bass not yet changed hands), and everything moves on from where it stands: read off the controls themselves,
+          // which a change still under way has somewhere between where it was and where it is going
+          const held = [
+            [a.fader.gain, "fa"],
+            [b.fader.gain, "fb"],
+            [back, "va"],
+            [backFilter.frequency, "ha"],
+            ...(vox ? [[vox.gain, "vb"], [voxFilter.frequency, "hb"]] : []),
+            ...(voxOwn ? [[voxOwn.gain, "wb"]] : []),
+            [a.low.gain],
+            [b.low.gain],
+          ];
+          for (const [p, k] of held) {
+            try {
+              if (p.cancelAndHoldAtTime) p.cancelAndHoldAtTime(t + 0.02);
+              else p.cancelScheduledValues(t + 0.02);
+            } catch {}
+            if (k) now[k] = p.value;
+            moving.delete(p);
+          }
+          now.band = a.low.gain.value >= b.low.gain.value ? "a" : "b";
+          const was = { ...now };
+          if (keep === "b") {
+            unsweep(b, T);
+            go(T, WHOLE_B, S);
+          } else {
+            unsweep(a, T);
+            go(T, { band: "a", fa: 1, fb: 0, va: was.va, vb: 0, wb: 0, ha: was.ha, hb: OPEN }, S);
+            // Its own singer, back in the song itself. Where it was over the other band, the voice laid there makes way
+            // on the line for the same voice in the song: only its level is heard to change, back to where it is in the
+            // song (in two keys that voice was moved, and it goes with everything else, at once on the line). Where the
+            // other song's singer was over this band, it comes back as that one leaves.
+            if (was.band === "b") {
+              const span = cents ? QUICK : beat;
+              move(out, -1, 0, T, span, !cents);
+              move(back, was.va, 0, T, span, !cents);
+            } else move(out, -1, 0, T, Math.max(0.05, Math.min(S, T - T1 - 0.01)));
+          }
+          said.push(`stopped ${Math.round((T - T1) / bar)} of ${total} bars in: ${keep === "a" ? "A" : "B"} on its own`);
+          // (the full screen shows what was played of it, and no more)
+          told.blocks = told.blocks.filter((x) => x.from < T - 1e-3);
+          for (const x of told.blocks) if (x.to > T) x.to = T;
+          told.end = T;
+          told.cut = T;
+          told.stopped = keep;
+          arrangement.end = T;
+          if (liveMash) liveMash.end = T;
+          if (keep === "b") {
+            feedA.end = T;
+            // (it sat a little lower to make room for the other song: back to where it belongs, now that it is alone)
+            roomBack(b, T, 0.9);
+            stopSources(a, T + 0.1);
+          } else {
+            const done = T + (cents ? 0 : beat) + 0.5;
+            feedA.end = done;
+            if (feedB) feedB.end = done;
+            stopSources(b, T + 0.1);
+            // ...and it plays on to its own end (it was to stop where the mashup ended; a source's last stop is the one it keeps)
+            for (const s of a.sources) {
+              try {
+                s.stop(t + 86400);
+              } catch {}
+            }
+            a.stopAt = Infinity;
+            // (it went down to 0.9 over the two bars from T1 - ease: see makeRoom below)
+            roomBack(a, T, Math.max(0.9, 1 - (0.1 * Math.max(0, T - (T1 - ease))) / (2 * bar)));
+          }
+          return { ok: true, keep, at: T, end: T };
+        };
         // (the blocks after the first are decided as they come up: see watchFeeds)
         const told = { said, cut: 0, halves: "voice", from: T1, end: Tend, planned: blocks, per, bar, bed, flippable: turns, blocks: [] };
         const arrangement = { k: 1, blocks, at: (k) => T1 + k * per * bar - (k === blocks - 1 ? 2 * bar : D) - 0.5, decide, said, deck: b, other: a, end: Tend, told };
         decide(0);
         arrangers.push(arrangement);
         lastArrangement = told;
-        liveMash = { flip, deck: b, end: Tend };
+        liveMash = { flip, stop, deck: b, end: Tend };
         if (!feedTimer) feedTimer = setInterval(watchFeeds, 150);
 
         makeRoom(a, b, T1 - ease, 2 * bar, Tend, 0.9);

@@ -44,6 +44,8 @@ export type StageSource = {
   mashup: () => void;
   /** The other version of the mashup that is playing: the other song's band, and the other singer */
   flipMashup: () => void;
+  /** Ends the mashup that is playing on its next bar line: "a" stays on the song that was playing, "b" goes on with the other one */
+  stopMashup: (keep: "a" | "b") => void;
   /** The code that hands the mashup that is on to someone else with the DJ (see playShared in session.ts); undefined: none */
   shareMashup: () => string | undefined;
   /** How TIDAL marks a track: explicit, made with AI, an upload, in Dolby Atmos */
@@ -76,7 +78,7 @@ export type StageSource = {
 };
 
 export type Marks = { explicit?: boolean; ai?: boolean; upload?: boolean; atmos?: boolean };
-export type Mash = { plan?: MashArrangement; cut?: number; feeds: { wanted: number; played: number; late: number; missed: number; spare: number | null }[] };
+export type Mash = { plan?: MashArrangement; cut?: number; /** ended where it was stopped, with that song left (then `cut` is where) */ stopped?: "a" | "b"; feeds: { wanted: number; played: number; late: number; missed: number; spare: number | null }[] };
 
 const R = "visiuun-dj-stage";
 // TIDAL's design tokens, with their values as fallbacks
@@ -190,6 +192,11 @@ const css = `
   .${R} .btn:hover { background: var(--wave-color-opacity-contrast-fill-thin, #fff3); }
   .${R} .btn.primary { background: #fff; color: #000; }
   .${R} .btn.primary:hover { background: var(--wave-color-solid-contrast-dark, #e4e4e7); }
+  /* What Stop mashup asks: stay on the song that was playing, or go on with the other one */
+  .${R} .choice { position: absolute; top: calc(100% - 6px); z-index: 6; display: none; flex-direction: column; align-items: stretch; gap: 6px; padding: 10px; min-width: 220px; max-width: min(360px, 90vw); border-radius: 18px; background: rgba(24, 24, 27, .94); backdrop-filter: blur(24px); box-shadow: 0 16px 48px rgba(0, 0, 0, .5); }
+  .${R} .choice.on { display: flex; }
+  .${R} .choice small { color: ${T.secondary}; font-size: 12px; line-height: 16px; padding: 2px 8px 4px; }
+  .${R} .choice .btn { text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .${R} .main { position: relative; min-height: 0; }
   .${R} .cv { position: absolute; left: 0; top: 0; transform-origin: 50% 50%; will-change: transform, opacity; }
@@ -476,6 +483,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const mashBtn = el("button", "btn", "Mashup");
   const flipBtn = el("button", "btn", "Other version");
   const shareBtn = el("button", "btn", "Share");
+  const stopMashBtn = el("button", "btn", "Stop mashup");
   const skipBtn = el("button", "btn", "Skip");
   const djBtn = el("button", "btn primary", "Start the DJ");
   const stopBtn = el("button", "btn", "Stop DJ");
@@ -484,7 +492,14 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   const downBtn = el("button", "icon thumb down");
   const optionsBtn = el("button", "icon");
   const lyrBtn = el("button", "icon toggle");
-  for (const b of [switchBtn, mashBtn, flipBtn, shareBtn, skipBtn, djBtn, stopBtn, closeBtn, upBtn, downBtn, optionsBtn, lyrBtn]) b.type = "button";
+  // ...and what it asks: stay on the song that was playing, or go on with the other one
+  const stopMenu = el("div", "choice");
+  const stayBtn = el("button", "btn");
+  const goBtn = el("button", "btn");
+  stopMenu.append(el("small", undefined, "End the mashup on the next bar line, and"), stayBtn, goBtn);
+  for (const b of [switchBtn, mashBtn, flipBtn, shareBtn, stopMashBtn, stayBtn, goBtn, skipBtn, djBtn, stopBtn, closeBtn, upBtn, downBtn, optionsBtn, lyrBtn]) b.type = "button";
+  stopMashBtn.title = "End the mashup: stay on the song that was playing, or go on with the other one";
+  stopMashBtn.style.display = "none";
   mashBtn.title = "Mash this song up with one the DJ picks for it";
   flipBtn.title = "Turn the mashup round: the other song's band, with the other singer over it";
   flipBtn.style.display = "none";
@@ -498,7 +513,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   lyrBtn.title = "Lyrics";
   lyrBtn.innerHTML = ICON_LYRICS;
   lyrBtn.style.display = "none";
-  top.append(who, banner, el("div", "sp"), upBtn, downBtn, djBtn, switchBtn, mashBtn, flipBtn, shareBtn, skipBtn, stopBtn, lyrBtn, optionsBtn, closeBtn);
+  top.append(who, banner, el("div", "sp"), upBtn, downBtn, djBtn, switchBtn, mashBtn, flipBtn, shareBtn, stopMashBtn, skipBtn, stopBtn, lyrBtn, optionsBtn, closeBtn, stopMenu);
 
   const main = el("div", "main");
   const fx = el("div", "fx");
@@ -860,6 +875,32 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     mashBusyShown = busy;
     flipBtn.style.display = on ? "" : "none";
     mashBtn.style.display = busy || src.status().mode !== "dj" ? "none" : "";
+  };
+  /**
+   * Stop mashup: from the moment the mashup starts until its last bar (where it is ending by itself), and not once it
+   * has ended early. Pressed, it asks which song to be left with, under the button.
+   */
+  let stopShown = false;
+  const closeStopMenu = () => stopMenu.classList.remove("on");
+  const showStop = (tr: Live | undefined, t: number) => {
+    const arr = tr?.kind === "mashup" ? mashOf(tr) : undefined;
+    const bar = arr?.bar ?? 4 * (tr?.beat ?? 0.5);
+    const on = !!tr && tr.kind === "mashup" && src.status().mode === "dj" && t >= tr.start && t < (arr?.end ?? tr.end) - bar && !(arr && mash?.cut);
+    if (on === stopShown) return;
+    stopShown = on;
+    stopMashBtn.style.display = on ? "" : "none";
+    if (!on) closeStopMenu();
+  };
+  const openStopMenu = () => {
+    const songs = src.status().transition?.songs;
+    if (!songs) return;
+    stayBtn.textContent = `Stay on ${songs.a}`;
+    stayBtn.title = `${songs.a} plays on, whole, and ${songs.b} goes`;
+    goBtn.textContent = `Go to ${songs.b}`;
+    goBtn.title = `${songs.b} plays on, whole, and ${songs.a} goes`;
+    // (under the button, its right edge on the button's)
+    stopMenu.style.right = `${Math.max(0, top.clientWidth - (stopMashBtn.offsetLeft + stopMashBtn.offsetWidth))}px`;
+    stopMenu.classList.add("on");
   };
 
   // ------------------ WHAT IS ON ------------------
@@ -1789,8 +1830,9 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
             marks.push({ at: u0, label: arr.halves === "voice" ? "the same version to the end (the voices are still being taken out)" : "decided as it comes up" });
           }
         }
-        if (mash?.cut) marks.push({ at: mash.cut, label: "cut short: the voices weren't ready", strong: true });
-        marks.push({ at: arr.end, label: `${short(sc.b!)} on its own` });
+        // (ended early: stopped as asked, with the one song left, or cut short where the voices fell behind)
+        if (mash?.cut && !mash.stopped) marks.push({ at: mash.cut, label: "cut short: the voices weren't ready", strong: true });
+        marks.push({ at: arr.end, label: mash?.stopped ? `stopped: ${short(mash.stopped === "a" ? sc.a! : sc.b!)} on its own` : `${short(sc.b!)} on its own`, strong: !!mash?.stopped });
         // how the taking out of the voices keeps up
         const feeds = mash?.feeds ?? [];
         if (feeds.length && t < arr.end) {
@@ -2165,6 +2207,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     followCaption(t);
     showThumbs(time);
     showFlip(armed, t);
+    showStop(armed, t);
 
     // background: the cover of what is playing (the incoming one once it has taken over)
     const bgUrl = sc.lead ? covered.get(sc.lead.id) : undefined;
@@ -2284,8 +2327,9 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     if (!open || e.key !== "Escape") return;
     e.preventDefault();
     e.stopPropagation();
-    // (Esc closes the panel first, when it is open over this)
-    if (src.panel.isOpen()) src.panel.close();
+    // (Esc closes what Stop mashup asks first, then the panel, when one of them is open over this)
+    if (stopMenu.classList.contains("on")) closeStopMenu();
+    else if (src.panel.isOpen()) src.panel.close();
     else close();
   };
 
@@ -2300,7 +2344,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     if (!open) return;
     restTimer = setTimeout(() => {
       if (!open) return;
-      if (src.panel.isOpen() || top.querySelector(".btn:hover, .icon:hover") || ctl.matches(":hover") || vol.matches(":hover") || scrub || volDrag !== undefined) return stir();
+      if (src.panel.isOpen() || stopMenu.classList.contains("on") || top.querySelector(".btn:hover, .icon:hover") || ctl.matches(":hover") || vol.matches(":hover") || scrub || volDrag !== undefined) return stir();
       root.classList.add("resting");
     }, REST_AFTER);
   };
@@ -2369,6 +2413,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
     open = false;
     root.classList.remove("open", "resting");
     clearTimeout(restTimer);
+    closeStopMenu();
     if (src.panel.isOpen()) src.panel.close();
     cancelAnimationFrame(raf);
     raf = 0;
@@ -2385,6 +2430,19 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
   switchBtn.addEventListener("click", () => src.switchUp());
   mashBtn.addEventListener("click", () => src.mashup());
   flipBtn.addEventListener("click", () => src.flipMashup());
+  stopMashBtn.addEventListener("click", () => (stopMenu.classList.contains("on") ? closeStopMenu() : openStopMenu()));
+  stayBtn.addEventListener("click", () => {
+    closeStopMenu();
+    src.stopMashup("a");
+  });
+  goBtn.addEventListener("click", () => {
+    closeStopMenu();
+    src.stopMashup("b");
+  });
+  // (a click anywhere else puts what it asked away)
+  root.addEventListener("mousedown", (e) => {
+    if (stopMenu.classList.contains("on") && !stopMenu.contains(e.target as Node) && !stopMashBtn.contains(e.target as Node)) closeStopMenu();
+  });
   shareBtn.addEventListener("click", async () => {
     const code = src.shareMashup();
     if (!code) return;

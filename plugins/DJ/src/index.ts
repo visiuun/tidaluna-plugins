@@ -7,7 +7,7 @@ import { unloads } from "./index.safe";
 import { every, later } from "./later";
 import { persona, settings } from "./config";
 import { dropOwnUpcoming, underNowPlaying } from "./tidal";
-import { applyTransitionOnly, flipMashup, getMash, getStage, getWaveform, getStatus, isActive, markUnloaded, mashup, onStatus, resumeCarried, seekTo, setTransitionOnly, shareCode, skip, startSession, stopSession, switchUp } from "./session";
+import { applyTransitionOnly, flipMashup, getMash, getStage, getWaveform, getStatus, isActive, markUnloaded, mashup, onStatus, resumeCarried, seekTo, setTransitionOnly, shareCode, skip, startSession, stopMashup, stopSession, switchUp } from "./session";
 import { mountStage } from "./stage";
 import { resetVoiceQueue } from "./talk/voice";
 import { stopVoiceEngine } from "./native";
@@ -52,6 +52,7 @@ const stage = mountStage(unloads, {
   switchUp,
   mashup: () => void mashup(),
   flipMashup: () => void flipMashup(),
+  stopMashup: (keep) => void stopMashup(keep),
   shareMashup: shareCode,
   marks: async (id) => {
     const item = (await window.luna.lib!.MediaItem.fromId(id))?.tidalItem as { explicit?: boolean; ai?: boolean; upload?: boolean; audioModes?: string[] } | undefined;

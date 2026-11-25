@@ -5,7 +5,7 @@ import { poweredByTrueTaste, suggestions } from "./brain";
 import { openTrueTastePage } from "./native";
 import { persona, settings, VOICES, type Commentary } from "./config";
 import { readingNow } from "./talk/voice";
-import { ask, flipMashup, getStatus, isActive, mashup, mixerClock, onStatus, setTransitionOnly, shareCode, skip, startSession, stopSession, switchUp, voiceLevel, type Status } from "./session";
+import { ask, flipMashup, getStatus, isActive, mashup, mixerClock, onStatus, setTransitionOnly, shareCode, skip, startSession, stopMashup, stopSession, switchUp, voiceLevel, type Status } from "./session";
 import { copyText } from "./clipboard";
 
 const ROOT = "visiuun-dj";
@@ -110,6 +110,7 @@ const css = `
   .${ROOT}-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0; }
   .${ROOT}-chips:empty { display: none; }
   .${ROOT}-panel .${ROOT}-chips button.pill { height: 32px; padding: 0 14px; font-size: 13px; }
+  .${ROOT}-panel .${ROOT}-chips button.pill.long { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
   .${ROOT}-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px; }
   .${ROOT}-row + .${ROOT}-row, .${ROOT}-reader + .${ROOT}-row { margin-top: 8px; }
   .${ROOT}-row label { color: #fff; font-size: 14px; flex: none; }
@@ -250,10 +251,21 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   shareBtn.type = "button";
   shareBtn.title = "Copies a code for this mashup: pasted into this box, someone else's DJ plays the same mashup";
   shareBtn.style.display = "none";
+  // ...and an end to it, on its next bar line: staying on the song that was playing, or going on with the other one
+  const stopMashBtn = el("button", "pill", "Stop mashup");
+  stopMashBtn.type = "button";
+  stopMashBtn.title = "Ends the mashup on its next bar line: you choose which of the two songs plays on";
+  stopMashBtn.style.display = "none";
+  const stopChoice = el("div", `${ROOT}-chips`);
+  const stayPill = el("button", "pill long");
+  const goPill = el("button", "pill long");
+  stayPill.type = goPill.type = "button";
+  stopChoice.append(stayPill, goPill);
+  stopChoice.style.display = "none";
   mashRow.append(mashInput, mashBtn);
-  // (while one plays: its other version, and its code)
+  // (while one plays: its other version, its code, and its end)
   const mashChips = el("div", `${ROOT}-chips`);
-  mashChips.append(flipBtn, shareBtn);
+  mashChips.append(flipBtn, shareBtn, stopMashBtn);
   // Mashup mode: one mashup after another
   const mashModeRow = el("div", `${ROOT}-mode`);
   mashModeRow.classList.add("flat");
@@ -320,7 +332,7 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   });
   powered.append("Powered by ", poweredLink);
   powered.title = "The DJ picks by what the TrueTaste plugin has measured of your listening: what you play to the end, what you skip, what you gave a thumbs up";
-  panel.append(title, statusLine, said, askHead, askRow, chips, mashHead, mashRow, mashChips, mashModeRow, voiceHead, voiceRow, reader, talkRow, modeRow, actions, powered);
+  panel.append(title, statusLine, said, askHead, askRow, chips, mashHead, mashRow, mashChips, stopChoice, mashModeRow, voiceHead, voiceRow, reader, talkRow, modeRow, actions, powered);
   document.body.appendChild(panel);
 
   let open = false;
@@ -444,6 +456,8 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
     mixTimers.push(setTimeout(finish, Math.max(0, tr.end - now) * 1000 + 60));
   };
 
+  /** The mashup that has been stopped from here (its transition's seq): its Stop button is away while it ends */
+  let stoppedSeq = -1;
   const render = (s: Status) => {
     followMix(s);
     const follow = s.phase !== "off" && s.mode === "follow";
@@ -498,7 +512,11 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
     mashInput.disabled = mashing;
     flipBtn.style.display = mashing && s.transition?.detail?.way === "voice" ? "" : "none";
     shareBtn.style.display = mashing && shareCode() ? "" : "none";
-    mashChips.style.display = flipBtn.style.display === "none" && shareBtn.style.display === "none" ? "none" : "";
+    // (until it has been stopped: then it is ending, and the transition goes with it a moment later)
+    const stoppable = mashing && s.mode === "dj" && s.transition?.seq !== stoppedSeq;
+    stopMashBtn.style.display = stoppable ? "" : "none";
+    if (!stoppable) stopChoice.style.display = "none";
+    mashChips.style.display = flipBtn.style.display === "none" && shareBtn.style.display === "none" && stopMashBtn.style.display === "none" ? "none" : "";
     primary.textContent = s.phase === "off" || follow ? "Start DJ" : "Switch it up";
     primary.disabled = s.phase === "starting" || s.phase === "stopping";
     skipBtn.style.display = on ? "" : "none";
@@ -562,6 +580,27 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   };
   mashBtn.addEventListener("click", mash);
   flipBtn.addEventListener("click", () => void flipMashup());
+  // Stop mashup asks which song to be left with, under it
+  stopMashBtn.addEventListener("click", () => {
+    const songs = getStatus().transition?.songs;
+    if (stopChoice.style.display !== "none" || !songs) return void (stopChoice.style.display = "none");
+    stayPill.textContent = `Stay on ${songs.a}`;
+    stayPill.title = `${songs.a} plays on, whole, and ${songs.b} goes`;
+    goPill.textContent = `Go to ${songs.b}`;
+    goPill.title = `${songs.b} plays on, whole, and ${songs.a} goes`;
+    stopChoice.style.display = "";
+  });
+  const stopIt = (keep: "a" | "b") => {
+    stopChoice.style.display = "none";
+    const seq = getStatus().transition?.seq;
+    void stopMashup(keep).then((done) => {
+      if (!done || seq === undefined) return;
+      stoppedSeq = seq;
+      render(getStatus());
+    });
+  };
+  stayPill.addEventListener("click", () => stopIt("a"));
+  goPill.addEventListener("click", () => stopIt("b"));
   shareBtn.addEventListener("click", async () => {
     const code = shareCode();
     if (!code) return;
