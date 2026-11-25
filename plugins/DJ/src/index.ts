@@ -6,8 +6,8 @@ import { flushLogNow, log } from "./log";
 import { unloads } from "./index.safe";
 import { every, later } from "./later";
 import { persona, settings } from "./config";
-import { underNowPlaying } from "./tidal";
-import { applyTransitionOnly, flipMashup, getMash, getStage, getWaveform, getStatus, markUnloaded, mashup, onStatus, resumeCarried, seekTo, setTransitionOnly, shareCode, skip, startSession, stopSession, switchUp } from "./session";
+import { dropOwnUpcoming, underNowPlaying } from "./tidal";
+import { applyTransitionOnly, flipMashup, getMash, getStage, getWaveform, getStatus, isActive, markUnloaded, mashup, onStatus, resumeCarried, seekTo, setTransitionOnly, shareCode, skip, startSession, stopSession, switchUp } from "./session";
 import { mountStage } from "./stage";
 import { resetVoiceQueue } from "./talk/voice";
 import { stopVoiceEngine } from "./native";
@@ -105,7 +105,16 @@ mountCoverFx(unloads);
 // (see CARRIED OVER in mixer.native.ts). Any other mixer left behind, by an instance whose cleanup never
 // ran, would keep playing with nothing driving it: closed.
 void resumeCarried().then((picked) => {
-  if (!picked) void closeAnyMixer();
+  if (picked) return;
+  void closeAnyMixer();
+  // Tracks a DJ session put in TIDAL's queue and left there when it ended without this page (TIDAL closed or
+  // restarted) come out, once TIDAL has its queue back: with no DJ on they would play before your own queue.
+  // (Transitions only does the same as it picks up a song; a DJ that is on by then has them as its own)
+  later(() => {
+    if (isActive()) return;
+    const left = dropOwnUpcoming();
+    if (left) log(`Took ${left} track${left === 1 ? "" : "s"} the DJ had left in TIDAL's queue out of it`);
+  }, 8000);
 });
 
 // Transitions only stays on across restarts: it's picked up again a moment after TIDAL has loaded, and

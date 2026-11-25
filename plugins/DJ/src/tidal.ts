@@ -4,7 +4,7 @@
 import type { LunaUnload } from "@luna/core";
 import { log, warn } from "./log";
 import { playerShared } from "./native";
-import { indexOfTrack, noteSame, sameTrack } from "./versions";
+import { noteSame, sameTrack } from "./versions";
 
 const lib = () => window.luna.lib!;
 const core = () => window.luna.core!;
@@ -74,15 +74,30 @@ const descriptorOf = (obj: object, key: string) => {
 
 // ------------------ THE DJ'S ENTRIES IN TIDAL'S QUEUE ------------------
 // Every entry of TIDAL's queue has an id of its own (uid). Those the DJ added are noted, so that it only ever
-// takes out or moves its own. Kept in sessionStorage: a reloaded page has the same queue, with the same ids.
+// takes out or moves its own. Kept in localStorage: TIDAL keeps its queue, with the same ids, across reloads and
+// restarts, and the DJ's entries in it are still known to be the DJ's then (an id is made from the moment it was
+// made, so it never comes again for one of yours). Those noted in sessionStorage by 1.14.1 and before are taken in.
 const OWNED_KEY = "visiuun-dj-queue-uids";
+const OWNED_MAX = 2000;
 const ownedUids: Set<string> = (() => {
-  try {
-    return new Set<string>(JSON.parse(sessionStorage.getItem(OWNED_KEY) ?? "[]"));
-  } catch {
-    return new Set<string>();
-  }
+  const read = (store: () => Storage) => {
+    try {
+      const v = JSON.parse(store().getItem(OWNED_KEY) ?? "[]");
+      return Array.isArray(v) ? v.map(String) : [];
+    } catch {
+      return [];
+    }
+  };
+  return new Set<string>([...read(() => localStorage), ...read(() => sessionStorage)]);
 })();
+const saveOwned = () => {
+  try {
+    const all = [...ownedUids];
+    if (all.length > OWNED_MAX) for (const uid of all.slice(0, all.length - OWNED_MAX)) ownedUids.delete(uid);
+    localStorage.setItem(OWNED_KEY, JSON.stringify([...ownedUids]));
+    sessionStorage.removeItem(OWNED_KEY);
+  } catch {}
+};
 /** Notes as the DJ's every entry of TIDAL's queue that wasn't there `before` */
 const noteOwned = (before: Set<string>) => {
   try {
@@ -95,8 +110,52 @@ const noteOwned = (before: Set<string>) => {
     }
     // (entries no longer in the queue are forgotten)
     for (const uid of ownedUids) if (!present.has(uid)) ownedUids.delete(uid);
-    sessionStorage.setItem(OWNED_KEY, JSON.stringify([...ownedUids]));
+    saveOwned();
   } catch {}
+};
+
+/**
+ * Takes every entry the DJ put in TIDAL's queue that is still to come out of it again (the one playing stays, and
+ * goes as TIDAL moves on). Done when the full DJ stops, and by transitions only for any the DJ left behind before
+ * this was done: they sat in front of your own queue, and transitions only then mixed the DJ's picks in instead
+ * of what you had queued. Returns how many were taken out.
+ */
+export const dropOwnUpcoming = (): number => {
+  try {
+    const pq = state().playQueue;
+    const elements: { uid: unknown }[] = pq.elements ?? [];
+    if (!elements.length || !ownedUids.size) return 0;
+    const drop = elements.filter((e, i) => i > pq.currentIndex && ownedUids.has(String(e.uid))).map((e) => String(e.uid));
+    // (by its id, never by where it is: TIDAL never takes out the entry that is playing this way)
+    for (const uid of drop) actions()["playQueue/REMOVE_ELEMENT"]({ uid });
+    const left = new Set((state().playQueue.elements ?? []).map((e: any) => String(e.uid)));
+    for (const uid of drop) if (!left.has(uid)) ownedUids.delete(uid);
+    saveOwned();
+    return drop.length;
+  } catch (err) {
+    warn("Couldn't take the DJ's own tracks out of TIDAL's queue", err);
+    return 0;
+  }
+};
+
+/** How far TIDAL's queue is looked through for the track the mixer moved on to (see reachable) */
+const REACH = 100;
+/**
+ * Where `id` (or another version of it, see versions.ts) is in TIDAL's queue after the current entry, looking past
+ * nothing but entries queued with Play next / Add to queue, which are put in right after the current one (or after
+ * the last of them): what TIDAL's next was when the mixer took it, wherever such entries have been put in front of it
+ * since. -1: it isn't there (it was taken out, or the queue is somewhere else now). The nearest one counts.
+ * `own`: only an entry the DJ put there.
+ */
+const reachable = (elements: { uid: unknown; mediaItemId: unknown; priority?: string }[], current: number, id: string, own: boolean) => {
+  const last = Math.min(elements.length, current + 1 + REACH);
+  for (let i = current + 1; i < last; i++) {
+    const e = elements[i];
+    if ((!own || ownedUids.has(String(e.uid))) && sameTrack(String(e.mediaItemId), id)) return i;
+    // (an entry of what you're playing, the album or the playlist: what comes after it is further on, not next)
+    if (e.priority !== "priority_keep") return -1;
+  }
+  return -1;
 };
 
 /**
@@ -510,30 +569,46 @@ export class TidalLink {
   }
 
   /**
-   * Moves TIDAL to `id` if it's ahead in the queue (or another version of it: see versions.ts). Returns whether TIDAL
-   * is (now) on it. `swapIn`: an entry that is another version of it is made `id` first, where it stands, the way
-   * RealMAX swaps an entry for its best version as TIDAL's own next button moves to it (the DJ's moves go past
-   * RealMAX: actions sent through Luna don't pass other plugins' intercepts), so TIDAL plays what the mixer has
+   * Moves TIDAL on to `id`, the track the mixer has moved on to (or another version of it: see versions.ts), one
+   * step: it is TIDAL's next entry, or comes right after entries you queued in front of it since (see reachable).
+   * Returns whether TIDAL is (now) on it.
+   *
+   * Never by jumping to it: TIDAL deletes every Play next / Add to queue entry a jump goes past (they are only ever
+   * played once), and everything else it goes past counts as played. Moved with TIDAL's move to an entry further on,
+   * the DJ deleted what you had just queued; looked for anywhere in the queue, it went to the same song hundreds of
+   * entries on, past and out of everything in between. An entry further on is brought up to right after the one
+   * playing instead, everything else staying as it is, and TIDAL moves on to it the way its own next button does.
+   *
+   * `swapIn`: an entry that is another version of it is made `id` on the way, the way RealMAX swaps an entry for its
+   * best version as TIDAL's own next button moves to it (the DJ's moves go past RealMAX: actions sent through Luna
+   * don't pass other plugins' intercepts), so TIDAL plays what the mixer has. `own`: only an entry the DJ put there
+   * (the full DJ's tracks are its own; it never takes one of yours for one of them).
    */
-  moveTo(id: string, swapIn = false) {
+  moveTo(id: string, swapIn = false, own = false) {
     if (sameTrack(this.currentId(), id)) return true;
     const pq = state().playQueue;
     const elements = pq.elements ?? [];
-    const index = indexOfTrack(elements.map((e: any) => String(e.mediaItemId)), id, pq.currentIndex + 1);
+    const at = pq.currentIndex + 1;
+    const index = reachable(elements, pq.currentIndex, id, own);
     if (index < 0) return false;
-    this.selfMoveUntil = Date.now() + 2500;
     const entry = elements[index];
-    if (swapIn && String(entry.mediaItemId) !== id) {
+    const swap = swapIn && String(entry.mediaItemId) !== id;
+    if (index > at || swap) {
+      // One change to the queue: the entry up next to the one playing (made `id`, if swapped), nothing else moved
+      // and nothing taken out. TIDAL keeps playing as it was: it is the entry playing that tells it what to play.
       try {
-        const mediaItemId = typeof entry.mediaItemId === "number" ? Number(id) : id;
-        actions()["playQueue/RESET"]({ ...pq, elements: elements.map((e: any, i: number) => (i === index ? { ...e, mediaItemId } : e)) });
-        noteSame(String(entry.mediaItemId), id);
+        const moved = swap ? { ...entry, mediaItemId: typeof entry.mediaItemId === "number" ? Number(id) : id } : entry;
+        actions()["playQueue/RESET"]({ ...pq, elements: [...elements.slice(0, at), moved, ...elements.slice(at, index), ...elements.slice(index + 1)] });
+        if (swap) noteSame(String(entry.mediaItemId), id);
       } catch (err) {
-        warn("Couldn't put the version the mixer has in TIDAL's queue", err);
+        warn(swap ? "Couldn't put the version the mixer has in TIDAL's queue" : "Couldn't bring the next track up in TIDAL's queue", err);
       }
+      // (not next after all: rather not move TIDAL than move it past what you queued)
+      const now = state().playQueue;
+      if (String(now.elements?.[now.currentIndex + 1]?.uid) !== String(entry.uid)) return false;
     }
-    if (index === pq.currentIndex + 1) actions()["playQueue/MOVE_NEXT"]();
-    else actions()["playQueue/MOVE_TO"](index);
+    this.selfMoveUntil = Date.now() + 2500;
+    actions()["playQueue/MOVE_NEXT"]();
     return true;
   }
 

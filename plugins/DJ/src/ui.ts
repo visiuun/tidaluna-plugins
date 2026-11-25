@@ -453,7 +453,7 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
     wrap.dataset.dj = state;
     panel.dataset.dj = state;
     for (const c of document.querySelectorAll<HTMLElement>(`.${ROOT}-card[data-instance="${instance}"]`)) renderCard(c, s);
-    button.title = s.phase === "off" ? "Start the DJ" : follow ? "Transitions only is on: what you play is mixed together. Click to start the DJ" : s.phase === "starting" ? "The DJ is getting ready" : "DJ: switch it up";
+    button.title = s.phase === "off" ? "Start the DJ" : follow ? "Transitions only is on: what you play is mixed together. Click for the DJ panel (Start DJ is there)" : s.phase === "starting" ? "The DJ is getting ready" : "DJ: switch it up";
     more.style.display = "";
     powered.classList.toggle("on", poweredByTrueTaste() && !follow);
     const p = persona();
@@ -519,6 +519,11 @@ export const mountUi = (unloads: Set<LunaUnload>, openStage: () => void) => {
   };
   button.addEventListener("click", (e) => {
     e.stopPropagation();
+    // With transitions only on (the button reads MIX) a click opens the panel, whose Start DJ starts the DJ. The
+    // button is right next to TIDAL's queue button: a click meant for that one started the full DJ, which put its
+    // own sets in front of the queue you were listening to
+    const s = getStatus();
+    if (s.phase !== "off" && s.mode === "follow") return setOpen(!open);
     act();
   });
   button.addEventListener("contextmenu", (e) => {

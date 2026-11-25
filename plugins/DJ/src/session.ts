@@ -31,7 +31,7 @@ import { persona, settings } from "./config";
 import { log, notify, warn } from "./log";
 import { lineFor, mashupLine, stockLines, type Context, type GenericKind, type Here, type Moment } from "./talk/script";
 import { prepareStock, reread, speak, stockLine, voiceState } from "./talk/voice";
-import { playTrackAt, TidalLink } from "./tidal";
+import { dropOwnUpcoming, playTrackAt, TidalLink } from "./tidal";
 import { nativeReady } from "./access";
 import { later } from "./later";
 import { bestVersionWithin, indexOfTrack, lookAhead, playsBest, realMaxOn, sameTrack, versionAmong } from "./versions";
@@ -651,6 +651,10 @@ class Session {
       if (this.follow) {
         setStatus({ phase: "playing", mode: "follow", busy: undefined, segment: FOLLOW_SEGMENT.title });
         log(`Transitions only: picked up ${track.artists[0]?.name} - ${track.title}`);
+        // Tracks the full DJ put in TIDAL's queue and left there (before 1.14.2 it left what it hadn't played when it
+        // stopped) come out: with the DJ off they are nobody's, and they came before your own queue
+        const left = dropOwnUpcoming();
+        if (left) log(`Transitions only: took ${left} track${left === 1 ? "" : "s"} the DJ had left in TIDAL's queue out of it, in front of yours`);
         return true;
       }
       markSession();
@@ -1471,7 +1475,7 @@ class Session {
       // The mixer moved on and TIDAL hasn't followed yet. (Transitions only: an entry of your queue that is another
       // version of the track the mixer has, RealMAX's best version of it, is made that version on the way, as
       // RealMAX would have)
-      if (!this.link.moveTo(want, this.follow && realMaxOn())) {
+      if (!this.link.moveTo(want, this.follow && realMaxOn(), !this.follow)) {
         // (unless TIDAL is on another version of it after all, one that wasn't known for one yet)
         if ((await versionAmong(tid, [want], 1500)) === want) return;
         if (this.stopped || this.current?.item.track.id !== want) return;
@@ -2744,6 +2748,12 @@ class Session {
     }
     this.link.release();
     this.link.restoreModes();
+    // What the DJ put in TIDAL's queue and didn't get to goes with it: after the song that's on, TIDAL goes on with
+    // your own queue, as you had it. (Left there, it was played before your queue, by TIDAL or by transitions only)
+    if (!this.follow) {
+      const left = dropOwnUpcoming();
+      if (left) log(`Took the DJ's ${left} remaining track${left === 1 ? "" : "s"} out of TIDAL's queue`);
+    }
     // Closing the mixer's process hands back every byte of audio it held, and makes sure nothing can
     // keep sounding under TIDAL's own player
     await mixer.close();
