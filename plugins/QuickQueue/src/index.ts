@@ -1,4 +1,4 @@
-import { observe, PlayState, redux, safeTimeout, StyleTag } from "@luna/lib";
+import { MediaItem, observe, redux, safeTimeout, StyleTag } from "@luna/lib";
 import { trace, unloads } from "./index.safe";
 import { QueueAction, settings } from "./Settings";
 
@@ -101,10 +101,10 @@ function getReactFiber(dom: Element): any {
   return key ? (dom as any)[key] : null;
 }
 
+const ROW = 'div[role="row"], div[class*="tableRow"], div[class*="_tableRow_"], div[data-test="tracklist-row"]';
+
 function extractTrackId(element: HTMLElement): string | number | null {
-  const row = element.closest<HTMLElement>(
-    'div[role="row"], div[class*="tableRow"], div[class*="_tableRow_"], div[data-test="tracklist-row"]'
-  ) || element;
+  const row = element.closest<HTMLElement>(ROW) || element;
 
   let trackId: string | number | null = row.getAttribute("data-track-id") || row.getAttribute("data-id");
 
@@ -144,18 +144,45 @@ function extractTrackId(element: HTMLElement): string | number | null {
   return trackId;
 }
 
-function executeDirectQueue(element: HTMLElement, actionType: QueueAction): void {
+/** Where the row's track list is from (the playlist, the album...), as TIDAL's own menu passes it on with the track */
+function extractContext(element: HTMLElement): { type: any; id?: string } {
+  const row = element.closest<HTMLElement>(ROW) || element;
+  let fiber = getReactFiber(row);
+  for (let depth = 0; fiber && depth < 8; depth++, fiber = fiber.return) {
+    const p = fiber.memoizedProps;
+    if (p && typeof p.contextType === "string" && p.contextType) return p.contextId != null ? { type: p.contextType, id: String(p.contextId) } : { type: p.contextType };
+  }
+  return { type: "UNKNOWN" };
+}
+
+const queueUids = (): string[] => (redux.store.getState().playQueue?.elements ?? []).map((e: { uid: unknown }) => String(e.uid));
+
+/**
+ * The track of this row added to TIDAL's queue the way TIDAL's own Add to queue / Play next does it (the action its menu
+ * sends): a track that isn't loaded yet is loaded first, one that can't be played here isn't added (TIDAL says why),
+ * and TIDAL says "Added to queue". Returns whether it went in.
+ */
+async function executeDirectQueue(element: HTMLElement, actionType: QueueAction): Promise<boolean> {
   const id = extractTrackId(element);
-  if (!id) return;
-
+  if (!id) {
+    trace.warn(`Couldn't tell which track this row is: nothing was added`);
+    return false;
+  }
   const mediaItemIds = [String(id)];
-
   try {
-    // TIDAL's own "Play next" (playQueue/ADD_NEXT, through Luna's PlayState) and "Add to queue" (playQueue/ADD_LAST, the same context)
-    if (actionType === "playNext") PlayState.playNext(mediaItemIds);
-    else redux.actions["playQueue/ADD_LAST"]({ mediaItemIds, context: { type: "UNKNOWN" } });
+    // (TIDAL only queues a track it has loaded: the row's track usually is, being on the page)
+    if (!redux.store.getState().content?.mediaItems?.[String(id)]) await MediaItem.fromId(String(id));
+    const before = new Set(queueUids());
+    const isIn = () => (redux.store.getState().playQueue?.elements ?? []).some((e: { uid: unknown; mediaItemId: unknown }) => !before.has(String(e.uid)) && String(e.mediaItemId) === String(id));
+    redux.actions["playQueue/ADD_MEDIA_ITEMS_TO_QUEUE"]({ mediaItemIds, position: actionType === "playNext" ? "next" : "last", sourceContext: extractContext(element) as any });
+    // (TIDAL adds it there and then, as the action is sent; looked for a moment longer, should that ever change)
+    for (let i = 0; i < 10 && !isIn(); i++) await new Promise((r) => setTimeout(r, 100));
+    const added = isIn();
+    if (!added) trace.warn(`TIDAL didn't add ${id} to the queue`);
+    return added;
   } catch (err) {
     trace.err.withContext(actionType === "playNext" ? "playing a track next" : "adding a track to the queue")(err);
+    return false;
   }
 }
 
@@ -172,20 +199,32 @@ function createQuickQueueButton(flexWrapper: HTMLElement): HTMLElement {
     e.stopPropagation();
   };
 
-  ["pointerdown", "mousedown", "pointerup", "mouseup"].forEach((evt) => {
+  // (dblclick too: two quick clicks here reached the row as a double-click, and TIDAL plays a row's track on that,
+  // straight away and from its list, which puts that list in place of what was queued)
+  ["pointerdown", "mousedown", "pointerup", "mouseup", "dblclick"].forEach((evt) => {
     btn.addEventListener(evt, stopRowEvent);
   });
 
-  const handleAction = (e: MouseEvent, isSecondary: boolean) => {
+  let busy = false;
+  const handleAction = async (e: MouseEvent, isSecondary: boolean) => {
+    // (a second click while the first is under way or its tick shows is one click too many: it would add it twice)
+    if (busy || btn.classList.contains("success")) return;
     let targetAction: QueueAction = settings.defaultAction;
     if (isSecondary) {
       targetAction = settings.defaultAction === "queue" ? "playNext" : "queue";
     }
 
+    busy = true;
+    let added = false;
+    try {
+      added = await executeDirectQueue(flexWrapper, targetAction);
+    } finally {
+      busy = false;
+    }
+    // The tick only when the track is really in the queue (it showed before anything was tried, added or not)
+    if (!added || !btn.isConnected) return;
     btn.classList.add("success");
     btn.innerHTML = ICONS.success;
-
-    executeDirectQueue(flexWrapper, targetAction);
 
     safeTimeout(unloads, () => {
       btn.classList.remove("success");
@@ -198,14 +237,14 @@ function createQuickQueueButton(flexWrapper: HTMLElement): HTMLElement {
     e.stopPropagation();
     e.preventDefault();
     const isShift = settings.secondaryActionOnShift && e.shiftKey;
-    handleAction(e, isShift);
+    void handleAction(e, isShift);
   });
 
   btn.addEventListener("contextmenu", (e: MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
     if (settings.secondaryActionOnRightClick) {
-      handleAction(e, true);
+      void handleAction(e, true);
     }
   });
 
@@ -239,7 +278,8 @@ function refreshAllButtons(): void {
 
 injectStyles();
 
-// Rows already on the page, and every one that is added (Luna's one shared observer, which looks at added elements only)
+// Rows already on the page (Luna's observer only sees what changes after this), and every one that comes after
+scanTrackRows();
 observe<HTMLElement>(unloads, FLEX_WRAPPERS, processRow);
 
 unloads.add(() => {
