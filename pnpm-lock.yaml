@@ -43,6 +43,8 @@ importers:
 
   plugins/DJ: {}
 
+  plugins/ImmersiveBloom: {}
+
   plugins/Optimizer: {}
 
   plugins/QuickQueue: {}
@@ -626,7 +628,7 @@ packages:
     engines: {node: 20 || >=22}
 
   luna@https://codeload.github.com/Inrixia/TidaLuna/tar.gz/refs/heads/master:
-    resolution: {integrity: sha512-VYXEuAsF3FtdbRjIVPeTGKx/kIPwd7NyAMUSngOKWFUIpiBTOJEEkGhLbZiCsqv3CobZ8c2BfPBRoWrVK6Dj/A==, tarball: https://codeload.github.com/Inrixia/TidaLuna/tar.gz/refs/heads/master}
+    resolution: {integrity: sha512-MJcH3KYyYlI6Utvrtne8xJjwbzkaW3S0WAASIQ/shlQYBVBQSrNLn4vn+6Prm1bulWpdHOwvQKFaIw/YjXEQmg==, tarball: https://codeload.github.com/Inrixia/TidaLuna/tar.gz/refs/heads/master}
     version: 1.25.0-beta
 
   math-intrinsics@1.1.0:
