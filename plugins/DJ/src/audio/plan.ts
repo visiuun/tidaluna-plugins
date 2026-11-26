@@ -30,14 +30,15 @@ export type Plan = {
   fadeOutFrom?: number; // seconds after the start when the outgoing track starts to leave
   // Drops
   move?: Move;
-  // Mashups (see mixer.page.js). The two tracks meet `pre` seconds after the start and play together for
-  // `bars1` + `bars2` bars. What has been taken out of them says what one can be (`way`):
-  //   voice: both tracks' voices. One's singer over the other's band, the same way round throughout
-  //          (`bed`: whose band), until the listener turns it round
+  // Mashups (see mixer.page.js). The two tracks meet `pre` seconds after the start; for `bars1` bars (the
+  // build) one is heard over the other, and on the line that ends on the incoming one lands, whole. The
+  // outgoing track's singer may ride on over it for `bars2` bars more. What has been taken out of the two
+  // says what the build can be (`way`):
+  //   voice: both tracks' voices. One's singer over the other's band (`bed`: whose band), until the
+  //          listener turns it round
   //   carry: only the outgoing track's voice (the incoming one has no singer): it goes over the incoming
   //          track, which plays as it is
-  //   layer: nothing (nobody sings). The incoming track plays over the outgoing one's bass for `bars1`
-  //          bars, then the bass changes hands and the outgoing one leaves over `bars2`
+  //   layer: nothing (nobody sings). The incoming track's build plays on top of the outgoing one
   way?: MashWay;
   /** For a voice mashup: whose band plays (a: the outgoing track's, under the incoming one's singer; b: the other way round) */
   bed?: "a" | "b";
@@ -48,6 +49,8 @@ export type Plan = {
   pre?: number;
   bars1?: number;
   bars2?: number;
+  /** A mashup: the incoming track's own bass is held back through the build and arrives with the landing (where it was there all along otherwise) */
+  hold?: boolean;
   /** How loud the incoming track's voice is where it sings (RMS, as in the file): a faint one is brought up */
   voiceLevel?: number;
   /** The two tracks' separated parts, by the names the mixer keeps them under */
@@ -95,11 +98,24 @@ const barAtOrBefore = (a: Analysis, g: Grid, t: number) => {
   return snap(g, best);
 };
 
+/**
+ * Whether bar `i` starts a four-bar phrase: four bars, or eight, or twelve, on from where the section it is in
+ * started (a drop, a break, the drums coming in: see dsp.js). Songs keep count from there, not from their first
+ * bar: a section of fourteen bars, or one bar of nothing before a drop, and every phrase after it is somewhere
+ * else than one count through the whole track has it. Where the track has no such changes, the one count is all
+ * there is.
+ */
+const startsPhrase = (a: Analysis, i: number) => {
+  let from: number | undefined;
+  for (const s of a.sections ?? []) if (s.bar >= 0 && s.bar <= i) from = s.bar;
+  return from !== undefined ? (i - from) % 4 === 0 : (((i - a.phrasePhase) % 4) + 4) % 4 === 0;
+};
+
 /** The line where a four-bar phrase starts, at or before t: where arrangements change, and where a DJ comes in */
 const phraseAtOrBefore = (a: Analysis, g: Grid, t: number) => {
   let best: number | undefined;
   a.bars.forEach((bar, i) => {
-    if (bar <= t + 0.02 && ((i - a.phrasePhase) % 4 + 4) % 4 === 0) best = bar;
+    if (bar <= t + 0.02 && startsPhrase(a, i)) best = bar;
   });
   const plain = barAtOrBefore(a, g, t);
   // Only when a phrase line is close by: otherwise the nearest bar line keeps the blend its intended length
@@ -179,7 +195,7 @@ const barAtOrAfter = (a: Analysis, g: Grid, t: number) => {
 /** The next four-bar phrase line from t on, if one is coming within two bars; else the next bar line */
 const phraseAtOrAfter = (a: Analysis, g: Grid, t: number) => {
   const bar = barAtOrAfter(a, g, t);
-  const i = a.bars.findIndex((x, k) => x >= t - 0.02 && ((k - a.phrasePhase) % 4 + 4) % 4 === 0);
+  const i = a.bars.findIndex((x, k) => x >= t - 0.02 && startsPhrase(a, k));
   return i >= 0 && a.bars[i] - bar <= 8 * g.period + 0.05 ? Math.max(bar, snap(g, a.bars[i])) : bar;
 };
 

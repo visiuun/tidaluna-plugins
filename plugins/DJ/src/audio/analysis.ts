@@ -4,7 +4,9 @@ import { readDoc, writeDoc } from "../native";
 import { warn } from "../log";
 import { putOff } from "../later";
 
-export type Grid = { period: number; phase: number; count: number; resid: number; inlierShare: number; contrast: number; bpm: number };
+export type Grid = { period: number; phase: number; count: number; resid: number; inlierShare: number; contrast: number; bpm: number; /** Its beats are on the kick drum itself, to the millisecond (not just on whatever attacks: a track without a kick on every beat) */ onKick?: boolean };
+/** Where a track changes (a drop lands, a break starts): when, on which bar (-1: not on a bar line), how much changes there and how far the bass rises or falls (dB) */
+export type Section = { t: number; bar: number; change: number; rise: number };
 export type Analysis = {
   v: number;
   duration: number;
@@ -22,6 +24,8 @@ export type Analysis = {
   phrasePhase: number;
   bars: number[]; // bar start times
   barEnergy: number[]; // dB
+  /** Where it changes, in the order they come (see dsp.js): what bars and phrases are counted from, and where a mashup lands */
+  sections: Section[];
   fullLevel: number;
   firstBeat: number; // first bar line with sound
   introEnd: number;
@@ -33,7 +37,7 @@ export type Analysis = {
   /** How far the track is from concert pitch, in cents (0 where its notes don't say) */
   tuning: number;
 };
-const VERSION = 9;
+const VERSION = 10;
 
 // ------------------ CACHE ------------------
 let cache: Record<string, Analysis> | undefined;
@@ -62,7 +66,7 @@ const round = (n: number, d = 4) => (Number.isFinite(n) ? Math.round(n * 10 ** d
 const compact = (r: any): Analysis => {
   const grid = (g: any): Grid | null =>
     g
-      ? { period: round(g.period, 7), phase: round(g.phase, 5), count: g.count, resid: round(g.resid), inlierShare: round(g.inlierShare, 2), contrast: round(g.contrast, 2), bpm: round(g.bpm, 3) }
+      ? { period: round(g.period, 7), phase: round(g.phase, 5), count: g.count, resid: round(g.resid), inlierShare: round(g.inlierShare, 2), contrast: round(g.contrast, 2), bpm: round(g.bpm, 3), onKick: !!g.onKick }
       : null;
   return {
     v: VERSION,
@@ -81,6 +85,7 @@ const compact = (r: any): Analysis => {
     phrasePhase: r.phrasePhase,
     bars: Array.from(r.bars as number[], (t) => round(t, 3)),
     barEnergy: Array.from(r.barEnergy as number[], (t) => round(t, 1)),
+    sections: Array.from((r.sections ?? []) as Section[], (s) => ({ t: round(s.t, 4), bar: s.bar, change: round(s.change, 1), rise: round(s.rise, 1) })),
     fullLevel: round(r.fullLevel, 1),
     firstBeat: round(r.firstBeat, 4),
     introEnd: round(r.introEnd, 3),

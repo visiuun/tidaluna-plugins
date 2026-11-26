@@ -254,11 +254,12 @@ const frameAt = (tr, t) => {
   let p;
   if (tr.kind === "mashup") {
     // In with the other song's voice, to half and half by the time it sings; there for as long as the
-    // two play together (swaying a little); over to the new cover as the bands change over
+    // build lasts (swaying a little); over to the new cover as the other song lands
     const mid = tr.mid > tr.swap ? tr.mid : tr.swap + (tr.end - tr.swap) * 0.7;
     if (t < tr.swap) p = 0.5 * smooth((t - tr.start) / Math.max(0.05, tr.swap - tr.start));
     else if (t < mid) p = 0.5 + 0.035 * Math.sin((t - tr.swap) * 0.45) * Math.min(1, (t - tr.swap) / 2) * Math.min(1, (mid - t) / 2);
-    else p = 0.5 + 0.5 * smooth((t - mid) / Math.max(0.05, tr.end - mid));
+    // (with the other song's drop: over a second and a half, whatever is still to come of it after that)
+    else p = 0.5 + 0.5 * smooth((t - mid) / Math.max(0.05, Math.min(1.6, tr.end - mid)));
   } else if (tr.kind === "drop" || tr.kind === "cut") {
     // Half the way is the build-up to the moment the new track lands, the other half its arrival
     const lead = Math.max(0.05, tr.swap - tr.start);

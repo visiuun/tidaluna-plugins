@@ -867,7 +867,8 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
       shareBtn.style.display = share ? "" : "none";
     }
     const arr = tr?.kind === "mashup" ? mashOf(tr) : undefined;
-    const on = !!arr?.flippable && t >= arr.from && t < arr.end - (arr.per ?? 8) * (arr.bar ?? 2) && src.status().mode === "dj";
+    // (the mixer says until when: while the build is not yet being wound up into the landing)
+    const on = !!arr?.flippable && t >= arr.from && t < (arr.land ?? arr.end) && src.status().mode === "dj";
     // (and the button that asks for a mashup is away for as long as one is coming or playing, other version or not)
     const busy = tr?.kind === "mashup" && t < tr.end;
     if (on === flipShown && busy === mashBusyShown) return;
@@ -1235,7 +1236,7 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
           way === "carry" || (way === "voice" && d?.bed === "b")
             ? `${poss(sc.a.track.title)} voice over ${poss(sc.b.track.title)} band`
             : way === "layer"
-              ? `${sc.b.track.title} over ${poss(sc.a.track.title)} bass, then the bass swaps`
+              ? `${poss(sc.b.track.title)} build on top of ${sc.a.track.title}, then it lands`
               : `${poss(sc.b.track.title)} voice over ${poss(sc.a.track.title)} band`,
       });
     } else cards.push({ big: [KIND[tr.kind]], small: tr.kind === "drop" ? (d?.move === "brake" ? "the old one brakes to a stop" : d?.move === "sweep" ? "the old one is swept away" : "the new one lands on the one") : tr.kind === "cut" ? "straight over, on the beat" : "one fades into the other" });
@@ -1827,12 +1828,15 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
               g.stroke();
             }
             g.restore();
-            marks.push({ at: u0, label: arr.halves === "voice" ? "the same version to the end (the voices are still being taken out)" : "decided as it comes up" });
+            marks.push({ at: u0, label: "decided as it comes up" });
           }
         }
         // (ended early: stopped as asked, with the one song left, or cut short where the voices fell behind)
         if (mash?.cut && !mash.stopped) marks.push({ at: mash.cut, label: "cut short: the voices weren't ready", strong: true });
-        marks.push({ at: arr.end, label: mash?.stopped ? `stopped: ${short(mash.stopped === "a" ? sc.a! : sc.b!)} on its own` : `${short(sc.b!)} on its own`, strong: !!mash?.stopped });
+        // (the line the other song lands on, which is what the build is for; and where it is on its own, if a singer rides on past that)
+        const landed = arr.land !== undefined && !mash?.stopped && arr.land <= arr.end + 0.05;
+        if (landed) marks.push({ at: arr.land!, label: `${short(sc.b!)} lands`, strong: t >= arr.land! - 4 * (arr.bar ?? 2) && t < arr.land! + 2 * (arr.bar ?? 2) });
+        if (mash?.stopped || !landed || arr.end > arr.land! + 0.5) marks.push({ at: arr.end, label: mash?.stopped ? `stopped: ${short(mash.stopped === "a" ? sc.a! : sc.b!)} on its own` : `${short(sc.b!)} on its own`, strong: !!mash?.stopped });
         // how the taking out of the voices keeps up
         const feeds = mash?.feeds ?? [];
         if (feeds.length && t < arr.end) {
@@ -1844,8 +1848,8 @@ export const mountStage = (unloads: Set<LunaUnload>, src: StageSource) => {
           g.fillText(text, W - 4, tempoH ? 14 : lanesTop - 30);
         }
       } else if (mashing) {
-        marks.push({ at: tr!.start, label: d?.way === "carry" ? "Voice over the other band" : d?.way === "layer" ? "Layered over the bass" : "Voice over the band", strong: true });
-        if (tr!.mid) marks.push({ at: tr!.mid, label: "Takeover" });
+        marks.push({ at: tr!.start, label: d?.way === "carry" ? "Voice over the other band" : d?.way === "layer" ? "Build on top" : "Voice over the band", strong: true });
+        if (tr!.mid) marks.push({ at: tr!.mid, label: "Lands" });
       } else if (tr!.kind === "blend") {
         marks.push({ at: tr!.start, label: d?.style === "filter" ? "Mix in · filtered" : "Mix in" });
         // (a track that comes in without a bass, a long intro, takes it over only as the other one leaves: that is no

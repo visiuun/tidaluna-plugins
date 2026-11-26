@@ -2,7 +2,7 @@
 // it and mirrors what the session needs to know without asking: the audio clock and where each deck is.
 import dspSource from "file://./dsp.js";
 import pageSource from "file://./mixer.page.js";
-import { cachedAnalysis, storeAnalysis, type Analysis } from "./analysis";
+import { cachedAnalysis, storeAnalysis, type Analysis, type Section } from "./analysis";
 import { mixerAdopt, mixerCall, mixerCarried, mixerCarry, mixerClose, mixerOpen, mixerTrackUrl } from "../native";
 import type { Move, Plan } from "./plan";
 import { jingleStyle } from "../config";
@@ -18,7 +18,23 @@ export type Clip = { key: string; pcm: string; rate: number; duration: number };
 type MapPoint = { t: number; pos: number; rate: number };
 
 /** One track's side of a mashup: its beat, a bar line, which of every four bars starts a phrase, and the stretch of it that may be used (seconds) */
-export type MashSide = { period: number; bar0: number; phrase: number; body: number; from: number; last: number; /** How many of the next phrase lines it may start on (4 if not given) */ starts?: number; /** The most bars the mashup may last */ most?: number; /** Every how many bars a phrase starts (4 if not given; a track read at double or half time has them elsewhere) */ every?: number };
+export type MashSide = {
+  period: number;
+  bar0: number;
+  phrase: number;
+  body: number;
+  from: number;
+  last: number;
+  /** Where the track changes (see dsp.js): a mashup lands on these */
+  sections?: Section[];
+  /** Its grid is on its kick drum, to the millisecond */
+  kick?: boolean;
+  /** The playing song: the name its voice is kept under as far as it has been taken out, and how far ahead the mashup may land (seconds) */
+  stems?: string;
+  horizon?: number;
+  /** (a track read at double or half time) */
+  every?: number;
+};
 /** How two tracks go together (see mashMatch in mixer.page.js) */
 export type MashFit = {
   ok: boolean;
@@ -30,9 +46,19 @@ export type MashFit = {
   /** The same for the other eleven keys the second track could have been in: the middle one, and how many score lower */
   median: number;
   beaten: number;
-  /** How alike the notes the two are made of are over the whole of it (-1 to 1: the same key or its relative is 0.6 and up), and the most any other key would have made of them */
+  /** How alike the notes the two are made of are where they meet (-1 to 1: the same key or its relative is 0.8 in the middle), over the build alone, and the most any other key would have made of them */
   notes: number;
+  notesBuild: number;
   notesElsewhere: number;
+  /** ...and over the eight bars after the landing, where the playing song's singer may ride on */
+  rideNotes: number;
+  /** What it lands on in each song (a: the playing one's own drop, the start of one of its sections, a phrase line or half of one; b: the other's drop, section, or where its intro ends), how far the other's bass rises there (dB), and how much of the playing song's build is sung (where its voice has been taken out) */
+  at: { a: "drop" | "section" | "phrase" | "half"; b: "drop" | "section" | "body" | "phrase"; lift: number; sung?: number };
+  /** Where it lands in each song (seconds into it) */
+  landA: number;
+  landB: number;
+  /** Both tracks' grids are on their kicks: nothing was read off the drums */
+  onKicks: boolean;
   /** How much of each song's notes fall outside the other song's scale there (0-1): the second track's, then the first's */
   outside: [number, number];
   /** In how many of the places looked at the two songs' drums could be read against each other */
@@ -48,6 +74,7 @@ export type MashFit = {
   off: number;
   /** How far its singer is moved on its own to be in key, the song itself staying where it is (cents; 0: not) */
   voice: number;
+  /** The build, and how many bars the playing song's singer may ride on for after the landing (0: none) */
   bars1: number;
   bars2: number;
   aPos: number;
@@ -80,6 +107,7 @@ const placeholder = (duration: number): Analysis => ({
   phrasePhase: 0,
   bars: [],
   barEnergy: [],
+  sections: [],
   fullLevel: 0,
   firstBeat: 0,
   introEnd: 0,
@@ -145,7 +173,7 @@ export class Deck {
  * mashup: `top` its voice, `low` its band; a layered one: `top` all but its bass, `low` its bass), and who sang there */
 export type MashBlock = { from: number; to: number; a: { top: number; low: number }; b: { top: number; low: number }; what: string; sings?: { a: boolean; b: boolean }; cut?: boolean; /** it starts where the listener turned the mashup round */ turned?: boolean };
 /** `bed`: whose band plays (a: the song that was playing, with the other's singer over it; b: the other way round); `flippable`: it can be turned round right now */
-export type MashArrangement = { halves: "voice" | "bass"; from: number; end: number; planned: number; per?: number; bar?: number; bed?: "a" | "b"; flippable?: boolean; blocks: MashBlock[] };
+export type MashArrangement = { halves: "voice" | "bass"; from: number; end: number; /** the line the other song lands on (the end of the build) */ land?: number; planned: number; per?: number; bar?: number; bed?: "a" | "b"; flippable?: boolean; blocks: MashBlock[] };
 /** How loud a track is, `rate` times a second: its peaks and its average, 0-255 */
 export type Wave = { rate: number; peak: number[]; rms: number[] };
 
@@ -352,7 +380,7 @@ export class Mixer {
   }
   /** Turns the mashup that is playing round (the other song's band, the other singer), from the next bar line */
   mashFlip() {
-    return this.call<{ ok: boolean; bed?: "a" | "b"; at?: number; /** why not: only one version (one), not started (early), in its way out (late), still turning from the last time (busy), no mashup (none) */ why?: "one" | "early" | "late" | "busy" | "none" }>("mashFlip", {});
+    return this.call<{ ok: boolean; bed?: "a" | "b"; at?: number; /** why not: only one version (one), not started (early), about to land (late), still turning from the last time (busy), no mashup (none) */ why?: "one" | "early" | "late" | "busy" | "none" }>("mashFlip", {});
   }
   /**
    * Ends the mashup that is playing on its next bar line two beats away or more, with one of its songs left whole: "a"
